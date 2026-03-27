@@ -1,0 +1,44 @@
+# Claude Code + Squire
+
+Use Squire for short validation tasks that are easier to trust in a fresh disposable runtime than on the local machine.
+
+Prefer local execution for tiny trivial checks such as `ls`, simple file reads, or quick one-off commands.
+
+Use Squire when the task is:
+
+- environment-sensitive
+- dependency-sensitive
+- compile-target-sensitive
+- short but heavy
+- annoying or fragile locally
+- better with structured JSON output
+
+Prefer these commands:
+
+- `squire verify` for fresh Linux runtime checks across targets
+- `squire deps` for clean Python or Node install validation
+- `squire compile` for Go or Rust target compilation checks
+- `squire test` for short clean test runs
+- `squire lint` for clean lint and static-analysis runs
+- `squire sql` for ephemeral SQLite or Postgres validation
+- `squire data` for heavier pandas/polars/pyarrow-style jobs
+- `squire media` for ffmpeg/media transforms
+- `squire browser` for short headless browser verification
+- `squire audit` for dependency, secret, or static security checks
+- `squire build` for packaging/build sanity checks
+- `squire solve` for Z3 or MiniZinc tasks
+
+Do not use Squire for long-running workflows, persistent environments, arbitrary remote shells, or unrestricted internet tasks unless the command explicitly supports that behavior.
+
+Prefer `--json` when another tool or agent will read the result.
+
+Examples:
+
+```bash
+squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
+squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
+squire data --script transform.py --input big.csv --json
+squire media --script clip.py --input video.mp4 --json
+```

@@ -1,0 +1,39 @@
+# Codex + Squire
+
+Squire is a CLI-first way to run short disposable validation jobs in clean remote runtimes.
+
+Prefer local execution for tiny commands and normal interactive development.
+
+Prefer Squire when the task is:
+
+- sensitive to OS or runtime differences
+- sensitive to dependency resolution
+- sensitive to compile target or toolchain setup
+- short but heavy enough to disrupt the local machine
+- easier to consume as structured JSON
+
+Command guidance:
+
+- use `squire verify` for clean Linux runtime checks
+- use `squire deps` for fresh dependency-install validation
+- use `squire compile` for Go or Rust compile checks
+- use `squire test` or `squire lint` for clean validation loops
+- use `squire sql` for ephemeral DB validation
+- use `squire data` or `squire media` for heavier disposable jobs
+- use `squire browser` for constrained headless browser checks
+- use `squire audit`, `squire build`, and `squire solve` when those exact task shapes fit
+
+Do not treat Squire as a general remote shell or a persistent environment.
+
+Prefer `--json` for agent-driven workflows.
+
+Examples:
+
+```bash
+squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
+squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
+squire data --script transform.py --input big.csv --json
+squire media --script clip.py --input video.mp4 --json
+```

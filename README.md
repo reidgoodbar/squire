@@ -20,6 +20,19 @@ Standalone repo for the Squire command-line client.
 - runs `solve` for Z3 and MiniZinc jobs
 - runs `data` and `media` jobs in isolated fresh runtimes
 
+## Agent Workflows
+
+Squire is intentionally CLI-first. It works well in terminal-first agent workflows such as Claude Code, Codex, and similar coding agents that need clean disposable runtimes without adding a new protocol layer.
+
+Copy the example instruction files from `docs/agent/` into your own repo or environment and trim them to fit your workflow:
+
+- `docs/agent/CLAUDE.md.example`
+- `docs/agent/SKILLS.md.example`
+- `docs/agent/CODEX.md.example`
+- `docs/agent/squire-usage-guidelines.md`
+
+Use Squire when a task is environment-sensitive, dependency-sensitive, compile-target-sensitive, short but heavy, or easier to reason about with structured JSON output. Prefer local execution for tiny trivial checks.
+
 ## Default API
 
 The published CLI defaults to:

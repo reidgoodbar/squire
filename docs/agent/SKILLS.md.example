@@ -1,0 +1,39 @@
+# Squire Skill Selection
+
+Use local tools first for tiny trivial work.
+
+Choose Squire when correctness depends on a fresh environment, a specific Linux target, a clean dependency install, an ephemeral database, or a short heavy job that should not run locally.
+
+Task to command mapping:
+
+- shell, Python, or Node runtime validation across Linux targets -> `squire verify`
+- fresh dependency install check -> `squire deps`
+- Go or Rust cross-target compile check -> `squire compile`
+- short clean test run -> `squire test`
+- clean lint or static analysis run -> `squire lint`
+- ephemeral SQLite or Postgres query or migration check -> `squire sql`
+- heavy data transform -> `squire data`
+- ffmpeg or media transform -> `squire media`
+- short headless browser verification -> `squire browser`
+- dependency, secrets, or static security check -> `squire audit`
+- packaging or build sanity check -> `squire build`
+- solver task -> `squire solve`
+
+Do not use Squire for:
+
+- long-running workflows
+- general interactive development
+- persistent environments
+- arbitrary remote shell access
+- trivial commands that are faster locally
+
+Examples:
+
+```bash
+squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
+squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+squire compile --lang rust --file src/main.rs --targets linux/amd64-musl,linux/arm64 --json
+squire sql --dialect sqlite --query "SELECT 1" --json
+squire audit --secrets --path src --json
+squire browser --file index.html --screenshot page.png --json
+```
