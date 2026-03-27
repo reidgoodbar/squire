@@ -47,8 +47,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runLogin(ctx, args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(ctx, args[1:], stdin, stdout, stderr)
+	case "deps":
+		return runDeps(ctx, args[1:], stdout, stderr)
+	case "sql":
+		return runSQL(ctx, args[1:], stdout, stderr)
+	case "data":
+		return runMode(ctx, args[1:], stdin, stdout, stderr, "data")
+	case "media":
+		return runMode(ctx, args[1:], stdin, stdout, stderr, "media")
 	case "scale":
-		return runScale(ctx, args[1:], stdin, stdout, stderr)
+		return runScaleAlias(ctx, args[1:], stdin, stdout, stderr)
 	case "whoami":
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
 	case "logout":
@@ -254,17 +262,263 @@ func runVerify(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	return exitOK
 }
 
-func runScale(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("scale", flag.ContinueOnError)
+func runDeps(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("deps", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mode := fs.String("mode", "", "Scale mode: data or media")
+	lang := fs.String("lang", "", "Dependency language: python or node")
+	filePath := fs.String("file", "", "Path to the dependency manifest to upload")
+	targets := fs.String("targets", "", "Comma-separated dependency targets")
+	timeout := fs.Int("timeout", 45, "Dependency install timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printDepsHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" || *filePath == "" {
+		fmt.Fprintln(stderr, "--lang and --file are required")
+		return exitUsage
+	}
+
+	manifest, err := os.ReadFile(*filePath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.DepsResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/deps", protocol.DepsRequest{
+		Language:       *lang,
+		Targets:        splitCSV(*targets),
+		Manifest:       string(manifest),
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms)\n", result.Target, result.Status, result.RuntimeMS)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sql", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dialect := fs.String("dialect", "", "SQL dialect: sqlite or postgres-16")
+	filePath := fs.String("file", "", "Path to a SQL file containing statements to apply")
+	schemaPath := fs.String("schema", "", "Path to a schema file to apply before the query")
+	query := fs.String("query", "", "Inline SQL query to execute after schema setup")
+	queryFile := fs.String("query-file", "", "Path to a query file to execute after schema setup")
+	timeout := fs.Int("timeout", 30, "SQL timeout in seconds")
+	explain := fs.Bool("explain", false, "Request an execution plan when the dialect supports it")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printSQLHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *dialect == "" {
+		fmt.Fprintln(stderr, "--dialect is required")
+		return exitUsage
+	}
+	if *filePath == "" && *schemaPath == "" && *query == "" && *queryFile == "" {
+		fmt.Fprintln(stderr, "provide --file, --schema, --query, or --query-file")
+		return exitUsage
+	}
+	if *filePath != "" && (*schemaPath != "" || *query != "" || *queryFile != "") {
+		fmt.Fprintln(stderr, "--file cannot be combined with --schema, --query, or --query-file")
+		return exitUsage
+	}
+
+	sqlText, err := readOptionalFile(*filePath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	schemaText, err := readOptionalFile(*schemaPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	queryText := *query
+	if *queryFile != "" {
+		if queryText != "" {
+			fmt.Fprintln(stderr, "--query and --query-file are mutually exclusive")
+			return exitUsage
+		}
+		queryText, err = readOptionalFile(*queryFile)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.SQLResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/sql", protocol.SQLRequest{
+		Dialect:        *dialect,
+		SQL:            sqlText,
+		Schema:         schemaText,
+		Query:          queryText,
+		Explain:        *explain,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Dialect, resp.RuntimeMS)
+		if len(resp.Columns) > 0 {
+			fmt.Fprintf(stdout, "columns: %s\n", strings.Join(resp.Columns, ", "))
+		}
+		if resp.RowCount > 0 {
+			fmt.Fprintf(stdout, "rows: %d\n", resp.RowCount)
+		}
+		if resp.StatementsApplied > 0 {
+			fmt.Fprintf(stdout, "statements applied: %d\n", resp.StatementsApplied)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	switch resp.Status {
+	case "ok":
+		return exitOK
+	case "timeout":
+		return exitTimeout
+	default:
+		return exitRemoteError
+	}
+}
+
+func runMode(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, mode string) int {
+	fs := flag.NewFlagSet(mode, flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	scriptPath := fs.String("script", "", "Path to the Python script to execute")
 	inputPath := fs.String("input", "", "Path to an input file for multipart upload")
 	useStdin := fs.Bool("stdin", false, "Read small input payload from stdin and send JSON")
-	timeout := fs.Int("timeout", 120, "Scale timeout in seconds")
+	timeout := fs.Int("timeout", 120, "Job timeout in seconds")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
-	fs.Usage = func() { printScaleHelp(fs.Output()) }
+	fs.Usage = func() {
+		if mode == "media" {
+			printMediaHelp(fs.Output())
+			return
+		}
+		printDataHelp(fs.Output())
+	}
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *scriptPath == "" {
+		fmt.Fprintln(stderr, "--script is required")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.ScaleResponse
+
+	if *useStdin {
+		stdinLimit := scaleStdinMaxBytes()
+		data, err := io.ReadAll(io.LimitReader(stdin, stdinLimit+1))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		if int64(len(data)) > stdinLimit {
+			fmt.Fprintf(stderr, "stdin payload exceeds %d bytes; use --input for large files\n", stdinLimit)
+			return exitUsage
+		}
+		scriptData, err := os.ReadFile(*scriptPath)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		err = client.DoJSON(ctx, http.MethodPost, "/v1/"+mode, protocol.ScaleJSONRequest{
+			Mode:           mode,
+			ScriptName:     filepath.Base(*scriptPath),
+			Script:         string(scriptData),
+			StdinText:      string(data),
+			TimeoutSeconds: *timeout,
+		}, &resp)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+	} else {
+		req, err := newScaleMultipartRequest(ctx, client.BaseURL+"/v1/"+mode, cfg.SessionToken, mode, *scriptPath, *inputPath, *timeout)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		if err := client.Do(ctx, req, &resp); err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+	}
+
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Mode, resp.RuntimeMS)
+		for _, artifact := range resp.Artifacts {
+			fmt.Fprintf(stdout, "- artifact: %s (%d bytes)\n", artifact.Name, artifact.SizeBytes)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	switch resp.Status {
+	case "ok":
+		return exitOK
+	case "timeout":
+		return exitTimeout
+	default:
+		return exitRemoteError
+	}
+}
+
+func runScaleAlias(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("scale", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	mode := fs.String("mode", "", "Compatibility alias for data or media")
+	scriptPath := fs.String("script", "", "Path to the Python script to execute")
+	inputPath := fs.String("input", "", "Path to an input file for multipart upload")
+	useStdin := fs.Bool("stdin", false, "Read small input payload from stdin and send JSON")
+	timeout := fs.Int("timeout", 120, "Job timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printScaleAliasHelp(fs.Output()) }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -297,7 +551,7 @@ func runScale(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 			fmt.Fprintln(stderr, err)
 			return exitUsage
 		}
-		err = client.DoJSON(ctx, http.MethodPost, "/v1/scale", protocol.ScaleJSONRequest{
+		err = client.DoJSON(ctx, http.MethodPost, "/v1/"+*mode, protocol.ScaleJSONRequest{
 			Mode:           *mode,
 			ScriptName:     filepath.Base(*scriptPath),
 			Script:         string(scriptData),
@@ -309,7 +563,7 @@ func runScale(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 			return exitRemoteError
 		}
 	} else {
-		req, err := newScaleMultipartRequest(ctx, client.BaseURL+"/v1/scale", cfg.SessionToken, *mode, *scriptPath, *inputPath, *timeout)
+		req, err := newScaleMultipartRequest(ctx, client.BaseURL+"/v1/"+*mode, cfg.SessionToken, *mode, *scriptPath, *inputPath, *timeout)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return exitUsage
@@ -319,17 +573,10 @@ func runScale(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 			return exitRemoteError
 		}
 	}
-
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
 		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Mode, resp.RuntimeMS)
-		for _, artifact := range resp.Artifacts {
-			fmt.Fprintf(stdout, "- artifact: %s (%d bytes)\n", artifact.Name, artifact.SizeBytes)
-		}
-		if resp.AgentSummary != "" {
-			fmt.Fprintln(stdout, resp.AgentSummary)
-		}
 	}
 	switch resp.Status {
 	case "ok":
@@ -366,8 +613,16 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_ = json.NewEncoder(stdout).Encode(resp)
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\nscale rph: %d\nfeatures: %s\n",
-		resp.UserID, resp.TrustTier, resp.Quotas.VerifyRequestsPerMinute, resp.Quotas.ScaleRequestsPerHour, strings.Join(resp.FeatureFlags, ","))
+	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\nfeatures: %s\n",
+		resp.UserID,
+		resp.TrustTier,
+		resp.Quotas.VerifyRequestsPerMinute,
+		resp.Quotas.DataRequestsPerHour,
+		resp.Quotas.MediaRequestsPerHour,
+		resp.Quotas.DepsRequestsPerHour,
+		resp.Quotas.SQLRequestsPerHour,
+		strings.Join(resp.FeatureFlags, ","),
+	)
 	return exitOK
 }
 
@@ -517,7 +772,10 @@ func printRootHelp(w io.Writer) {
 Commands:
   squire login
   squire verify
-  squire scale
+  squire deps
+  squire sql
+  squire data
+  squire media
   squire whoami
   squire logout
 
@@ -545,12 +803,49 @@ Examples:
 `)
 }
 
-func printScaleHelp(w io.Writer) {
+func printDepsHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire deps --lang <python|node> --file <path> [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+  squire deps --lang node --file package.json --json
+`)
+}
+
+func printSQLHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire sql --dialect <sqlite|postgres-16> [--file <path> | --schema <path> --query <sql> | --schema <path> --query-file <path>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire sql --dialect sqlite --query "SELECT 1" --json
+  squire sql --dialect sqlite --schema schema.sql --query-file query.sql --json
+  squire sql --dialect postgres-16 --file migration.sql --json
+`)
+}
+
+func printDataHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire data --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--json]
+
+Examples:
+  squire data --script transform.py --input big.csv --json
+  cat small.csv | squire data --script transform.py --stdin --json
+`)
+}
+
+func printMediaHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire media --script <path> [--input <path>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire media --script clip.py --input video.mp4 --json
+`)
+}
+
+func printScaleAliasHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire scale --mode <data|media> --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--json]
+
+Compatibility alias for "squire data" and "squire media".
 
 Examples:
   squire scale --mode data --script transform.py --input big.csv --json
-  cat small.csv | squire scale --mode data --script transform.py --stdin --json
   squire scale --mode media --script clip.py --input video.mp4 --json
 `)
 }
@@ -567,4 +862,15 @@ func printLogoutHelp(w io.Writer) {
 
 Clears the locally stored Squire session config.
 `)
+}
+
+func readOptionalFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }

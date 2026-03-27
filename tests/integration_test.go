@@ -16,7 +16,7 @@ import (
 	"squire/internal/protocol"
 )
 
-func TestScaleMultipartStreamingViaCLI(t *testing.T) {
+func TestDataMultipartStreamingViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	token := "sqh_test"
@@ -83,7 +83,7 @@ func TestScaleMultipartStreamingViaCLI(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := cliapp.Run([]string{"scale", "--mode", "data", "--script", scriptPath, "--input", inputPath, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	code := cliapp.Run([]string{"data", "--script", scriptPath, "--input", inputPath, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
 	}
@@ -97,7 +97,7 @@ func TestScaleMultipartStreamingViaCLI(t *testing.T) {
 	}
 }
 
-func TestScaleOversizedStdinRejectedInCLI(t *testing.T) {
+func TestDataOversizedStdinRejectedInCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SQUIRE_SCALE_STDIN_MAX_BYTES", "4")
@@ -116,12 +116,157 @@ func TestScaleOversizedStdinRejectedInCLI(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cliapp.Run([]string{"scale", "--mode", "data", "--script", scriptPath, "--stdin"}, strings.NewReader("12345"), &stdout, &stderr)
+	code := cliapp.Run([]string{"data", "--script", scriptPath, "--stdin"}, strings.NewReader("12345"), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("expected usage exit for oversized stdin, got %d", code)
 	}
 	if !strings.Contains(stderr.String(), "stdin payload exceeds") {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestDepsJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	manifestPath := filepath.Join(t.TempDir(), "requirements.txt")
+	if err := os.WriteFile(manifestPath, []byte("requests==2.32.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/deps" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.DepsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "python" || len(req.Targets) != 2 || !strings.Contains(req.Manifest, "requests==2.32.0") {
+			t.Fatalf("unexpected deps request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.DepsResponse{
+			RequestID: "req_deps",
+			Language:  "python",
+			Summary:   protocol.DepsSummary{Passed: 2},
+			Results: []protocol.DepsResult{
+				{Target: "py310", Status: "pass", RuntimeMS: 10},
+				{Target: "py311", Status: "pass", RuntimeMS: 11},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"deps", "--lang", "python", "--file", manifestPath, "--targets", "py310,py311", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_deps"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestSQLJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte("create table users(id integer);"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	queryPath := filepath.Join(t.TempDir(), "query.sql")
+	if err := os.WriteFile(queryPath, []byte("select 1 as id;"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/sql" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.SQLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Dialect != "sqlite" || !strings.Contains(req.Schema, "create table") || !strings.Contains(req.Query, "select 1") {
+			t.Fatalf("unexpected sql request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.SQLResponse{
+			RequestID:    "req_sql",
+			Dialect:      "sqlite",
+			Status:       "ok",
+			RuntimeMS:    8,
+			Columns:      []string{"id"},
+			Rows:         [][]interface{}{{float64(1)}},
+			RowCount:     1,
+			AgentSummary: "sqlite query completed and returned 1 row(s).",
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"sql", "--dialect", "sqlite", "--schema", schemaPath, "--query-file", queryPath, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_sql"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestRootHelpListsNewCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"help"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := stdout.String()
+	for _, needle := range []string{"squire deps", "squire sql", "squire data", "squire media"} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected root help to contain %q, got %s", needle, text)
+		}
 	}
 }
 

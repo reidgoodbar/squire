@@ -20,9 +20,12 @@ func TrustTierAtLeast(actual, required string) bool {
 }
 
 func HasScope(scopes []string, required string) bool {
+	allowed := scopeAliases(required)
 	for _, scope := range scopes {
-		if scope == required || scope == ScopeAdmin {
-			return true
+		for _, candidate := range allowed {
+			if scope == candidate || scope == ScopeAdmin {
+				return true
+			}
 		}
 	}
 	return false
@@ -31,12 +34,51 @@ func HasScope(scopes []string, required string) bool {
 func AllowedTokenScopesForTier(tier string) []string {
 	switch tier {
 	case TrustAdmin:
-		return []string{ScopeUserRead, ScopeVerifyRun, ScopeScaleData, ScopeScaleMedia, ScopeAdmin}
+		return []string{
+			ScopeUserRead,
+			ScopeVerifyRun,
+			ScopeDataRun,
+			ScopeMediaRun,
+			ScopeDepsRun,
+			ScopeSQLRun,
+			ScopeScaleData,
+			ScopeScaleMedia,
+			ScopeAdmin,
+		}
 	case TrustScaleAllowed:
-		return []string{ScopeUserRead, ScopeVerifyRun, ScopeScaleData, ScopeScaleMedia}
+		return []string{
+			ScopeUserRead,
+			ScopeVerifyRun,
+			ScopeDataRun,
+			ScopeMediaRun,
+			ScopeDepsRun,
+			ScopeSQLRun,
+			ScopeScaleData,
+			ScopeScaleMedia,
+		}
 	case TrustTrusted, TrustGitHubBasic:
-		return []string{ScopeUserRead, ScopeVerifyRun, ScopeScaleData, ScopeScaleMedia}
+		return []string{
+			ScopeUserRead,
+			ScopeVerifyRun,
+			ScopeDataRun,
+			ScopeMediaRun,
+			ScopeDepsRun,
+			ScopeSQLRun,
+			ScopeScaleData,
+			ScopeScaleMedia,
+		}
 	default:
 		return nil
+	}
+}
+
+func scopeAliases(scope string) []string {
+	switch scope {
+	case ScopeDataRun, ScopeScaleData:
+		return []string{ScopeDataRun, ScopeScaleData}
+	case ScopeMediaRun, ScopeScaleMedia:
+		return []string{ScopeMediaRun, ScopeScaleMedia}
+	default:
+		return []string{scope}
 	}
 }

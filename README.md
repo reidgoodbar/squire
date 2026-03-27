@@ -7,7 +7,9 @@ Standalone repo for the Squire command-line client.
 - authenticates against the Squire API
 - stores local session state in `~/.squire/config.json`
 - runs `verify`
-- runs `scale` in `data` and `media` modes
+- runs `deps` for fresh dependency-install checks
+- runs `sql` against ephemeral SQLite and Postgres sandboxes
+- runs `data` and `media` jobs in isolated fresh runtimes
 
 ## Default API
 
@@ -18,6 +20,16 @@ https://api.squire.run
 ```
 
 Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL`.
+
+## Commands
+
+```bash
+squire verify --lang python --file script.py --json
+squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+squire sql --dialect sqlite --query "SELECT 1" --json
+squire data --script transform.py --input big.csv --json
+squire media --script clip.py --input video.mp4 --json
+```
 
 ## Local Build
 
