@@ -45,6 +45,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "login":
 		return runLogin(ctx, args[1:], stdout, stderr)
+	case "update":
+		return runUpdate(ctx, args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(ctx, args[1:], stdin, stdout, stderr)
 	case "deps":
@@ -1365,6 +1367,7 @@ func printRootHelp(w io.Writer) {
 
 Commands:
   squire login
+  squire update
   squire verify
   squire deps
   squire sql
@@ -1393,6 +1396,18 @@ Default behavior opens a browser for GitHub OAuth and stores session config in ~
 Examples:
   squire login
   squire login --token sqh_...
+`)
+}
+
+func printUpdateHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire update [--version <tag|latest>] [--install-dir <path>] [--json]
+
+Downloads the published CLI release for the current OS and architecture and replaces the local squire binary in place.
+
+Examples:
+  squire update
+  squire update --version v0.5.1
+  squire update --install-dir ~/.local/bin --json
 `)
 }
 

@@ -19,7 +19,8 @@ build_one() {
 
 	(
 		cd "$repo_root"
-		GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -o "$stage/squire" ./cmd/squire
+		GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+			go build -ldflags "-X squire/internal/buildinfo.Version=v$version" -o "$stage/squire" ./cmd/squire
 	)
 	tar -C "$stage" -czf "$dist_dir/$asset" squire
 	rm -rf "$stage"

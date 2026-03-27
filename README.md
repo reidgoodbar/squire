@@ -5,6 +5,7 @@ Standalone repo for the Squire command-line client.
 ## What It Does
 
 - authenticates against the Squire API
+- updates the installed CLI from the published release channel
 - stores local session state in `~/.squire/config.json`
 - runs `verify`
 - runs `test` for short fresh-runtime test suites
@@ -32,6 +33,7 @@ Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL
 ## Commands
 
 ```bash
+squire update
 squire verify --lang python --file script.py --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
@@ -69,3 +71,4 @@ Artifacts are written to `dist/` using stable names such as:
 - `squire_linux_arm64.tar.gz`
 
 Those names are what `https://squire.run/install.sh` downloads from the latest GitHub release.
+The published archives also embed the release version so `squire update` can report what it installed.

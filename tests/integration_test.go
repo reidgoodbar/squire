@@ -3,10 +3,12 @@ package tests
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -780,6 +782,68 @@ func TestSolveJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestUpdateInstallsReleaseArchive(t *testing.T) {
+	installDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(installDir, "squire")
+	if err := os.WriteFile(targetPath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/v9.9.9/") {
+			t.Fatalf("unexpected update path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		if err := writeReleaseArchive(w, []byte("new-binary")); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("SQUIRE_UPDATE_BASE_URL", server.URL)
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"update", "--version", "v9.9.9", "--install-dir", installDir, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+
+	var resp struct {
+		Status           string `json:"status"`
+		CurrentVersion   string `json:"current_version"`
+		InstalledVersion string `json:"installed_version"`
+		InstalledPath    string `json:"installed_path"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("unexpected update status: %+v", resp)
+	}
+	if resp.InstalledVersion != "v9.9.9" {
+		t.Fatalf("unexpected installed version: %+v", resp)
+	}
+	if resp.InstalledPath != targetPath {
+		t.Fatalf("unexpected installed path: %+v", resp)
+	}
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new-binary" {
+		t.Fatalf("unexpected installed binary contents: %q", string(data))
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("expected installed binary to be executable, got mode %v", info.Mode())
+	}
+}
+
 func TestRootHelpListsNewCommands(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cliapp.Run([]string{"help"}, bytes.NewReader(nil), &stdout, &stderr)
@@ -787,7 +851,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media"} {
+	for _, needle := range []string{"squire update", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}
@@ -807,4 +871,30 @@ func writeCLIConfig(t *testing.T, home string, cfg protocol.CLIConfig) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeReleaseArchive(w io.Writer, binary []byte) error {
+	if _, err := exec.LookPath("tar"); err != nil {
+		return fmt.Errorf("tar not available: %w", err)
+	}
+	stageDir, err := os.MkdirTemp("", "squire-release-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+	if err := os.WriteFile(filepath.Join(stageDir, "squire"), binary, 0o755); err != nil {
+		return err
+	}
+	cmd := exec.Command("tar", "-C", stageDir, "-czf", "-", "squire")
+	cmd.Stdout = w
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("tar failed: %s", message)
+	}
+	return nil
 }
