@@ -392,6 +392,269 @@ func TestLintJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestAuditJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	srcDir := filepath.Join(projectDir, "src")
+	if err := os.MkdirAll(srcDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(srcDir, "app.py")
+	if err := os.WriteFile(appPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/audit" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.AuditRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Kind != "secrets" || len(req.Files) != 1 || req.Files[0].Path != "src/app.py" {
+			t.Fatalf("unexpected audit request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.AuditResponse{
+			RequestID: "req_audit",
+			Kind:      "secrets",
+			Summary:   protocol.AuditSummary{Passed: 1},
+			Results:   []protocol.AuditResult{{Target: "default", Status: "pass", RuntimeMS: 9}},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"audit", "--secrets", "--path", srcDir, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_audit"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestBuildJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	pkgDir := filepath.Join(projectDir, "demo")
+	if err := os.MkdirAll(pkgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(projectDir, "pyproject.toml")
+	if err := os.WriteFile(manifestPath, []byte("[build-system]\nrequires=[\"setuptools\",\"wheel\"]\nbuild-backend=\"setuptools.build_meta\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initPath := filepath.Join(pkgDir, "__init__.py")
+	if err := os.WriteFile(initPath, []byte("__version__='0.1.0'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/build" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.BuildRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "python" || len(req.Targets) != 2 || len(req.Files) != 2 {
+			t.Fatalf("unexpected build request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.BuildResponse{
+			RequestID: "req_build",
+			Language:  "python",
+			Summary:   protocol.BuildSummary{Passed: 2},
+			Results: []protocol.BuildResult{
+				{Target: "manylinux", Status: "pass", RuntimeMS: 10},
+				{Target: "musllinux", Status: "pass", RuntimeMS: 11},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"build", "--lang", "python", "--file", manifestPath, "--path", pkgDir, "--targets", "manylinux,musllinux", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_build"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestBenchJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	benchPath := filepath.Join(projectDir, "bench.py")
+	if err := os.WriteFile(benchPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/bench" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.BenchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "python" || req.Iterations != 3 || len(req.Targets) != 2 || len(req.Files) != 1 {
+			t.Fatalf("unexpected bench request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.BenchResponse{
+			RequestID: "req_bench",
+			Language:  "python",
+			Summary:   protocol.BenchSummary{Passed: 2},
+			Results: []protocol.BenchResult{
+				{Target: "py310", Status: "pass", RuntimeMS: 10, Iterations: 3, AvgRuntimeMS: 4},
+				{Target: "py311", Status: "pass", RuntimeMS: 11, Iterations: 3, AvgRuntimeMS: 5},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"bench", "--lang", "python", "--file", benchPath, "--targets", "py310,py311", "--iterations", "3", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_bench"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestBrowserJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	scriptPath := filepath.Join(projectDir, "browser.js")
+	if err := os.WriteFile(scriptPath, []byte("await page.setContent('<h1>hi</h1>');\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/browser" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.BrowserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Browser != "chromium" || req.ScriptPath != "browser.js" || req.ScreenshotName != "page.png" || len(req.Files) != 1 {
+			t.Fatalf("unexpected browser request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.BrowserResponse{
+			RequestID: "req_browser",
+			Browser:   "chromium",
+			Status:    "ok",
+			RuntimeMS: 12,
+			Title:     "Demo",
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"browser", "--script", scriptPath, "--screenshot", "page.png", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_browser"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
 func TestCompileJSONRequestViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -524,7 +787,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire deps", "squire sql", "squire test", "squire lint", "squire compile", "squire solve", "squire data", "squire media"} {
+	for _, needle := range []string{"squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}

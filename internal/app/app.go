@@ -55,6 +55,14 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runTest(ctx, args[1:], stdout, stderr)
 	case "lint":
 		return runLint(ctx, args[1:], stdout, stderr)
+	case "audit":
+		return runAudit(ctx, args[1:], stdout, stderr)
+	case "build":
+		return runBuild(ctx, args[1:], stdout, stderr)
+	case "bench":
+		return runBench(ctx, args[1:], stdout, stderr)
+	case "browser":
+		return runBrowser(ctx, args[1:], stdout, stderr)
 	case "compile":
 		return runCompile(ctx, args[1:], stdout, stderr)
 	case "solve":
@@ -558,6 +566,302 @@ func runLint(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Audit language. Phase 2 supports python dependency audit.")
+	secrets := fs.Bool("secrets", false, "Run the built-in secret scanner")
+	static := fs.Bool("static", false, "Run static analysis")
+	tool := fs.String("tool", "", "Audit tool. Phase 2 supports semgrep for static analysis.")
+	configValue := fs.String("config", "", "Static analysis config, such as p/security or a staged config file path")
+	var files multiStringFlag
+	var paths multiStringFlag
+	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
+	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
+	targets := fs.String("targets", "", "Comma-separated audit targets")
+	timeout := fs.Int("timeout", 60, "Audit timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printAuditHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *secrets && *static {
+		fmt.Fprintln(stderr, "choose only one of --secrets or --static")
+		return exitUsage
+	}
+
+	kind := "deps"
+	switch {
+	case *secrets:
+		kind = "secrets"
+	case *static:
+		kind = "static"
+	}
+	if kind == "deps" && *lang == "" {
+		fmt.Fprintln(stderr, "--lang is required for dependency audit")
+		return exitUsage
+	}
+
+	reqFiles, err := collectRequestFiles(files, paths)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	if len(reqFiles) == 0 {
+		fmt.Fprintln(stderr, "at least one --file or --path input is required")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.AuditResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/audit", protocol.AuditRequest{
+		Kind:           kind,
+		Language:       *lang,
+		Tool:           *tool,
+		Config:         *configValue,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed, %d findings\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed, resp.Summary.Findings)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms, %d findings)\n", result.Target, result.Status, result.RuntimeMS, result.FindingsCount)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Build language: python or node")
+	var files multiStringFlag
+	var paths multiStringFlag
+	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
+	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
+	targets := fs.String("targets", "", "Comma-separated build targets")
+	timeout := fs.Int("timeout", 120, "Build timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printBuildHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" {
+		fmt.Fprintln(stderr, "--lang is required")
+		return exitUsage
+	}
+
+	reqFiles, err := collectRequestFiles(files, paths)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	if len(reqFiles) == 0 {
+		fmt.Fprintln(stderr, "at least one --file or --path input is required")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.BuildResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/build", protocol.BuildRequest{
+		Language:       *lang,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms, %d artifacts)\n", result.Target, result.Status, result.RuntimeMS, len(result.Artifacts))
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runBench(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Benchmark language: python, bash, or go")
+	var files multiStringFlag
+	var paths multiStringFlag
+	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
+	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
+	targets := fs.String("targets", "", "Comma-separated benchmark targets")
+	iterations := fs.Int("iterations", 5, "Number of iterations to run per target")
+	timeout := fs.Int("timeout", 60, "Benchmark timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printBenchHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" {
+		fmt.Fprintln(stderr, "--lang is required")
+		return exitUsage
+	}
+
+	reqFiles, err := collectRequestFiles(files, paths)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	if len(reqFiles) == 0 {
+		fmt.Fprintln(stderr, "at least one --file or --path input is required")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.BenchResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/bench", protocol.BenchRequest{
+		Language:       *lang,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		Iterations:     *iterations,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms avg over %d iteration(s))\n", result.Target, result.Status, result.AvgRuntimeMS, result.Iterations)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("browser", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	browser := fs.String("browser", "chromium", "Browser runtime. Phase 3 supports chromium.")
+	scriptPath := fs.String("script", "", "Path to a browser automation script to stage")
+	url := fs.String("url", "", "URL to open. Remote URLs require --allow-network")
+	screenshot := fs.String("screenshot", "", "Optional screenshot filename to produce as an artifact")
+	allowNetwork := fs.Bool("allow-network", false, "Allow outbound browser network access for remote URLs")
+	var files multiStringFlag
+	var paths multiStringFlag
+	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
+	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
+	timeout := fs.Int("timeout", 45, "Browser timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printBrowserHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+
+	if *scriptPath != "" {
+		files = append(files, *scriptPath)
+	}
+	reqFiles, err := collectRequestFiles(files, paths)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	requestScriptPath := ""
+	if *scriptPath != "" {
+		requestScriptPath = requestPathForLocalFile(*scriptPath)
+	}
+	if *url == "" && requestScriptPath == "" && len(reqFiles) == 0 {
+		fmt.Fprintln(stderr, "provide --url, --script, or staged files for browser execution")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.BrowserResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/browser", protocol.BrowserRequest{
+		Browser:        *browser,
+		Files:          reqFiles,
+		ScriptPath:     requestScriptPath,
+		URL:            *url,
+		ScreenshotName: *screenshot,
+		AllowNetwork:   *allowNetwork,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Browser, resp.RuntimeMS)
+		if resp.Title != "" {
+			fmt.Fprintf(stdout, "title: %s\n", resp.Title)
+		}
+		if resp.FinalURL != "" {
+			fmt.Fprintf(stdout, "url: %s\n", resp.FinalURL)
+		}
+		if len(resp.Artifacts) > 0 {
+			fmt.Fprintf(stdout, "artifacts: %d\n", len(resp.Artifacts))
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	switch resp.Status {
+	case "ok":
+		return exitOK
+	case "timeout":
+		return exitTimeout
+	default:
+		return exitRemoteError
+	}
+}
+
 func runCompile(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -895,7 +1199,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_ = json.NewEncoder(stdout).Encode(resp)
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ntest rph: %d\nlint rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
+	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ntest rph: %d\nlint rph: %d\naudit rph: %d\nbuild rph: %d\nbench rph: %d\nbrowser rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
 		resp.UserID,
 		resp.TrustTier,
 		resp.Quotas.VerifyRequestsPerMinute,
@@ -905,6 +1209,10 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		resp.Quotas.SQLRequestsPerHour,
 		resp.Quotas.TestRequestsPerHour,
 		resp.Quotas.LintRequestsPerHour,
+		resp.Quotas.AuditRequestsPerHour,
+		resp.Quotas.BuildRequestsPerHour,
+		resp.Quotas.BenchRequestsPerHour,
+		resp.Quotas.BrowserRequestsPerHour,
 		resp.Quotas.CompileRequestsPerHour,
 		resp.Quotas.SolveRequestsPerHour,
 		strings.Join(resp.FeatureFlags, ","),
@@ -1062,6 +1370,10 @@ Commands:
   squire sql
   squire test
   squire lint
+  squire audit
+  squire build
+  squire bench
+  squire browser
   squire compile
   squire solve
   squire data
@@ -1132,6 +1444,45 @@ Examples:
 `)
 }
 
+func printAuditHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire audit [--lang python --file <path>] [--secrets | --static --tool semgrep --config <config>] [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire audit --lang python --file requirements.txt --json
+  squire audit --secrets --path ./src --json
+  squire audit --static --tool semgrep --config p/security --path ./src --json
+`)
+}
+
+func printBuildHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire build --lang <python|node> [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
+  squire build --lang node --file package.json --path src --targets linux --json
+`)
+}
+
+func printBenchHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire bench --lang <python|bash|go> [--file <path> | --path <dir>] ... [--targets <csv>] [--iterations <count>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire bench --lang python --file bench.py --targets py310,py311,py312 --json
+  squire bench --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04 --json
+  squire bench --lang go --file main.go --targets linux/amd64 --json
+`)
+}
+
+func printBrowserHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--allow-network] [--timeout <seconds>] [--json]
+
+Examples:
+  squire browser --script login-test.js --browser chromium --json
+  squire browser --url https://example.com --screenshot page.png --allow-network --json
+  squire browser --file index.html --screenshot page.png --json
+`)
+}
+
 func printCompileHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire compile --lang <go|rust> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]
 
@@ -1190,6 +1541,78 @@ func printLogoutHelp(w io.Writer) {
 
 Clears the locally stored Squire session config.
 `)
+}
+
+func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {
+	out := make([]protocol.SourceFile, 0, len(files))
+	seen := map[string]struct{}{}
+	addPath := func(localPath, requestPath string) error {
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			return err
+		}
+		if requestPath == "" {
+			requestPath = requestPathForLocalFile(localPath)
+		}
+		if _, ok := seen[requestPath]; ok {
+			return nil
+		}
+		seen[requestPath] = struct{}{}
+		out = append(out, protocol.SourceFile{
+			Path:    requestPath,
+			Content: string(data),
+		})
+		return nil
+	}
+
+	for _, filePath := range files {
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("--file expects a file, got directory: %s", filePath)
+		}
+		if err := addPath(filePath, ""); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, root := range paths {
+		rootInfo, err := os.Stat(root)
+		if err != nil {
+			return nil, err
+		}
+		if !rootInfo.IsDir() {
+			if err := addPath(root, requestPathForLocalFile(root)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		baseDir := filepath.Dir(root)
+		err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if base == ".git" || base == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			relPath, err := filepath.Rel(baseDir, path)
+			if err != nil {
+				return err
+			}
+			return addPath(path, filepath.ToSlash(relPath))
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return out, nil
 }
 
 func readOptionalFile(path string) (string, error) {

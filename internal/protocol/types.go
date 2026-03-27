@@ -26,6 +26,10 @@ const (
 	ScopeSolveRun   = "solve:run"
 	ScopeTestRun    = "test:run"
 	ScopeLintRun    = "lint:run"
+	ScopeAuditRun   = "audit:run"
+	ScopeBuildRun   = "build:run"
+	ScopeBenchRun   = "bench:run"
+	ScopeBrowserRun = "browser:run"
 	ScopeScaleData  = "scale:data"
 	ScopeScaleMedia = "scale:media"
 	ScopeAdmin      = "admin:*"
@@ -50,6 +54,10 @@ type Quotas struct {
 	SolveRequestsPerHour    int `json:"solve_requests_per_hour"`
 	TestRequestsPerHour     int `json:"test_requests_per_hour"`
 	LintRequestsPerHour     int `json:"lint_requests_per_hour"`
+	AuditRequestsPerHour    int `json:"audit_requests_per_hour"`
+	BuildRequestsPerHour    int `json:"build_requests_per_hour"`
+	BenchRequestsPerHour    int `json:"bench_requests_per_hour"`
+	BrowserRequestsPerHour  int `json:"browser_requests_per_hour"`
 	VerifyConcurrency       int `json:"verify_concurrency"`
 	DataConcurrency         int `json:"data_concurrency"`
 	MediaConcurrency        int `json:"media_concurrency"`
@@ -59,6 +67,10 @@ type Quotas struct {
 	SolveConcurrency        int `json:"solve_concurrency"`
 	TestConcurrency         int `json:"test_concurrency"`
 	LintConcurrency         int `json:"lint_concurrency"`
+	AuditConcurrency        int `json:"audit_concurrency"`
+	BuildConcurrency        int `json:"build_concurrency"`
+	BenchConcurrency        int `json:"bench_concurrency"`
+	BrowserConcurrency      int `json:"browser_concurrency"`
 }
 
 func QuotasForTrustTier(tier string) Quotas {
@@ -74,6 +86,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveRequestsPerHour:    240,
 			TestRequestsPerHour:     180,
 			LintRequestsPerHour:     240,
+			AuditRequestsPerHour:    180,
+			BuildRequestsPerHour:    120,
+			BenchRequestsPerHour:    120,
+			BrowserRequestsPerHour:  60,
 			VerifyConcurrency:       12,
 			DataConcurrency:         8,
 			MediaConcurrency:        4,
@@ -83,6 +99,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveConcurrency:        10,
 			TestConcurrency:         8,
 			LintConcurrency:         10,
+			AuditConcurrency:        8,
+			BuildConcurrency:        6,
+			BenchConcurrency:        6,
+			BrowserConcurrency:      4,
 		}
 	case TrustScaleAllowed:
 		return Quotas{
@@ -95,6 +115,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveRequestsPerHour:    120,
 			TestRequestsPerHour:     80,
 			LintRequestsPerHour:     120,
+			AuditRequestsPerHour:    80,
+			BuildRequestsPerHour:    40,
+			BenchRequestsPerHour:    40,
+			BrowserRequestsPerHour:  24,
 			VerifyConcurrency:       8,
 			DataConcurrency:         3,
 			MediaConcurrency:        2,
@@ -104,6 +128,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveConcurrency:        4,
 			TestConcurrency:         3,
 			LintConcurrency:         4,
+			AuditConcurrency:        3,
+			BuildConcurrency:        3,
+			BenchConcurrency:        3,
+			BrowserConcurrency:      2,
 		}
 	case TrustTrusted:
 		return Quotas{
@@ -116,6 +144,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveRequestsPerHour:    60,
 			TestRequestsPerHour:     40,
 			LintRequestsPerHour:     80,
+			AuditRequestsPerHour:    40,
+			BuildRequestsPerHour:    20,
+			BenchRequestsPerHour:    20,
+			BrowserRequestsPerHour:  12,
 			VerifyConcurrency:       6,
 			DataConcurrency:         2,
 			MediaConcurrency:        1,
@@ -125,6 +157,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveConcurrency:        3,
 			TestConcurrency:         2,
 			LintConcurrency:         3,
+			AuditConcurrency:        2,
+			BuildConcurrency:        2,
+			BenchConcurrency:        2,
+			BrowserConcurrency:      1,
 		}
 	case TrustGitHubBasic:
 		return Quotas{
@@ -137,6 +173,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveRequestsPerHour:    30,
 			TestRequestsPerHour:     20,
 			LintRequestsPerHour:     40,
+			AuditRequestsPerHour:    20,
+			BuildRequestsPerHour:    10,
+			BenchRequestsPerHour:    10,
+			BrowserRequestsPerHour:  6,
 			VerifyConcurrency:       4,
 			DataConcurrency:         1,
 			MediaConcurrency:        1,
@@ -146,6 +186,10 @@ func QuotasForTrustTier(tier string) Quotas {
 			SolveConcurrency:        2,
 			TestConcurrency:         1,
 			LintConcurrency:         2,
+			AuditConcurrency:        1,
+			BuildConcurrency:        1,
+			BenchConcurrency:        1,
+			BrowserConcurrency:      1,
 		}
 	default:
 		return Quotas{}
@@ -155,11 +199,11 @@ func QuotasForTrustTier(tier string) Quotas {
 func FeaturesForTrustTier(tier string) []string {
 	switch tier {
 	case TrustAdmin:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale", "admin"}
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale", "admin"}
 	case TrustScaleAllowed:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale"}
 	case TrustTrusted, TrustGitHubBasic:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale"}
 	default:
 		return nil
 	}
