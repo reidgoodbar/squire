@@ -38,7 +38,7 @@ squire verify --lang python --file script.py --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
 squire audit --secrets --path src --json
-squire build --lang python --path demo_pkg --targets manylinux,musllinux --json
+squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
 squire bench --lang python --file bench.py --targets py310,py311 --json
 squire browser --file index.html --screenshot page.png --json
 squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json

@@ -1660,7 +1660,12 @@ func requestPathForLocalFile(path string) string {
 	path = filepath.Clean(path)
 	cwd, err := os.Getwd()
 	if err == nil {
-		if rel, relErr := filepath.Rel(cwd, path); relErr == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		absPath := path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(cwd, absPath)
+		}
+		absPath = filepath.Clean(absPath)
+		if rel, relErr := filepath.Rel(cwd, absPath); relErr == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
 			return filepath.ToSlash(rel)
 		}
 	}
