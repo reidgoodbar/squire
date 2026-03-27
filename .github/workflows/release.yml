@@ -1,0 +1,29 @@
+name: CLI Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: chmod +x ./scripts/build-release.sh
+      - run: ./scripts/build-release.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/squire_darwin_amd64.tar.gz
+            dist/squire_darwin_arm64.tar.gz
+            dist/squire_linux_amd64.tar.gz
+            dist/squire_linux_arm64.tar.gz
+            dist/squire_checksums.txt
