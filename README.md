@@ -9,6 +9,8 @@ Standalone repo for the Squire command-line client.
 - runs `verify`
 - runs `deps` for fresh dependency-install checks
 - runs `sql` against ephemeral SQLite and Postgres sandboxes
+- runs `compile` for cross-target Go and Rust build checks
+- runs `solve` for Z3 and MiniZinc jobs
 - runs `data` and `media` jobs in isolated fresh runtimes
 
 ## Default API
@@ -27,6 +29,8 @@ Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL
 squire verify --lang python --file script.py --json
 squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
 squire sql --dialect sqlite --query "SELECT 1" --json
+squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+squire solve --solver z3 --file constraints.smt2 --json
 squire data --script transform.py --input big.csv --json
 squire media --script clip.py --input video.mp4 --json
 ```

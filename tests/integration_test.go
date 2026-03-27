@@ -256,6 +256,131 @@ func TestSQLJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestCompileJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	mainPath := filepath.Join(projectDir, "main.go")
+	if err := os.WriteFile(mainPath, []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/compile" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.CompileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "go" || len(req.Targets) != 2 || len(req.Files) != 1 || req.Files[0].Path != "main.go" {
+			t.Fatalf("unexpected compile request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.CompileResponse{
+			RequestID: "req_compile",
+			Language:  "go",
+			Summary:   protocol.CompileSummary{Passed: 2},
+			Results: []protocol.CompileResult{
+				{Target: "linux/amd64", Status: "pass", RuntimeMS: 10},
+				{Target: "linux/arm64", Status: "pass", RuntimeMS: 11},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"compile", "--lang", "go", "--file", mainPath, "--targets", "linux/amd64,linux/arm64", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_compile"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestSolveJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	modelPath := filepath.Join(t.TempDir(), "constraints.smt2")
+	if err := os.WriteFile(modelPath, []byte("(check-sat)\n(get-model)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/solve" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.SolveRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Solver != "z3" || !strings.Contains(req.Input, "(check-sat)") {
+			t.Fatalf("unexpected solve request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.SolveResponse{
+			RequestID: "req_solve",
+			Solver:    "z3",
+			Status:    "sat",
+			RuntimeMS: 9,
+			Model:     map[string]string{"x": "11"},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"solve", "--solver", "z3", "--file", modelPath, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_solve"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
 func TestRootHelpListsNewCommands(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cliapp.Run([]string{"help"}, bytes.NewReader(nil), &stdout, &stderr)
@@ -263,7 +388,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire deps", "squire sql", "squire data", "squire media"} {
+	for _, needle := range []string{"squire deps", "squire sql", "squire compile", "squire solve", "squire data", "squire media"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}

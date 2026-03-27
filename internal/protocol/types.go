@@ -22,6 +22,8 @@ const (
 	ScopeMediaRun   = "media:run"
 	ScopeDepsRun    = "deps:run"
 	ScopeSQLRun     = "sql:run"
+	ScopeCompileRun = "compile:run"
+	ScopeSolveRun   = "solve:run"
 	ScopeScaleData  = "scale:data"
 	ScopeScaleMedia = "scale:media"
 	ScopeAdmin      = "admin:*"
@@ -42,11 +44,15 @@ type Quotas struct {
 	MediaRequestsPerHour    int `json:"media_requests_per_hour"`
 	DepsRequestsPerHour     int `json:"deps_requests_per_hour"`
 	SQLRequestsPerHour      int `json:"sql_requests_per_hour"`
+	CompileRequestsPerHour  int `json:"compile_requests_per_hour"`
+	SolveRequestsPerHour    int `json:"solve_requests_per_hour"`
 	VerifyConcurrency       int `json:"verify_concurrency"`
 	DataConcurrency         int `json:"data_concurrency"`
 	MediaConcurrency        int `json:"media_concurrency"`
 	DepsConcurrency         int `json:"deps_concurrency"`
 	SQLConcurrency          int `json:"sql_concurrency"`
+	CompileConcurrency      int `json:"compile_concurrency"`
+	SolveConcurrency        int `json:"solve_concurrency"`
 }
 
 func QuotasForTrustTier(tier string) Quotas {
@@ -58,11 +64,15 @@ func QuotasForTrustTier(tier string) Quotas {
 			MediaRequestsPerHour:    60,
 			DepsRequestsPerHour:     120,
 			SQLRequestsPerHour:      240,
+			CompileRequestsPerHour:  120,
+			SolveRequestsPerHour:    240,
 			VerifyConcurrency:       12,
 			DataConcurrency:         8,
 			MediaConcurrency:        4,
 			DepsConcurrency:         6,
 			SQLConcurrency:          10,
+			CompileConcurrency:      6,
+			SolveConcurrency:        10,
 		}
 	case TrustScaleAllowed:
 		return Quotas{
@@ -71,11 +81,15 @@ func QuotasForTrustTier(tier string) Quotas {
 			MediaRequestsPerHour:    24,
 			DepsRequestsPerHour:     48,
 			SQLRequestsPerHour:      120,
+			CompileRequestsPerHour:  48,
+			SolveRequestsPerHour:    120,
 			VerifyConcurrency:       8,
 			DataConcurrency:         3,
 			MediaConcurrency:        2,
 			DepsConcurrency:         3,
 			SQLConcurrency:          4,
+			CompileConcurrency:      3,
+			SolveConcurrency:        4,
 		}
 	case TrustTrusted:
 		return Quotas{
@@ -84,11 +98,15 @@ func QuotasForTrustTier(tier string) Quotas {
 			MediaRequestsPerHour:    12,
 			DepsRequestsPerHour:     24,
 			SQLRequestsPerHour:      60,
+			CompileRequestsPerHour:  24,
+			SolveRequestsPerHour:    60,
 			VerifyConcurrency:       6,
 			DataConcurrency:         2,
 			MediaConcurrency:        1,
 			DepsConcurrency:         2,
 			SQLConcurrency:          3,
+			CompileConcurrency:      2,
+			SolveConcurrency:        3,
 		}
 	case TrustGitHubBasic:
 		return Quotas{
@@ -97,11 +115,15 @@ func QuotasForTrustTier(tier string) Quotas {
 			MediaRequestsPerHour:    6,
 			DepsRequestsPerHour:     12,
 			SQLRequestsPerHour:      30,
+			CompileRequestsPerHour:  12,
+			SolveRequestsPerHour:    30,
 			VerifyConcurrency:       4,
 			DataConcurrency:         1,
 			MediaConcurrency:        1,
 			DepsConcurrency:         1,
 			SQLConcurrency:          2,
+			CompileConcurrency:      1,
+			SolveConcurrency:        2,
 		}
 	default:
 		return Quotas{}
@@ -111,11 +133,11 @@ func QuotasForTrustTier(tier string) Quotas {
 func FeaturesForTrustTier(tier string) []string {
 	switch tier {
 	case TrustAdmin:
-		return []string{"verify", "data", "media", "deps", "sql", "scale", "admin"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale", "admin"}
 	case TrustScaleAllowed:
-		return []string{"verify", "data", "media", "deps", "sql", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale"}
 	case TrustTrusted, TrustGitHubBasic:
-		return []string{"verify", "data", "media", "deps", "sql", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale"}
 	default:
 		return nil
 	}
@@ -265,6 +287,43 @@ type DepsResponse struct {
 	AgentSummary  string         `json:"agent_summary"`
 }
 
+type SourceFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+type CompileRequest struct {
+	Language       string       `json:"language"`
+	Targets        []string     `json:"targets"`
+	Files          []SourceFile `json:"files"`
+	TimeoutSeconds int          `json:"timeout_seconds,omitempty"`
+}
+
+type CompileSummary struct {
+	Passed int `json:"passed"`
+	Failed int `json:"failed"`
+}
+
+type CompileResult struct {
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	ExitCode       int    `json:"exit_code"`
+	RuntimeMS      int64  `json:"runtime_ms"`
+	Stdout         string `json:"stdout"`
+	Stderr         string `json:"stderr"`
+	CombinedOutput string `json:"combined_output"`
+	Truncated      bool   `json:"truncated"`
+}
+
+type CompileResponse struct {
+	RequestID     string          `json:"request_id"`
+	Language      string          `json:"language"`
+	Summary       CompileSummary  `json:"summary"`
+	Results       []CompileResult `json:"results"`
+	FailureGroups []FailureGroup  `json:"failure_groups"`
+	AgentSummary  string          `json:"agent_summary"`
+}
+
 type ScaleJSONRequest struct {
 	Mode           string `json:"mode"`
 	ScriptName     string `json:"script_name"`
@@ -323,6 +382,28 @@ type SQLResponse struct {
 	CombinedOutput    string          `json:"combined_output"`
 	Truncated         bool            `json:"truncated"`
 	AgentSummary      string          `json:"agent_summary"`
+}
+
+type SolveRequest struct {
+	Solver         string `json:"solver"`
+	Input          string `json:"input,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Data           string `json:"data,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type SolveResponse struct {
+	RequestID      string            `json:"request_id"`
+	Solver         string            `json:"solver"`
+	Status         string            `json:"status"`
+	RuntimeMS      int64             `json:"runtime_ms"`
+	Model          map[string]string `json:"model,omitempty"`
+	Solution       string            `json:"solution,omitempty"`
+	Stdout         string            `json:"stdout"`
+	Stderr         string            `json:"stderr"`
+	CombinedOutput string            `json:"combined_output"`
+	Truncated      bool              `json:"truncated"`
+	AgentSummary   string            `json:"agent_summary"`
 }
 
 type JobResponse struct {

@@ -51,6 +51,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runDeps(ctx, args[1:], stdout, stderr)
 	case "sql":
 		return runSQL(ctx, args[1:], stdout, stderr)
+	case "compile":
+		return runCompile(ctx, args[1:], stdout, stderr)
+	case "solve":
+		return runSolve(ctx, args[1:], stdout, stderr)
 	case "data":
 		return runMode(ctx, args[1:], stdin, stdout, stderr, "data")
 	case "media":
@@ -416,6 +420,146 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func runCompile(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Compile language: go or rust")
+	var files multiStringFlag
+	fs.Var(&files, "file", "Path to a source or manifest file to stage; repeat for multi-file inputs")
+	targets := fs.String("targets", "", "Comma-separated compile targets")
+	timeout := fs.Int("timeout", 90, "Compile timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printCompileHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" || len(files) == 0 {
+		fmt.Fprintln(stderr, "--lang and at least one --file are required")
+		return exitUsage
+	}
+
+	reqFiles := make([]protocol.SourceFile, 0, len(files))
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		reqFiles = append(reqFiles, protocol.SourceFile{
+			Path:    requestPathForLocalFile(path),
+			Content: string(data),
+		})
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.CompileResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/compile", protocol.CompileRequest{
+		Language:       *lang,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms)\n", result.Target, result.Status, result.RuntimeMS)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runSolve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("solve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	solver := fs.String("solver", "", "Solver: z3 or minizinc")
+	filePath := fs.String("file", "", "Path to the solver input file")
+	dataPath := fs.String("data", "", "Optional MiniZinc .dzn data file")
+	timeout := fs.Int("timeout", 20, "Solver timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printSolveHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *solver == "" || *filePath == "" {
+		fmt.Fprintln(stderr, "--solver and --file are required")
+		return exitUsage
+	}
+
+	input, err := os.ReadFile(*filePath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	data := ""
+	if *dataPath != "" {
+		contents, err := os.ReadFile(*dataPath)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		data = string(contents)
+	}
+
+	req := protocol.SolveRequest{Solver: *solver, TimeoutSeconds: *timeout}
+	switch strings.ToLower(strings.TrimSpace(*solver)) {
+	case "z3":
+		req.Input = string(input)
+	case "minizinc":
+		req.Model = string(input)
+		req.Data = data
+	default:
+		fmt.Fprintln(stderr, "unsupported solver")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.SolveResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/solve", req, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Solver, resp.RuntimeMS)
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	switch resp.Status {
+	case "sat", "unsat", "unknown":
+		return exitOK
+	case "timeout":
+		return exitTimeout
+	default:
+		return exitRemoteError
+	}
+}
+
 func runMode(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, mode string) int {
 	fs := flag.NewFlagSet(mode, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -613,7 +757,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_ = json.NewEncoder(stdout).Encode(resp)
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\nfeatures: %s\n",
+	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
 		resp.UserID,
 		resp.TrustTier,
 		resp.Quotas.VerifyRequestsPerMinute,
@@ -621,6 +765,8 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		resp.Quotas.MediaRequestsPerHour,
 		resp.Quotas.DepsRequestsPerHour,
 		resp.Quotas.SQLRequestsPerHour,
+		resp.Quotas.CompileRequestsPerHour,
+		resp.Quotas.SolveRequestsPerHour,
 		strings.Join(resp.FeatureFlags, ","),
 	)
 	return exitOK
@@ -774,6 +920,8 @@ Commands:
   squire verify
   squire deps
   squire sql
+  squire compile
+  squire solve
   squire data
   squire media
   squire whoami
@@ -819,6 +967,24 @@ Examples:
   squire sql --dialect sqlite --query "SELECT 1" --json
   squire sql --dialect sqlite --schema schema.sql --query-file query.sql --json
   squire sql --dialect postgres-16 --file migration.sql --json
+`)
+}
+
+func printCompileHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire compile --lang <go|rust> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+  squire compile --lang rust --file Cargo.toml --file src/main.rs --targets linux/amd64-musl,linux/arm64 --json
+`)
+}
+
+func printSolveHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire solve --solver <z3|minizinc> --file <path> [--data <path>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire solve --solver z3 --file constraints.smt2 --json
+  squire solve --solver minizinc --file model.mzn --data data.dzn --json
 `)
 }
 
@@ -873,4 +1039,30 @@ func readOptionalFile(path string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("file path cannot be empty")
+	}
+	*m = append(*m, value)
+	return nil
+}
+
+func requestPathForLocalFile(path string) string {
+	path = filepath.Clean(path)
+	cwd, err := os.Getwd()
+	if err == nil {
+		if rel, relErr := filepath.Rel(cwd, path); relErr == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(path)
 }
