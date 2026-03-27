@@ -7,6 +7,8 @@ Standalone repo for the Squire command-line client.
 - authenticates against the Squire API
 - stores local session state in `~/.squire/config.json`
 - runs `verify`
+- runs `test` for short fresh-runtime test suites
+- runs `lint` for fresh-toolchain lint and static-analysis checks
 - runs `deps` for fresh dependency-install checks
 - runs `sql` against ephemeral SQLite and Postgres sandboxes
 - runs `compile` for cross-target Go and Rust build checks
@@ -27,6 +29,8 @@ Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL
 
 ```bash
 squire verify --lang python --file script.py --json
+squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
+squire lint --lang python --tool ruff --file app.py --json
 squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
 squire sql --dialect sqlite --query "SELECT 1" --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json

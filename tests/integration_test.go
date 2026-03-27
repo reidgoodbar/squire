@@ -256,6 +256,142 @@ func TestSQLJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestTestJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	testPath := filepath.Join(projectDir, "test_app.py")
+	if err := os.WriteFile(testPath, []byte("def test_ok():\n    assert 1 == 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/test" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.TestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "python" || req.Command != "pytest -q" || len(req.Targets) != 2 || len(req.Files) != 1 || req.Files[0].Path != "test_app.py" {
+			t.Fatalf("unexpected test request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.TestResponse{
+			RequestID: "req_test",
+			Language:  "python",
+			Summary:   protocol.TestSummary{Passed: 2},
+			Results: []protocol.TestResult{
+				{Target: "py310", Status: "pass", RuntimeMS: 10},
+				{Target: "py311", Status: "pass", RuntimeMS: 11},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"test", "--lang", "python", "--file", testPath, "--cmd", "pytest -q", "--targets", "py310,py311", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_test"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestLintJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	mainPath := filepath.Join(projectDir, "src", "main.rs")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainPath, []byte("fn main() { println!(\"hi\"); }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(projectDir, "Cargo.toml")
+	if err := os.WriteFile(manifestPath, []byte("[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/lint" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.LintRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "rust" || req.Tool != "clippy" || len(req.Targets) != 2 || len(req.Files) != 2 {
+			t.Fatalf("unexpected lint request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.LintResponse{
+			RequestID: "req_lint",
+			Language:  "rust",
+			Tool:      "clippy",
+			Summary:   protocol.LintSummary{Passed: 2},
+			Results: []protocol.LintResult{
+				{Target: "stable", Status: "pass", RuntimeMS: 10},
+				{Target: "nightly", Status: "pass", RuntimeMS: 11},
+			},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"lint", "--lang", "rust", "--tool", "clippy", "--file", manifestPath, "--file", mainPath, "--targets", "stable,nightly", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_lint"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
 func TestCompileJSONRequestViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -388,7 +524,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire deps", "squire sql", "squire compile", "squire solve", "squire data", "squire media"} {
+	for _, needle := range []string{"squire deps", "squire sql", "squire test", "squire lint", "squire compile", "squire solve", "squire data", "squire media"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}

@@ -24,6 +24,8 @@ const (
 	ScopeSQLRun     = "sql:run"
 	ScopeCompileRun = "compile:run"
 	ScopeSolveRun   = "solve:run"
+	ScopeTestRun    = "test:run"
+	ScopeLintRun    = "lint:run"
 	ScopeScaleData  = "scale:data"
 	ScopeScaleMedia = "scale:media"
 	ScopeAdmin      = "admin:*"
@@ -46,6 +48,8 @@ type Quotas struct {
 	SQLRequestsPerHour      int `json:"sql_requests_per_hour"`
 	CompileRequestsPerHour  int `json:"compile_requests_per_hour"`
 	SolveRequestsPerHour    int `json:"solve_requests_per_hour"`
+	TestRequestsPerHour     int `json:"test_requests_per_hour"`
+	LintRequestsPerHour     int `json:"lint_requests_per_hour"`
 	VerifyConcurrency       int `json:"verify_concurrency"`
 	DataConcurrency         int `json:"data_concurrency"`
 	MediaConcurrency        int `json:"media_concurrency"`
@@ -53,6 +57,8 @@ type Quotas struct {
 	SQLConcurrency          int `json:"sql_concurrency"`
 	CompileConcurrency      int `json:"compile_concurrency"`
 	SolveConcurrency        int `json:"solve_concurrency"`
+	TestConcurrency         int `json:"test_concurrency"`
+	LintConcurrency         int `json:"lint_concurrency"`
 }
 
 func QuotasForTrustTier(tier string) Quotas {
@@ -66,6 +72,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      240,
 			CompileRequestsPerHour:  120,
 			SolveRequestsPerHour:    240,
+			TestRequestsPerHour:     180,
+			LintRequestsPerHour:     240,
 			VerifyConcurrency:       12,
 			DataConcurrency:         8,
 			MediaConcurrency:        4,
@@ -73,6 +81,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          10,
 			CompileConcurrency:      6,
 			SolveConcurrency:        10,
+			TestConcurrency:         8,
+			LintConcurrency:         10,
 		}
 	case TrustScaleAllowed:
 		return Quotas{
@@ -83,6 +93,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      120,
 			CompileRequestsPerHour:  48,
 			SolveRequestsPerHour:    120,
+			TestRequestsPerHour:     80,
+			LintRequestsPerHour:     120,
 			VerifyConcurrency:       8,
 			DataConcurrency:         3,
 			MediaConcurrency:        2,
@@ -90,6 +102,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          4,
 			CompileConcurrency:      3,
 			SolveConcurrency:        4,
+			TestConcurrency:         3,
+			LintConcurrency:         4,
 		}
 	case TrustTrusted:
 		return Quotas{
@@ -100,6 +114,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      60,
 			CompileRequestsPerHour:  24,
 			SolveRequestsPerHour:    60,
+			TestRequestsPerHour:     40,
+			LintRequestsPerHour:     80,
 			VerifyConcurrency:       6,
 			DataConcurrency:         2,
 			MediaConcurrency:        1,
@@ -107,6 +123,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          3,
 			CompileConcurrency:      2,
 			SolveConcurrency:        3,
+			TestConcurrency:         2,
+			LintConcurrency:         3,
 		}
 	case TrustGitHubBasic:
 		return Quotas{
@@ -117,6 +135,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      30,
 			CompileRequestsPerHour:  12,
 			SolveRequestsPerHour:    30,
+			TestRequestsPerHour:     20,
+			LintRequestsPerHour:     40,
 			VerifyConcurrency:       4,
 			DataConcurrency:         1,
 			MediaConcurrency:        1,
@@ -124,6 +144,8 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          2,
 			CompileConcurrency:      1,
 			SolveConcurrency:        2,
+			TestConcurrency:         1,
+			LintConcurrency:         2,
 		}
 	default:
 		return Quotas{}
@@ -133,11 +155,11 @@ func QuotasForTrustTier(tier string) Quotas {
 func FeaturesForTrustTier(tier string) []string {
 	switch tier {
 	case TrustAdmin:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale", "admin"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale", "admin"}
 	case TrustScaleAllowed:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale"}
 	case TrustTrusted, TrustGitHubBasic:
-		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "scale"}
+		return []string{"verify", "data", "media", "deps", "sql", "compile", "solve", "test", "lint", "scale"}
 	default:
 		return nil
 	}
@@ -290,6 +312,73 @@ type DepsResponse struct {
 type SourceFile struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+}
+
+type TestRequest struct {
+	Language       string       `json:"language"`
+	Targets        []string     `json:"targets"`
+	Files          []SourceFile `json:"files"`
+	Command        string       `json:"command,omitempty"`
+	TimeoutSeconds int          `json:"timeout_seconds,omitempty"`
+}
+
+type TestSummary struct {
+	Passed int `json:"passed"`
+	Failed int `json:"failed"`
+}
+
+type TestResult struct {
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	ExitCode       int    `json:"exit_code"`
+	RuntimeMS      int64  `json:"runtime_ms"`
+	Stdout         string `json:"stdout"`
+	Stderr         string `json:"stderr"`
+	CombinedOutput string `json:"combined_output"`
+	Truncated      bool   `json:"truncated"`
+}
+
+type TestResponse struct {
+	RequestID     string         `json:"request_id"`
+	Language      string         `json:"language"`
+	Summary       TestSummary    `json:"summary"`
+	Results       []TestResult   `json:"results"`
+	FailureGroups []FailureGroup `json:"failure_groups"`
+	AgentSummary  string         `json:"agent_summary"`
+}
+
+type LintRequest struct {
+	Language       string       `json:"language"`
+	Tool           string       `json:"tool"`
+	Targets        []string     `json:"targets"`
+	Files          []SourceFile `json:"files"`
+	TimeoutSeconds int          `json:"timeout_seconds,omitempty"`
+}
+
+type LintSummary struct {
+	Passed int `json:"passed"`
+	Failed int `json:"failed"`
+}
+
+type LintResult struct {
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	ExitCode       int    `json:"exit_code"`
+	RuntimeMS      int64  `json:"runtime_ms"`
+	Stdout         string `json:"stdout"`
+	Stderr         string `json:"stderr"`
+	CombinedOutput string `json:"combined_output"`
+	Truncated      bool   `json:"truncated"`
+}
+
+type LintResponse struct {
+	RequestID     string         `json:"request_id"`
+	Language      string         `json:"language"`
+	Tool          string         `json:"tool"`
+	Summary       LintSummary    `json:"summary"`
+	Results       []LintResult   `json:"results"`
+	FailureGroups []FailureGroup `json:"failure_groups"`
+	AgentSummary  string         `json:"agent_summary"`
 }
 
 type CompileRequest struct {

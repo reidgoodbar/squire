@@ -51,6 +51,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runDeps(ctx, args[1:], stdout, stderr)
 	case "sql":
 		return runSQL(ctx, args[1:], stdout, stderr)
+	case "test":
+		return runTest(ctx, args[1:], stdout, stderr)
+	case "lint":
+		return runLint(ctx, args[1:], stdout, stderr)
 	case "compile":
 		return runCompile(ctx, args[1:], stdout, stderr)
 	case "solve":
@@ -420,6 +424,140 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Test language: python, node, or bash")
+	var files multiStringFlag
+	fs.Var(&files, "file", "Path to a source, test, or manifest file to stage; repeat for multi-file inputs")
+	cmd := fs.String("cmd", "", "Restricted test command, such as \"pytest -q\" or \"npm test\"")
+	targets := fs.String("targets", "", "Comma-separated runtime targets")
+	timeout := fs.Int("timeout", 60, "Test timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printTestHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" || len(files) == 0 {
+		fmt.Fprintln(stderr, "--lang and at least one --file are required")
+		return exitUsage
+	}
+
+	reqFiles := make([]protocol.SourceFile, 0, len(files))
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		reqFiles = append(reqFiles, protocol.SourceFile{
+			Path:    requestPathForLocalFile(path),
+			Content: string(data),
+		})
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.TestResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/test", protocol.TestRequest{
+		Language:       *lang,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		Command:        *cmd,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms)\n", result.Target, result.Status, result.RuntimeMS)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func runLint(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	lang := fs.String("lang", "", "Lint language: python, js, ts, or rust")
+	tool := fs.String("tool", "", "Lint tool: ruff, eslint, or clippy")
+	var files multiStringFlag
+	fs.Var(&files, "file", "Path to a source or config file to stage; repeat for multi-file inputs")
+	targets := fs.String("targets", "", "Comma-separated lint targets")
+	timeout := fs.Int("timeout", 45, "Lint timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printLintHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *lang == "" || *tool == "" || len(files) == 0 {
+		fmt.Fprintln(stderr, "--lang, --tool, and at least one --file are required")
+		return exitUsage
+	}
+
+	reqFiles := make([]protocol.SourceFile, 0, len(files))
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitUsage
+		}
+		reqFiles = append(reqFiles, protocol.SourceFile{
+			Path:    requestPathForLocalFile(path),
+			Content: string(data),
+		})
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.LintResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/lint", protocol.LintRequest{
+		Language:       *lang,
+		Tool:           *tool,
+		Targets:        splitCSV(*targets),
+		Files:          reqFiles,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
+		for _, result := range resp.Results {
+			fmt.Fprintf(stdout, "- %s: %s (%d ms)\n", result.Target, result.Status, result.RuntimeMS)
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	if resp.Summary.Failed > 0 {
+		return exitRemoteError
+	}
+	return exitOK
+}
+
 func runCompile(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -757,7 +895,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_ = json.NewEncoder(stdout).Encode(resp)
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
+	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ntest rph: %d\nlint rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
 		resp.UserID,
 		resp.TrustTier,
 		resp.Quotas.VerifyRequestsPerMinute,
@@ -765,6 +903,8 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		resp.Quotas.MediaRequestsPerHour,
 		resp.Quotas.DepsRequestsPerHour,
 		resp.Quotas.SQLRequestsPerHour,
+		resp.Quotas.TestRequestsPerHour,
+		resp.Quotas.LintRequestsPerHour,
 		resp.Quotas.CompileRequestsPerHour,
 		resp.Quotas.SolveRequestsPerHour,
 		strings.Join(resp.FeatureFlags, ","),
@@ -920,6 +1060,8 @@ Commands:
   squire verify
   squire deps
   squire sql
+  squire test
+  squire lint
   squire compile
   squire solve
   squire data
@@ -967,6 +1109,26 @@ Examples:
   squire sql --dialect sqlite --query "SELECT 1" --json
   squire sql --dialect sqlite --schema schema.sql --query-file query.sql --json
   squire sql --dialect postgres-16 --file migration.sql --json
+`)
+}
+
+func printTestHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire test --lang <python|node|bash> --file <path> [--file <path> ...] [--cmd <command>] [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
+  squire test --lang node --file package.json --file test/app.test.mjs --cmd "npm test" --targets node20,node22 --json
+  squire test --lang bash --file test.sh --targets alpine-3.20,ubuntu-24.04 --json
+`)
+}
+
+func printLintHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire lint --lang <python|js|ts|rust> --tool <ruff|eslint|clippy> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]
+
+Examples:
+  squire lint --lang python --tool ruff --file app.py --json
+  squire lint --lang ts --tool eslint --file src/index.ts --json
+  squire lint --lang rust --tool clippy --file Cargo.toml --file src/main.rs --targets stable,nightly --json
 `)
 }
 

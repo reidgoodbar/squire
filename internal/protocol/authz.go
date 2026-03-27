@@ -43,6 +43,8 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeSQLRun,
 			ScopeCompileRun,
 			ScopeSolveRun,
+			ScopeTestRun,
+			ScopeLintRun,
 			ScopeScaleData,
 			ScopeScaleMedia,
 			ScopeAdmin,
@@ -57,6 +59,8 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeSQLRun,
 			ScopeCompileRun,
 			ScopeSolveRun,
+			ScopeTestRun,
+			ScopeLintRun,
 			ScopeScaleData,
 			ScopeScaleMedia,
 		}
@@ -70,6 +74,8 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeSQLRun,
 			ScopeCompileRun,
 			ScopeSolveRun,
+			ScopeTestRun,
+			ScopeLintRun,
 			ScopeScaleData,
 			ScopeScaleMedia,
 		}
