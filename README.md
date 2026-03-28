@@ -33,6 +33,12 @@ Copy the example instruction files from `docs/agent/` into your own repo or envi
 
 Use Squire when a task is environment-sensitive, dependency-sensitive, compile-target-sensitive, short but heavy, or easier to reason about with structured JSON output. Prefer local execution for tiny trivial checks.
 
+For command discovery:
+
+- `squire --help` prints the full command catalog with one-line guidance
+- `squire --help --json` prints the command catalog in a machine-readable form for agents
+- `squire <command> --help` prints command-specific usage
+
 ## Default API
 
 The published CLI defaults to:

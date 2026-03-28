@@ -1000,14 +1000,56 @@ func TestUpdateInstallsReleaseArchive(t *testing.T) {
 
 func TestRootHelpListsNewCommands(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := cliapp.Run([]string{"help"}, bytes.NewReader(nil), &stdout, &stderr)
+	code := cliapp.Run([]string{"--help"}, bytes.NewReader(nil), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire update", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media"} {
+	for _, needle := range []string{"squire update", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media", "squire --help --json"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
+		}
+	}
+}
+
+func TestRootHelpJSONListsCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"--help", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d, stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Name     string `json:"name"`
+		Commands []struct {
+			Name    string   `json:"name"`
+			Aliases []string `json:"aliases"`
+		} `json:"commands"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("parse help json: %v", err)
+	}
+	if payload.Name != "squire" {
+		t.Fatalf("unexpected payload name: %q", payload.Name)
+	}
+	needles := map[string]bool{
+		"verify":  false,
+		"deps":    false,
+		"compile": false,
+		"data":    false,
+		"media":   false,
+		"scale":   false,
+	}
+	for _, command := range payload.Commands {
+		if _, ok := needles[command.Name]; ok {
+			needles[command.Name] = true
+		}
+		if command.Name == "scale" && len(command.Aliases) == 0 {
+			t.Fatal("expected scale aliases in help json")
+		}
+	}
+	for name, found := range needles {
+		if !found {
+			t.Fatalf("missing command %q in help json", name)
 		}
 	}
 }

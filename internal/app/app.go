@@ -34,6 +34,42 @@ const (
 	exitSignal      = 130
 )
 
+type rootCommandHelp struct {
+	Name     string   `json:"name"`
+	Category string   `json:"category"`
+	Summary  string   `json:"summary"`
+	Aliases  []string `json:"aliases,omitempty"`
+}
+
+type rootHelpPayload struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Commands    []rootCommandHelp `json:"commands"`
+}
+
+func rootCommandCatalog() []rootCommandHelp {
+	return []rootCommandHelp{
+		{Name: "login", Category: "session", Summary: "authenticate against the Squire API"},
+		{Name: "update", Category: "session", Summary: "install the latest published Squire CLI"},
+		{Name: "whoami", Category: "session", Summary: "show the authenticated user, quotas, and features"},
+		{Name: "logout", Category: "session", Summary: "clear the local Squire session"},
+		{Name: "verify", Category: "validation", Summary: "run shell, Python, or Node checks in fresh Linux runtimes"},
+		{Name: "deps", Category: "validation", Summary: "validate dependency installation in fresh Python or Node environments"},
+		{Name: "sql", Category: "validation", Summary: "run ephemeral SQLite or Postgres validation"},
+		{Name: "test", Category: "validation", Summary: "run short clean test suites in fresh runtimes"},
+		{Name: "lint", Category: "validation", Summary: "run lint and static analysis in fresh toolchains"},
+		{Name: "audit", Category: "validation", Summary: "run dependency, secret, and static security checks"},
+		{Name: "build", Category: "validation", Summary: "run packaging and build sanity checks"},
+		{Name: "bench", Category: "validation", Summary: "run short comparative benchmark jobs"},
+		{Name: "browser", Category: "validation", Summary: "run constrained headless browser verification"},
+		{Name: "compile", Category: "validation", Summary: "check Go or Rust compilation for target environments"},
+		{Name: "solve", Category: "validation", Summary: "run Z3 or MiniZinc solver jobs"},
+		{Name: "data", Category: "jobs", Summary: "run heavier pandas, polars, or pyarrow-style data jobs"},
+		{Name: "media", Category: "jobs", Summary: "run ffmpeg and media transformation jobs"},
+		{Name: "scale", Category: "jobs", Summary: "compatibility alias for data and media", Aliases: []string{"data", "media"}},
+	}
+}
+
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -80,13 +116,86 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "logout":
 		return runLogout(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
-		printRootHelp(stdout)
-		return exitOK
+		return runRootHelp(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printRootHelp(stderr)
 		return exitUsage
 	}
+}
+
+func runRootHelp(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("help", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOut := fs.Bool("json", false, "Print the root command catalog as JSON")
+	fs.Usage = func() { printRootHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	rest := fs.Args()
+	if len(rest) > 0 {
+		if !printCommandHelp(rest[0], stdout, stderr) {
+			fmt.Fprintf(stderr, "unknown command %q\n\n", rest[0])
+			printRootHelp(stderr)
+			return exitUsage
+		}
+		return exitOK
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(rootHelpPayload{
+			Name:        "squire",
+			Description: "CLI-first stateless remote validation and execution in clean disposable runtimes.",
+			Commands:    rootCommandCatalog(),
+		})
+		return exitOK
+	}
+	printRootHelp(stdout)
+	return exitOK
+}
+
+func printCommandHelp(command string, stdout, stderr io.Writer) bool {
+	switch command {
+	case "login":
+		printLoginHelp(stdout)
+	case "update":
+		printUpdateHelp(stdout)
+	case "verify":
+		printVerifyHelp(stdout)
+	case "deps":
+		printDepsHelp(stdout)
+	case "sql":
+		printSQLHelp(stdout)
+	case "test":
+		printTestHelp(stdout)
+	case "lint":
+		printLintHelp(stdout)
+	case "audit":
+		printAuditHelp(stdout)
+	case "build":
+		printBuildHelp(stdout)
+	case "bench":
+		printBenchHelp(stdout)
+	case "browser":
+		printBrowserHelp(stdout)
+	case "compile":
+		printCompileHelp(stdout)
+	case "solve":
+		printSolveHelp(stdout)
+	case "data":
+		printDataHelp(stdout)
+	case "media":
+		printMediaHelp(stdout)
+	case "scale":
+		printScaleAliasHelp(stdout)
+	case "whoami":
+		printWhoAmIHelp(stdout)
+	case "logout":
+		printLogoutHelp(stdout)
+	default:
+		_ = stderr
+		return false
+	}
+	return true
 }
 
 func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -1363,28 +1472,39 @@ func openBrowser(target string) error {
 }
 
 func printRootHelp(w io.Writer) {
-	fmt.Fprint(w, `Squire is a zero-trust CLI for stateless remote execution.
+	fmt.Fprint(w, `Squire is a CLI-first tool for stateless remote validation in clean disposable runtimes.
 
-Commands:
-  squire login
-  squire update
-  squire verify
-  squire deps
-  squire sql
-  squire test
-  squire lint
-  squire audit
-  squire build
-  squire bench
-  squire browser
-  squire compile
-  squire solve
-  squire data
-  squire media
-  squire whoami
-  squire logout
+Session:
+  squire login      authenticate against the Squire API
+  squire update     install the latest published Squire CLI
+  squire whoami     show the authenticated user, quotas, and features
+  squire logout     clear the local Squire session
 
-Use "squire <command> --help" for command-specific examples.
+Validation:
+  squire verify     run shell, Python, or Node checks in fresh Linux runtimes
+  squire deps       validate dependency installation in fresh Python or Node environments
+  squire sql        run ephemeral SQLite or Postgres validation
+  squire test       run short clean test suites in fresh runtimes
+  squire lint       run lint and static analysis in fresh toolchains
+  squire audit      run dependency, secret, and static security checks
+  squire build      run packaging and build sanity checks
+  squire bench      run short comparative benchmark jobs
+  squire browser    run constrained headless browser verification
+  squire compile    check Go or Rust compilation for target environments
+  squire solve      run Z3 or MiniZinc solver jobs
+
+Jobs:
+  squire data       run heavier pandas, polars, or pyarrow-style data jobs
+  squire media      run ffmpeg and media transformation jobs
+  squire scale      compatibility alias for data and media
+
+Examples:
+  squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12
+  squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+  squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+
+Use "squire <command> --help" for command-specific usage.
+Use "squire --help --json" for a machine-readable command catalog.
 `)
 }
 
