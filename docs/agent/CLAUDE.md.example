@@ -1,5 +1,7 @@
 # Claude Code + Squire
 
+This is a Claude-oriented example of a general Squire usage pattern. Adapt it freely for other terminal agents.
+
 Use Squire for short validation tasks that are easier to trust in a fresh disposable runtime than on the local machine.
 
 Prefer local execution for tiny trivial checks such as `ls`, simple file reads, or quick one-off commands.

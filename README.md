@@ -22,7 +22,9 @@ Standalone repo for the Squire command-line client.
 
 ## Agent Workflows
 
-Squire is intentionally CLI-first. It works well in terminal-first agent workflows such as Claude Code, Codex, and similar coding agents that need clean disposable runtimes without adding a new protocol layer.
+Squire is intentionally CLI-first. It works well in terminal-first coding-agent workflows and automated shell-based validation loops that need clean disposable runtimes without adding a new protocol layer.
+
+Claude Code, Codex, and similar tools are examples, not special integrations.
 
 Copy the example instruction files from `docs/agent/` into your own repo or environment and trim them to fit your workflow:
 
@@ -30,6 +32,8 @@ Copy the example instruction files from `docs/agent/` into your own repo or envi
 - `docs/agent/SKILLS.md.example`
 - `docs/agent/CODEX.md.example`
 - `docs/agent/squire-usage-guidelines.md`
+
+These are templates for common agent setups, not product-specific lock-in.
 
 Use Squire when a task is environment-sensitive, dependency-sensitive, compile-target-sensitive, short but heavy, or easier to reason about with structured JSON output. Prefer local execution for tiny trivial checks.
 

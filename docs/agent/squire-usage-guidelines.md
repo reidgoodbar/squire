@@ -2,6 +2,8 @@
 
 Squire is for short, stateless, disposable validation work. It is a good fit when local execution is fragile, noisy, or hard to trust because the result depends on a clean runtime.
 
+The tool-specific example files in this folder are just variants of the same pattern. Squire is not tied to one agent product.
+
 ## Use Squire When
 
 - the task is environment-sensitive

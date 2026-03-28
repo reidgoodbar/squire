@@ -1,5 +1,7 @@
 # Codex + Squire
 
+This is a Codex-oriented example of a general Squire usage pattern. Adapt it freely for other terminal agents.
+
 Squire is a CLI-first way to run short disposable validation jobs in clean remote runtimes.
 
 Prefer local execution for tiny commands and normal interactive development.
