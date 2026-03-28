@@ -43,6 +43,12 @@ For command discovery:
 - `squire --help --json` prints the command catalog in a machine-readable form for agents
 - `squire <command> --help` prints command-specific usage
 
+Optional MCP mode:
+
+- `squire mcp serve` exposes the same Squire command surface over MCP stdio for MCP-compatible hosts and editors
+- the MCP server reuses the current local Squire login/session
+- Squire remains CLI-first; MCP is an optional wrapper, not a separate backend
+
 ## Default API
 
 The published CLI defaults to:
@@ -57,6 +63,7 @@ Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL
 
 ```bash
 squire update
+squire mcp serve
 squire verify --lang python --file script.py --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json

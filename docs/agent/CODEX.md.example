@@ -29,6 +29,8 @@ Do not treat Squire as a general remote shell or a persistent environment.
 
 Prefer `--json` for agent-driven workflows.
 
+If your host expects MCP tools instead of direct shell commands, run `squire mcp serve` and use the same Squire task surface through MCP.
+
 Examples:
 
 ```bash

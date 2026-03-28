@@ -1005,7 +1005,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire update", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media", "squire --help --json"} {
+	for _, needle := range []string{"squire update", "squire mcp", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media", "squire --help --json"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}
@@ -1032,6 +1032,7 @@ func TestRootHelpJSONListsCommands(t *testing.T) {
 		t.Fatalf("unexpected payload name: %q", payload.Name)
 	}
 	needles := map[string]bool{
+		"mcp":     false,
 		"verify":  false,
 		"deps":    false,
 		"compile": false,
@@ -1051,6 +1052,228 @@ func TestRootHelpJSONListsCommands(t *testing.T) {
 		if !found {
 			t.Fatalf("missing command %q in help json", name)
 		}
+	}
+}
+
+func TestMCPToolsListIncludesCoreCommands(t *testing.T) {
+	requests := []map[string]interface{}{
+		{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "initialize",
+			"params": map[string]interface{}{
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]interface{}{},
+				"clientInfo": map[string]interface{}{
+					"name":    "test-client",
+					"version": "1.0.0",
+				},
+			},
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "notifications/initialized",
+			"params":  map[string]interface{}{},
+		},
+		{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/list",
+			"params":  map[string]interface{}{},
+		},
+	}
+
+	var stdin bytes.Buffer
+	for _, request := range requests {
+		data, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdin.Write(data)
+		stdin.WriteByte('\n')
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, &stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	var responses []map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	for {
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode mcp response: %v\nraw=%s", err, stdout.String())
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(responses), stdout.String())
+	}
+
+	initResult, ok := responses[0]["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing initialize result: %+v", responses[0])
+	}
+	if initResult["protocolVersion"] != "2025-11-25" {
+		t.Fatalf("unexpected protocol version: %+v", initResult)
+	}
+
+	listResult, ok := responses[1]["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing tools/list result: %+v", responses[1])
+	}
+	rawTools, ok := listResult["tools"].([]interface{})
+	if !ok {
+		t.Fatalf("missing tools array: %+v", listResult)
+	}
+	seen := map[string]bool{}
+	for _, rawTool := range rawTools {
+		tool, ok := rawTool.(map[string]interface{})
+		if !ok {
+			t.Fatalf("unexpected tool payload: %#v", rawTool)
+		}
+		name, _ := tool["name"].(string)
+		seen[name] = true
+	}
+	for _, name := range []string{"help", "whoami", "verify", "deps", "sql", "test", "lint", "audit", "build", "bench", "browser", "compile", "solve", "data", "media"} {
+		if !seen[name] {
+			t.Fatalf("missing MCP tool %q in %v", name, seen)
+		}
+	}
+}
+
+func TestMCPVerifyToolCallUsesExistingCLIFlow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/verify" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.VerifyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Language != "python" || req.Code != "print('hi')" || len(req.Targets) != 2 {
+			t.Fatalf("unexpected verify request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.VerifyResponse{
+			RequestID: "req_verify_mcp",
+			Summary:   protocol.VerifySummary{Passed: 2},
+			Results: []protocol.VerifyResult{
+				{Target: "alpine-3.20", Status: "pass", RuntimeMS: 12},
+				{Target: "ubuntu-24.04", Status: "pass", RuntimeMS: 14},
+			},
+			AgentSummary: "verify passed on both targets.",
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	requests := []map[string]interface{}{
+		{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "initialize",
+			"params": map[string]interface{}{
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]interface{}{},
+				"clientInfo": map[string]interface{}{
+					"name":    "test-client",
+					"version": "1.0.0",
+				},
+			},
+		},
+		{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name": "verify",
+				"arguments": map[string]interface{}{
+					"language": "python",
+					"code":     "print('hi')",
+					"targets":  []string{"alpine-3.20", "ubuntu-24.04"},
+					"timeout":  25,
+				},
+			},
+		},
+	}
+
+	var stdin bytes.Buffer
+	for _, request := range requests {
+		data, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdin.Write(data)
+		stdin.WriteByte('\n')
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, &stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	var responses []map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	for {
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode mcp response: %v\nraw=%s", err, stdout.String())
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(responses), stdout.String())
+	}
+
+	callResult, ok := responses[1]["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing tools/call result: %+v", responses[1])
+	}
+	if isError, _ := callResult["isError"].(bool); isError {
+		t.Fatalf("expected successful tool result: %+v", callResult)
+	}
+	structured, ok := callResult["structuredContent"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing structuredContent: %+v", callResult)
+	}
+	if structured["request_id"] != "req_verify_mcp" {
+		t.Fatalf("unexpected structured response: %+v", structured)
+	}
+	content, ok := callResult["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content blocks: %+v", callResult)
 	}
 }
 

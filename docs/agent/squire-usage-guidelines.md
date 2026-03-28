@@ -56,6 +56,12 @@ Preferred naming:
 - keep Squire for short validation runs, not full development
 - rerun locally only when the task is trivial or easier to debug locally
 
+## Optional MCP Mode
+
+If your host supports MCP, `squire mcp serve` exposes the same Squire task surface as MCP tools over stdio.
+
+Use MCP when your host expects tool discovery through MCP. Use the normal CLI directly when a plain terminal workflow is simpler.
+
 ## Examples
 
 ```bash

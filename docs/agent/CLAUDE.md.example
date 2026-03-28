@@ -34,6 +34,8 @@ Do not use Squire for long-running workflows, persistent environments, arbitrary
 
 Prefer `--json` when another tool or agent will read the result.
 
+If your host expects MCP tools instead of direct shell commands, run `squire mcp serve` and use the same Squire task surface through MCP.
+
 Examples:
 
 ```bash

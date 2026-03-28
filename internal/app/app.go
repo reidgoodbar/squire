@@ -53,6 +53,7 @@ func rootCommandCatalog() []rootCommandHelp {
 		{Name: "update", Category: "session", Summary: "install the latest published Squire CLI"},
 		{Name: "whoami", Category: "session", Summary: "show the authenticated user, quotas, and features"},
 		{Name: "logout", Category: "session", Summary: "clear the local Squire session"},
+		{Name: "mcp", Category: "integration", Summary: "serve the Squire tool surface over MCP stdio"},
 		{Name: "verify", Category: "validation", Summary: "run shell, Python, or Node checks in fresh Linux runtimes"},
 		{Name: "deps", Category: "validation", Summary: "validate dependency installation in fresh Python or Node environments"},
 		{Name: "sql", Category: "validation", Summary: "run ephemeral SQLite or Postgres validation"},
@@ -115,6 +116,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
 	case "logout":
 		return runLogout(args[1:], stdout, stderr)
+	case "mcp":
+		return runMCP(ctx, args[1:], stdin, stdout, stderr)
 	case "help", "--help", "-h":
 		return runRootHelp(args[1:], stdout, stderr)
 	default:
@@ -191,6 +194,8 @@ func printCommandHelp(command string, stdout, stderr io.Writer) bool {
 		printWhoAmIHelp(stdout)
 	case "logout":
 		printLogoutHelp(stdout)
+	case "mcp":
+		printMCPHelp(stdout)
 	default:
 		_ = stderr
 		return false
@@ -1480,6 +1485,9 @@ Session:
   squire whoami     show the authenticated user, quotas, and features
   squire logout     clear the local Squire session
 
+Integration:
+  squire mcp        serve the Squire tool surface over MCP stdio
+
 Validation:
   squire verify     run shell, Python, or Node checks in fresh Linux runtimes
   squire deps       validate dependency installation in fresh Python or Node environments
@@ -1675,6 +1683,17 @@ func printLogoutHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire logout [--json]
 
 Clears the locally stored Squire session config.
+`)
+}
+
+func printMCPHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage: squire mcp serve
+
+Starts a stdio MCP server that exposes Squire tools for MCP-compatible clients.
+The server reuses the current local Squire login/session.
+
+Examples:
+  squire mcp serve
 `)
 }
 

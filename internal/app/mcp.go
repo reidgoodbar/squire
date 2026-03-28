@@ -1,0 +1,1224 @@
+package app
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+
+	"squire/internal/buildinfo"
+)
+
+const mcpProtocolVersionLatest = "2025-11-25"
+
+var supportedMCPProtocolVersions = map[string]struct{}{
+	"2024-11-05": {},
+	"2025-03-26": {},
+	"2025-06-18": {},
+	"2025-11-25": {},
+}
+
+type mcpJSONRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type mcpJSONRPCResponse struct {
+	JSONRPC string           `json:"jsonrpc"`
+	ID      json.RawMessage  `json:"id,omitempty"`
+	Result  interface{}      `json:"result,omitempty"`
+	Error   *mcpJSONRPCError `json:"error,omitempty"`
+}
+
+type mcpJSONRPCError struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+type mcpTool struct {
+	Name        string
+	Title       string
+	Description string
+	InputSchema map[string]interface{}
+	Handler     func(context.Context, map[string]interface{}) (mcpToolResult, error)
+}
+
+type mcpToolResult struct {
+	Structured map[string]interface{}
+	Text       string
+	IsError    bool
+}
+
+type mcpInitializeParams struct {
+	ProtocolVersion string                 `json:"protocolVersion"`
+	Capabilities    map[string]interface{} `json:"capabilities"`
+	ClientInfo      map[string]interface{} `json:"clientInfo"`
+}
+
+type mcpToolCallParams struct {
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments"`
+}
+
+type mcpServer struct {
+	tools map[string]mcpTool
+}
+
+func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printMCPHelp(stderr)
+		return exitUsage
+	}
+	switch args[0] {
+	case "serve":
+		return runMCPServe(ctx, args[1:], stdin, stdout, stderr)
+	case "help", "--help", "-h":
+		printMCPHelp(stdout)
+		return exitOK
+	default:
+		fmt.Fprintf(stderr, "unknown mcp subcommand %q\n\n", args[0])
+		printMCPHelp(stderr)
+		return exitUsage
+	}
+}
+
+func runMCPServe(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { printMCPHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if len(fs.Args()) > 0 {
+		fmt.Fprintln(stderr, "squire mcp serve does not accept positional arguments")
+		return exitUsage
+	}
+	server := &mcpServer{tools: mcpToolMap()}
+	if err := server.serve(ctx, stdin, stdout); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	return exitOK
+}
+
+func (s *mcpServer) serve(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+	reader := bufio.NewReader(stdin)
+	for {
+		raw, err := readMCPMessage(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if len(raw) == 0 {
+			continue
+		}
+
+		responses, stop, err := s.handleIncoming(ctx, raw)
+		if err != nil {
+			return err
+		}
+		for _, response := range responses {
+			if err := writeMCPMessage(stdout, response); err != nil {
+				return err
+			}
+		}
+		if stop {
+			return nil
+		}
+	}
+}
+
+func (s *mcpServer) handleIncoming(ctx context.Context, raw []byte) ([]mcpJSONRPCResponse, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, false, nil
+	}
+	if trimmed[0] == '[' {
+		var messages []json.RawMessage
+		if err := json.Unmarshal(trimmed, &messages); err != nil {
+			return []mcpJSONRPCResponse{{
+				JSONRPC: "2.0",
+				Error: &mcpJSONRPCError{
+					Code:    -32700,
+					Message: "parse error",
+				},
+			}}, false, nil
+		}
+		responses := make([]mcpJSONRPCResponse, 0, len(messages))
+		stop := false
+		for _, message := range messages {
+			response, messageStop := s.handleMessage(ctx, message)
+			if response != nil {
+				responses = append(responses, *response)
+			}
+			if messageStop {
+				stop = true
+			}
+		}
+		return responses, stop, nil
+	}
+
+	response, stop := s.handleMessage(ctx, trimmed)
+	if response == nil {
+		return nil, stop, nil
+	}
+	return []mcpJSONRPCResponse{*response}, stop, nil
+}
+
+func (s *mcpServer) handleMessage(ctx context.Context, raw []byte) (*mcpJSONRPCResponse, bool) {
+	var request mcpJSONRPCRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return &mcpJSONRPCResponse{
+			JSONRPC: "2.0",
+			Error: &mcpJSONRPCError{
+				Code:    -32700,
+				Message: "parse error",
+			},
+		}, false
+	}
+	if request.JSONRPC != "2.0" || request.Method == "" {
+		return errorResponse(request.ID, -32600, "invalid request", nil), false
+	}
+
+	notification := len(bytes.TrimSpace(request.ID)) == 0
+	switch request.Method {
+	case "initialize":
+		if notification {
+			return errorResponse(request.ID, -32600, "initialize requires an id", nil), false
+		}
+		var params mcpInitializeParams
+		if len(request.Params) > 0 {
+			if err := json.Unmarshal(request.Params, &params); err != nil {
+				return errorResponse(request.ID, -32602, "invalid params", err.Error()), false
+			}
+		}
+		return successResponse(request.ID, map[string]interface{}{
+			"protocolVersion": negotiateMCPProtocolVersion(params.ProtocolVersion),
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{
+					"listChanged": false,
+				},
+			},
+			"serverInfo": map[string]interface{}{
+				"name":    "squire",
+				"version": buildinfo.CurrentVersion(),
+			},
+		}), false
+	case "notifications/initialized":
+		return nil, false
+	case "ping":
+		if notification {
+			return nil, false
+		}
+		return successResponse(request.ID, map[string]interface{}{}), false
+	case "shutdown":
+		if notification {
+			return nil, false
+		}
+		return successResponse(request.ID, map[string]interface{}{}), false
+	case "exit":
+		return nil, true
+	case "tools/list":
+		if notification {
+			return nil, false
+		}
+		return successResponse(request.ID, map[string]interface{}{
+			"tools": s.listTools(),
+		}), false
+	case "tools/call":
+		if notification {
+			return nil, false
+		}
+		var params mcpToolCallParams
+		if err := json.Unmarshal(request.Params, &params); err != nil {
+			return errorResponse(request.ID, -32602, "invalid params", err.Error()), false
+		}
+		tool, ok := s.tools[params.Name]
+		if !ok {
+			return errorResponse(request.ID, -32601, "tool not found", params.Name), false
+		}
+		if params.Arguments == nil {
+			params.Arguments = map[string]interface{}{}
+		}
+		result, err := tool.Handler(ctx, params.Arguments)
+		if err != nil {
+			return errorResponse(request.ID, -32602, "invalid params", err.Error()), false
+		}
+		contentText := strings.TrimSpace(result.Text)
+		if contentText == "" && result.Structured != nil {
+			contentText = prettyJSON(result.Structured)
+		}
+		return successResponse(request.ID, map[string]interface{}{
+			"content": []map[string]string{
+				{
+					"type": "text",
+					"text": contentText,
+				},
+			},
+			"structuredContent": result.Structured,
+			"isError":           result.IsError,
+		}), false
+	default:
+		if notification {
+			return nil, false
+		}
+		return errorResponse(request.ID, -32601, "method not found", request.Method), false
+	}
+}
+
+func (s *mcpServer) listTools() []map[string]interface{} {
+	ordered := []string{
+		"help",
+		"whoami",
+		"verify",
+		"deps",
+		"sql",
+		"test",
+		"lint",
+		"audit",
+		"build",
+		"bench",
+		"browser",
+		"compile",
+		"solve",
+		"data",
+		"media",
+	}
+	out := make([]map[string]interface{}, 0, len(ordered))
+	for _, name := range ordered {
+		tool := s.tools[name]
+		out = append(out, map[string]interface{}{
+			"name":        tool.Name,
+			"title":       tool.Title,
+			"description": tool.Description,
+			"inputSchema": tool.InputSchema,
+		})
+	}
+	return out
+}
+
+func mcpToolMap() map[string]mcpTool {
+	tools := []mcpTool{
+		mcpHelpTool(),
+		mcpCLIJSONTool(
+			"whoami",
+			"Squire WhoAmI",
+			"Return the authenticated Squire identity, trust tier, quotas, and feature flags.",
+			schemaObject(nil),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				return nil, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"verify",
+			"Squire Verify",
+			"Run shell, Python, or Node checks in fresh Linux runtimes.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Language to execute: bash, python, or node."),
+				"code":     schemaString("Inline code snippet to verify."),
+				"file":     schemaString("Path to a local script file to upload."),
+				"targets":  schemaStringList("Target matrix as an array or CSV string."),
+				"timeout":  schemaInteger("Per-target timeout in seconds."),
+			}, "language"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				code := optionalString(arguments, "code")
+				file := optionalString(arguments, "file")
+				if code == "" && file == "" {
+					return nil, "", fmt.Errorf("verify requires either code or file")
+				}
+				if code != "" && file != "" {
+					return nil, "", fmt.Errorf("verify accepts code or file, not both")
+				}
+				args := []string{"--lang", language}
+				if code != "" {
+					args = append(args, "--code", code)
+				}
+				if file != "" {
+					args = append(args, "--file", file)
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"deps",
+			"Squire Deps",
+			"Validate Python or Node dependency installation in a fresh environment.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Dependency language: python or node."),
+				"file":     schemaString("Path to the dependency manifest to upload."),
+				"targets":  schemaStringList("Dependency targets as an array or CSV string."),
+				"timeout":  schemaInteger("Dependency install timeout in seconds."),
+			}, "language", "file"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				file, err := requiredString(arguments, "file")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language, "--file", file}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"sql",
+			"Squire SQL",
+			"Run ephemeral SQLite or Postgres validation.",
+			schemaObject(map[string]interface{}{
+				"dialect":    schemaString("SQL dialect: sqlite or postgres-16."),
+				"file":       schemaString("Path to a SQL file containing statements to apply."),
+				"schema":     schemaString("Path to a schema file to apply before the query."),
+				"query":      schemaString("Inline SQL query to execute after schema setup."),
+				"query_file": schemaString("Path to a query file to execute after schema setup."),
+				"explain":    schemaBoolean("Request an execution plan when the dialect supports it."),
+				"timeout":    schemaInteger("SQL timeout in seconds."),
+			}, "dialect"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				dialect, err := requiredString(arguments, "dialect")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--dialect", dialect}
+				file := optionalString(arguments, "file")
+				schema := optionalString(arguments, "schema")
+				query := optionalString(arguments, "query")
+				queryFile := optionalString(arguments, "query_file")
+				if file == "" && schema == "" && query == "" && queryFile == "" {
+					return nil, "", fmt.Errorf("sql requires file, schema, query, or query_file")
+				}
+				if file != "" && (schema != "" || query != "" || queryFile != "") {
+					return nil, "", fmt.Errorf("sql file cannot be combined with schema/query/query_file")
+				}
+				if file != "" {
+					args = append(args, "--file", file)
+				}
+				if schema != "" {
+					args = append(args, "--schema", schema)
+				}
+				if query != "" {
+					args = append(args, "--query", query)
+				}
+				if queryFile != "" {
+					args = append(args, "--query-file", queryFile)
+				}
+				if explain, ok, err := optionalBool(arguments, "explain"); err != nil {
+					return nil, "", err
+				} else if ok && explain {
+					args = append(args, "--explain")
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"test",
+			"Squire Test",
+			"Run short clean test suites in fresh runtimes.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Test language: python, node, or bash."),
+				"files":    schemaStringArray("Local file paths to stage for the test run."),
+				"command":  schemaString("Restricted test command, such as pytest -q or npm test."),
+				"targets":  schemaStringList("Runtime targets as an array or CSV string."),
+				"timeout":  schemaInteger("Test timeout in seconds."),
+			}, "language", "files"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				files, err := requiredStringArray(arguments, "files")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language}
+				for _, file := range files {
+					args = append(args, "--file", file)
+				}
+				if command := optionalString(arguments, "command"); command != "" {
+					args = append(args, "--cmd", command)
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"lint",
+			"Squire Lint",
+			"Run lint and static analysis in fresh toolchains.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Lint language: python, js, ts, or rust."),
+				"tool":     schemaString("Lint tool: ruff, eslint, or clippy."),
+				"files":    schemaStringArray("Local file paths to stage for the lint run."),
+				"targets":  schemaStringList("Lint targets as an array or CSV string."),
+				"timeout":  schemaInteger("Lint timeout in seconds."),
+			}, "language", "tool", "files"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				tool, err := requiredString(arguments, "tool")
+				if err != nil {
+					return nil, "", err
+				}
+				files, err := requiredStringArray(arguments, "files")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language, "--tool", tool}
+				for _, file := range files {
+					args = append(args, "--file", file)
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"audit",
+			"Squire Audit",
+			"Run dependency, secret, or static security checks.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Audit language. Required for dependency audit."),
+				"secrets":  schemaBoolean("Run the built-in secret scanner."),
+				"static":   schemaBoolean("Run static analysis."),
+				"tool":     schemaString("Audit tool, such as semgrep."),
+				"config":   schemaString("Static analysis config, such as p/security."),
+				"files":    schemaStringArray("Local file paths to stage."),
+				"paths":    schemaStringArray("Local directory paths to stage recursively."),
+				"targets":  schemaStringList("Audit targets as an array or CSV string."),
+				"timeout":  schemaInteger("Audit timeout in seconds."),
+			}),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				args := make([]string, 0)
+				if language := optionalString(arguments, "language"); language != "" {
+					args = append(args, "--lang", language)
+				}
+				if secrets, ok, err := optionalBool(arguments, "secrets"); err != nil {
+					return nil, "", err
+				} else if ok && secrets {
+					args = append(args, "--secrets")
+				}
+				if static, ok, err := optionalBool(arguments, "static"); err != nil {
+					return nil, "", err
+				} else if ok && static {
+					args = append(args, "--static")
+				}
+				if tool := optionalString(arguments, "tool"); tool != "" {
+					args = append(args, "--tool", tool)
+				}
+				if config := optionalString(arguments, "config"); config != "" {
+					args = append(args, "--config", config)
+				}
+				if files, err := optionalStringArray(arguments, "files"); err != nil {
+					return nil, "", err
+				} else {
+					for _, file := range files {
+						args = append(args, "--file", file)
+					}
+				}
+				if paths, err := optionalStringArray(arguments, "paths"); err != nil {
+					return nil, "", err
+				} else {
+					for _, path := range paths {
+						args = append(args, "--path", path)
+					}
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"build",
+			"Squire Build",
+			"Run packaging and build sanity checks in clean environments.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Build language: python or node."),
+				"files":    schemaStringArray("Local file paths to stage."),
+				"paths":    schemaStringArray("Local directory paths to stage recursively."),
+				"targets":  schemaStringList("Build targets as an array or CSV string."),
+				"timeout":  schemaInteger("Build timeout in seconds."),
+			}, "language"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language}
+				if files, err := optionalStringArray(arguments, "files"); err != nil {
+					return nil, "", err
+				} else {
+					for _, file := range files {
+						args = append(args, "--file", file)
+					}
+				}
+				if paths, err := optionalStringArray(arguments, "paths"); err != nil {
+					return nil, "", err
+				} else {
+					for _, path := range paths {
+						args = append(args, "--path", path)
+					}
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"bench",
+			"Squire Bench",
+			"Run short comparative benchmark jobs in fresh runtimes.",
+			schemaObject(map[string]interface{}{
+				"language":   schemaString("Benchmark language: python, bash, or go."),
+				"files":      schemaStringArray("Local file paths to stage."),
+				"paths":      schemaStringArray("Local directory paths to stage recursively."),
+				"targets":    schemaStringList("Benchmark targets as an array or CSV string."),
+				"iterations": schemaInteger("Number of benchmark iterations."),
+				"timeout":    schemaInteger("Benchmark timeout in seconds."),
+			}, "language"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language}
+				if files, err := optionalStringArray(arguments, "files"); err != nil {
+					return nil, "", err
+				} else {
+					for _, file := range files {
+						args = append(args, "--file", file)
+					}
+				}
+				if paths, err := optionalStringArray(arguments, "paths"); err != nil {
+					return nil, "", err
+				} else {
+					for _, path := range paths {
+						args = append(args, "--path", path)
+					}
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if iterations, ok, err := optionalInt(arguments, "iterations"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--iterations", fmt.Sprintf("%d", iterations))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"browser",
+			"Squire Browser",
+			"Run constrained headless browser verification.",
+			schemaObject(map[string]interface{}{
+				"browser":       schemaString("Browser engine, currently chromium."),
+				"script":        schemaString("Path to a browser automation script to stage."),
+				"url":           schemaString("URL to open. Remote URLs require allow_network."),
+				"screenshot":    schemaString("Optional screenshot filename to produce."),
+				"allow_network": schemaBoolean("Allow outbound browser network access for remote URLs."),
+				"files":         schemaStringArray("Local file paths to stage."),
+				"paths":         schemaStringArray("Local directory paths to stage recursively."),
+				"timeout":       schemaInteger("Browser timeout in seconds."),
+			}),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				args := make([]string, 0)
+				if browser := optionalString(arguments, "browser"); browser != "" {
+					args = append(args, "--browser", browser)
+				}
+				if script := optionalString(arguments, "script"); script != "" {
+					args = append(args, "--script", script)
+				}
+				if url := optionalString(arguments, "url"); url != "" {
+					args = append(args, "--url", url)
+				}
+				if screenshot := optionalString(arguments, "screenshot"); screenshot != "" {
+					args = append(args, "--screenshot", screenshot)
+				}
+				if allowNetwork, ok, err := optionalBool(arguments, "allow_network"); err != nil {
+					return nil, "", err
+				} else if ok && allowNetwork {
+					args = append(args, "--allow-network")
+				}
+				if files, err := optionalStringArray(arguments, "files"); err != nil {
+					return nil, "", err
+				} else {
+					for _, file := range files {
+						args = append(args, "--file", file)
+					}
+				}
+				if paths, err := optionalStringArray(arguments, "paths"); err != nil {
+					return nil, "", err
+				} else {
+					for _, path := range paths {
+						args = append(args, "--path", path)
+					}
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"compile",
+			"Squire Compile",
+			"Check Go or Rust compilation for target environments.",
+			schemaObject(map[string]interface{}{
+				"language": schemaString("Compile language: go or rust."),
+				"files":    schemaStringArray("Local file paths to stage for compilation."),
+				"targets":  schemaStringList("Compile targets as an array or CSV string."),
+				"timeout":  schemaInteger("Compile timeout in seconds."),
+			}, "language", "files"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				language, err := requiredString(arguments, "language")
+				if err != nil {
+					return nil, "", err
+				}
+				files, err := requiredStringArray(arguments, "files")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--lang", language}
+				for _, file := range files {
+					args = append(args, "--file", file)
+				}
+				if targets := optionalStringList(arguments, "targets"); len(targets) > 0 {
+					args = append(args, "--targets", strings.Join(targets, ","))
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"solve",
+			"Squire Solve",
+			"Run Z3 or MiniZinc solver jobs.",
+			schemaObject(map[string]interface{}{
+				"solver":  schemaString("Solver: z3 or minizinc."),
+				"file":    schemaString("Path to the solver input file."),
+				"data":    schemaString("Optional MiniZinc .dzn data file."),
+				"timeout": schemaInteger("Solver timeout in seconds."),
+			}, "solver", "file"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				solver, err := requiredString(arguments, "solver")
+				if err != nil {
+					return nil, "", err
+				}
+				file, err := requiredString(arguments, "file")
+				if err != nil {
+					return nil, "", err
+				}
+				args := []string{"--solver", solver, "--file", file}
+				if data := optionalString(arguments, "data"); data != "" {
+					args = append(args, "--data", data)
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return nil, "", err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				return args, "", nil
+			},
+		),
+		mcpCLIJSONTool(
+			"data",
+			"Squire Data",
+			"Run heavier pandas, polars, or pyarrow-style data jobs.",
+			schemaObject(map[string]interface{}{
+				"script":     schemaString("Path to the Python script to execute."),
+				"input":      schemaString("Path to an input file for multipart upload."),
+				"stdin_text": schemaString("Small inline input payload to send over stdin mode."),
+				"timeout":    schemaInteger("Job timeout in seconds."),
+			}, "script"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				return buildMCPModeArgs(arguments)
+			},
+		),
+		mcpCLIJSONTool(
+			"media",
+			"Squire Media",
+			"Run ffmpeg and media transformation jobs.",
+			schemaObject(map[string]interface{}{
+				"script":     schemaString("Path to the Python script to execute."),
+				"input":      schemaString("Path to an input file for multipart upload."),
+				"stdin_text": schemaString("Small inline input payload to send over stdin mode."),
+				"timeout":    schemaInteger("Job timeout in seconds."),
+			}, "script"),
+			func(arguments map[string]interface{}) ([]string, string, error) {
+				return buildMCPModeArgs(arguments)
+			},
+		),
+	}
+
+	out := make(map[string]mcpTool, len(tools))
+	for _, tool := range tools {
+		out[tool.Name] = tool
+	}
+	return out
+}
+
+func mcpHelpTool() mcpTool {
+	return mcpTool{
+		Name:        "help",
+		Title:       "Squire Help",
+		Description: "Return the Squire command catalog or command-specific help text.",
+		InputSchema: schemaObject(map[string]interface{}{
+			"command": schemaString("Optional Squire command name for command-specific help."),
+		}),
+		Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
+			_ = ctx
+			command := optionalString(arguments, "command")
+			if command == "" {
+				payload := rootHelpPayload{
+					Name:        "squire",
+					Description: "CLI-first stateless remote validation and execution in clean disposable runtimes.",
+					Commands:    rootCommandCatalog(),
+				}
+				var text bytes.Buffer
+				printRootHelp(&text)
+				return mcpToolResult{
+					Structured: map[string]interface{}{
+						"name":        payload.Name,
+						"description": payload.Description,
+						"commands":    payload.Commands,
+					},
+					Text: text.String(),
+				}, nil
+			}
+
+			var text bytes.Buffer
+			if !printCommandHelp(command, &text, io.Discard) {
+				return mcpToolResult{
+					Structured: map[string]interface{}{
+						"command": command,
+						"error":   "unknown command",
+					},
+					Text:    fmt.Sprintf("unknown command %q", command),
+					IsError: true,
+				}, nil
+			}
+			return mcpToolResult{
+				Structured: map[string]interface{}{
+					"command": command,
+					"help":    text.String(),
+				},
+				Text: text.String(),
+			}, nil
+		},
+	}
+}
+
+func mcpCLIJSONTool(name, title, description string, inputSchema map[string]interface{}, buildArgs func(map[string]interface{}) ([]string, string, error)) mcpTool {
+	return mcpTool{
+		Name:        name,
+		Title:       title,
+		Description: description,
+		InputSchema: inputSchema,
+		Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
+			_ = ctx
+			args, stdinText, err := buildArgs(arguments)
+			if err != nil {
+				return mcpToolResult{}, err
+			}
+			cliArgs := append([]string{name}, args...)
+			cliArgs = append(cliArgs, "--json")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(cliArgs, strings.NewReader(stdinText), &stdout, &stderr)
+			return parseMCPCLIResult(stdout.String(), stderr.String(), code), nil
+		},
+	}
+}
+
+func parseMCPCLIResult(stdout, stderr string, code int) mcpToolResult {
+	stdout = strings.TrimSpace(stdout)
+	stderr = strings.TrimSpace(stderr)
+
+	if stdout != "" {
+		var structured map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout), &structured); err == nil {
+			text := prettyJSON(structured)
+			if stderr != "" {
+				text += "\n\nstderr:\n" + stderr
+			}
+			return mcpToolResult{
+				Structured: structured,
+				Text:       text,
+				IsError:    code != exitOK,
+			}
+		}
+	}
+
+	structured := map[string]interface{}{
+		"exit_code": code,
+	}
+	if stdout != "" {
+		structured["stdout"] = stdout
+	}
+	if stderr != "" {
+		structured["stderr"] = stderr
+	}
+	text := strings.TrimSpace(strings.Join([]string{stdout, stderr}, "\n\n"))
+	if text == "" {
+		text = fmt.Sprintf("squire command exited with code %d", code)
+	}
+	return mcpToolResult{
+		Structured: structured,
+		Text:       text,
+		IsError:    code != exitOK,
+	}
+}
+
+func buildMCPModeArgs(arguments map[string]interface{}) ([]string, string, error) {
+	script, err := requiredString(arguments, "script")
+	if err != nil {
+		return nil, "", err
+	}
+	args := []string{"--script", script}
+	input := optionalString(arguments, "input")
+	stdinText := optionalString(arguments, "stdin_text")
+	if input != "" && stdinText != "" {
+		return nil, "", fmt.Errorf("input and stdin_text cannot be combined")
+	}
+	if input != "" {
+		args = append(args, "--input", input)
+	}
+	if stdinText != "" {
+		args = append(args, "--stdin")
+	}
+	if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+		return nil, "", err
+	} else if ok {
+		args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+	}
+	return args, stdinText, nil
+}
+
+func schemaObject(properties map[string]interface{}, required ...string) map[string]interface{} {
+	if properties == nil {
+		properties = map[string]interface{}{}
+	}
+	out := map[string]interface{}{
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
+	}
+	if len(required) > 0 {
+		out["required"] = required
+	}
+	return out
+}
+
+func schemaString(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "string",
+		"description": description,
+	}
+}
+
+func schemaBoolean(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "boolean",
+		"description": description,
+	}
+}
+
+func schemaInteger(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "integer",
+		"description": description,
+	}
+}
+
+func schemaStringArray(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": description,
+		"items": map[string]interface{}{
+			"type": "string",
+		},
+	}
+}
+
+func schemaStringList(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"description": description,
+		"anyOf": []map[string]interface{}{
+			schemaString("Comma-separated string."),
+			schemaStringArray("Array of strings."),
+		},
+	}
+}
+
+func requiredString(arguments map[string]interface{}, key string) (string, error) {
+	value := strings.TrimSpace(optionalString(arguments, key))
+	if value == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return value, nil
+}
+
+func optionalString(arguments map[string]interface{}, key string) string {
+	value, ok := arguments[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func requiredStringArray(arguments map[string]interface{}, key string) ([]string, error) {
+	values, err := optionalStringArray(arguments, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s is required", key)
+	}
+	return values, nil
+}
+
+func optionalStringArray(arguments map[string]interface{}, key string) ([]string, error) {
+	value, ok := arguments[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	switch v := value.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out, nil
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must contain only strings", key)
+			}
+			if trimmed := strings.TrimSpace(text); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out, nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil, nil
+		}
+		return []string{strings.TrimSpace(v)}, nil
+	default:
+		return nil, fmt.Errorf("%s must be a string array", key)
+	}
+}
+
+func optionalStringList(arguments map[string]interface{}, key string) []string {
+	values, err := optionalStringArray(arguments, key)
+	if err == nil && len(values) > 0 {
+		return values
+	}
+	single := optionalString(arguments, key)
+	if single == "" {
+		return nil
+	}
+	if strings.Contains(single, ",") {
+		return splitCSV(single)
+	}
+	return []string{single}
+}
+
+func optionalInt(arguments map[string]interface{}, key string) (int, bool, error) {
+	value, ok := arguments[key]
+	if !ok || value == nil {
+		return 0, false, nil
+	}
+	switch v := value.(type) {
+	case int:
+		return v, true, nil
+	case int64:
+		return int(v), true, nil
+	case float64:
+		return int(v), true, nil
+	case json.Number:
+		value, err := v.Int64()
+		if err != nil {
+			return 0, false, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(value), true, nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return 0, false, nil
+		}
+		var out int
+		if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &out); err != nil {
+			return 0, false, fmt.Errorf("%s must be an integer", key)
+		}
+		return out, true, nil
+	default:
+		return 0, false, fmt.Errorf("%s must be an integer", key)
+	}
+}
+
+func optionalBool(arguments map[string]interface{}, key string) (bool, bool, error) {
+	value, ok := arguments[key]
+	if !ok || value == nil {
+		return false, false, nil
+	}
+	switch v := value.(type) {
+	case bool:
+		return v, true, nil
+	default:
+		return false, false, fmt.Errorf("%s must be a boolean", key)
+	}
+}
+
+func readMCPMessage(reader *bufio.Reader) ([]byte, error) {
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
+			continue
+		}
+		return trimmed, nil
+	}
+}
+
+func writeMCPMessage(w io.Writer, response mcpJSONRPCResponse) error {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "%s\n", data)
+	return err
+}
+
+func successResponse(id json.RawMessage, result interface{}) *mcpJSONRPCResponse {
+	return &mcpJSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      cloneRawMessage(id),
+		Result:  result,
+	}
+}
+
+func errorResponse(id json.RawMessage, code int, message string, data interface{}) *mcpJSONRPCResponse {
+	return &mcpJSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      cloneRawMessage(id),
+		Error: &mcpJSONRPCError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+	}
+}
+
+func cloneRawMessage(in json.RawMessage) json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(in))
+	copy(out, in)
+	return out
+}
+
+func negotiateMCPProtocolVersion(clientVersion string) string {
+	clientVersion = strings.TrimSpace(clientVersion)
+	if _, ok := supportedMCPProtocolVersions[clientVersion]; ok {
+		return clientVersion
+	}
+	return mcpProtocolVersionLatest
+}
+
+func prettyJSON(value interface{}) string {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(data)
+}
