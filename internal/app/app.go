@@ -1473,7 +1473,7 @@ Integration:
 
 Validation:
   squire verify     run shell, Python, or Node checks in fresh Linux runtimes
-  squire deps       validate dependency installation in fresh Python or Node environments
+  squire deps       dependency validation surface; currently disabled on the public zero-egress service
   squire sql        run ephemeral SQLite or Postgres validation
   squire test       run short clean test suites in fresh runtimes
   squire lint       run lint and static analysis in fresh toolchains
@@ -1491,7 +1491,7 @@ Jobs:
 
 Examples:
   squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12
-  squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
+  squire browser --path website/public --screenshot page.png --json
   squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 
 Use "squire <command> --help" for command-specific usage.
