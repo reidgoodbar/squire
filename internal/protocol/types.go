@@ -354,8 +354,9 @@ type DepsResponse struct {
 }
 
 type SourceFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding,omitempty"`
 }
 
 type TestRequest struct {

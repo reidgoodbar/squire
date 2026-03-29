@@ -76,13 +76,15 @@ squire lint --lang python --tool ruff --file app.py --json
 squire audit --secrets --path src --json
 squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
 squire bench --lang python --file bench.py --targets py310,py311 --json
-squire browser --file index.html --screenshot page.png --json
+squire browser --path website/public --screenshot page.png --json
 squire sql --dialect sqlite --query "SELECT 1" --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire solve --solver z3 --file constraints.smt2 --json
 squire data --script transform.py --input big.csv --json
 squire media --script clip.py --input video.mp4 --json
 ```
+
+`browser`, `test`, `lint`, `audit`, `build`, `bench`, and `compile` stage local files through the shared request-file path. Text files are sent directly; binary assets such as images are automatically staged safely so real directory trees work without rewriting them as text.
 
 ## Local Build
 

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -676,6 +677,89 @@ func TestBrowserRemoteURLRejectedInCLI(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "browser remote URLs are disabled") {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestBrowserPathStagesBinaryAssetsViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "index.html"), []byte("<img src=\"./logo.png\" alt=\"logo\" />\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logoBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff}
+	if err := os.WriteFile(filepath.Join(projectDir, "logo.png"), logoBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req protocol.BrowserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.Files) != 2 {
+			t.Fatalf("expected 2 staged files, got %d", len(req.Files))
+		}
+		var htmlFile, logoFile *protocol.SourceFile
+		for i := range req.Files {
+			switch req.Files[i].Path {
+			case filepath.ToSlash(filepath.Join(filepath.Base(projectDir), "index.html")):
+				htmlFile = &req.Files[i]
+			case filepath.ToSlash(filepath.Join(filepath.Base(projectDir), "logo.png")):
+				logoFile = &req.Files[i]
+			}
+		}
+		if htmlFile == nil || logoFile == nil {
+			t.Fatalf("unexpected staged files: %+v", req.Files)
+		}
+		if htmlFile.Encoding != "" {
+			t.Fatalf("expected html file to stay text, got encoding=%q", htmlFile.Encoding)
+		}
+		if logoFile.Encoding != "base64" {
+			t.Fatalf("expected binary logo to use base64 encoding, got %+v", *logoFile)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(logoFile.Content)
+		if err != nil {
+			t.Fatalf("decode binary asset: %v", err)
+		}
+		if !bytes.Equal(decoded, logoBytes) {
+			t.Fatalf("unexpected binary payload: %v", decoded)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.BrowserResponse{
+			RequestID: "req_browser_assets",
+			Browser:   "chromium",
+			Status:    "ok",
+			RuntimeMS: 12,
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"browser", "--path", projectDir, "--screenshot", "page.png", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_browser_assets"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
 	}
 }
 

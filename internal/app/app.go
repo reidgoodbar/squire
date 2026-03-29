@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"squire/internal/config"
 	"squire/internal/httpclient"
@@ -568,17 +570,10 @@ func runTest(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	reqFiles := make([]protocol.SourceFile, 0, len(files))
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return exitUsage
-		}
-		reqFiles = append(reqFiles, protocol.SourceFile{
-			Path:    requestPathForLocalFile(path),
-			Content: string(data),
-		})
+	reqFiles, err := collectRequestFiles(files, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
 	}
 
 	cfg, err := config.Load()
@@ -635,17 +630,10 @@ func runLint(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	reqFiles := make([]protocol.SourceFile, 0, len(files))
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return exitUsage
-		}
-		reqFiles = append(reqFiles, protocol.SourceFile{
-			Path:    requestPathForLocalFile(path),
-			Content: string(data),
-		})
+	reqFiles, err := collectRequestFiles(files, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
 	}
 
 	cfg, err := config.Load()
@@ -999,17 +987,10 @@ func runCompile(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return exitUsage
 	}
 
-	reqFiles := make([]protocol.SourceFile, 0, len(files))
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return exitUsage
-		}
-		reqFiles = append(reqFiles, protocol.SourceFile{
-			Path:    requestPathForLocalFile(path),
-			Content: string(data),
-		})
+	reqFiles, err := collectRequestFiles(files, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
 	}
 
 	cfg, err := config.Load()
@@ -1625,10 +1606,12 @@ func printBrowserHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--json]
 
 Browser runs are offline-only. Remote http:// and https:// URLs are disabled.
+Stage full local asset trees with --path when you need images, fonts, or other binary files.
 
 Examples:
   squire browser --script login-test.js --browser chromium --json
   squire browser --file index.html --screenshot page.png --json
+  squire browser --path website/public --screenshot page.png --json
 `)
 }
 
@@ -1707,21 +1690,15 @@ func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {
 	out := make([]protocol.SourceFile, 0, len(files))
 	seen := map[string]struct{}{}
 	addPath := func(localPath, requestPath string) error {
-		data, err := os.ReadFile(localPath)
+		file, err := sourceFileForPath(localPath, requestPath)
 		if err != nil {
 			return err
 		}
-		if requestPath == "" {
-			requestPath = requestPathForLocalFile(localPath)
-		}
-		if _, ok := seen[requestPath]; ok {
+		if _, ok := seen[file.Path]; ok {
 			return nil
 		}
-		seen[requestPath] = struct{}{}
-		out = append(out, protocol.SourceFile{
-			Path:    requestPath,
-			Content: string(data),
-		})
+		seen[file.Path] = struct{}{}
+		out = append(out, file)
 		return nil
 	}
 
@@ -1773,6 +1750,48 @@ func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {
 	}
 
 	return out, nil
+}
+
+func sourceFileForPath(localPath, requestPath string) (protocol.SourceFile, error) {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return protocol.SourceFile{}, err
+	}
+	if requestPath == "" {
+		requestPath = requestPathForLocalFile(localPath)
+	}
+	file := protocol.SourceFile{Path: requestPath}
+	if shouldInlineFileAsText(data) {
+		file.Content = string(data)
+		return file, nil
+	}
+	file.Content = base64.StdEncoding.EncodeToString(data)
+	file.Encoding = "base64"
+	return file, nil
+}
+
+func shouldInlineFileAsText(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	if !utf8.Valid(data) {
+		return false
+	}
+	limit := len(data)
+	if limit > 8192 {
+		limit = 8192
+	}
+	for _, b := range data[:limit] {
+		switch {
+		case b == 0:
+			return false
+		case b < 0x09:
+			return false
+		case b > 0x0d && b < 0x20:
+			return false
+		}
+	}
+	return true
 }
 
 func readOptionalFile(path string) (string, error) {
