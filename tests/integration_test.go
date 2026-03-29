@@ -981,6 +981,144 @@ func TestCompileJSONRequestPreservesNestedRelativePaths(t *testing.T) {
 	}
 }
 
+func TestCompileJSONRequestPreservesNestedAbsolutePathsOutsideCWD(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectRoot, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(projectRoot, "Cargo.toml")
+	mainPath := filepath.Join(projectRoot, "src", "main.rs")
+	if err := os.WriteFile(manifestPath, []byte("[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainPath, []byte("fn main() { println!(\"ok\"); }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req protocol.CompileRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		gotPaths := make([]string, 0, len(req.Files))
+		for _, file := range req.Files {
+			gotPaths = append(gotPaths, file.Path)
+		}
+		for _, want := range []string{"Cargo.toml", "src/main.rs"} {
+			if !containsString(gotPaths, want) {
+				t.Fatalf("expected staged path %q in %+v", want, gotPaths)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(protocol.CompileResponse{
+			RequestID: "req_compile_abs_paths",
+			Language:  "rust",
+			Summary:   protocol.CompileSummary{Passed: 1},
+			Results:   []protocol.CompileResult{{Target: "linux/amd64-musl", Status: "pass", RuntimeMS: 15}},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"compile", "--lang", "rust", "--file", manifestPath, "--file", mainPath, "--targets", "linux/amd64-musl", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_compile_abs_paths"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestAuditStaticConfigUsesStagedRequestPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectRoot := t.TempDir()
+	srcDir := filepath.Join(projectRoot, "src")
+	if err := os.MkdirAll(srcDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(projectRoot, "semgrep.yml")
+	if err := os.WriteFile(configPath, []byte("rules: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "app.py"), []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req protocol.AuditRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Config != "semgrep.yml" {
+			t.Fatalf("expected staged config path, got %q", req.Config)
+		}
+		gotPaths := make([]string, 0, len(req.Files))
+		for _, file := range req.Files {
+			gotPaths = append(gotPaths, file.Path)
+		}
+		if !containsString(gotPaths, "semgrep.yml") {
+			t.Fatalf("expected staged config file in %+v", gotPaths)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.AuditResponse{
+			RequestID: "req_audit_static_config",
+			Kind:      "static",
+			Tool:      "semgrep",
+			Summary:   protocol.AuditSummary{Passed: 1},
+			Results:   []protocol.AuditResult{{Target: "default", Status: "pass", RuntimeMS: 12}},
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"audit", "--static", "--tool", "semgrep", "--config", configPath, "--path", srcDir, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_audit_static_config"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
 func TestSolveJSONRequestViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

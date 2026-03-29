@@ -706,6 +706,9 @@ func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "--lang is required for dependency audit")
 		return exitUsage
 	}
+	if kind == "static" && strings.TrimSpace(*configValue) != "" && !containsPath(files, *configValue) {
+		files = append(files, *configValue)
+	}
 
 	reqFiles, err := collectRequestFiles(files, paths)
 	if err != nil {
@@ -724,11 +727,15 @@ func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
 	var resp protocol.AuditResponse
+	configPath := ""
+	if kind == "static" && strings.TrimSpace(*configValue) != "" {
+		configPath = requestPathForLocalFileFromBase(*configValue, commonAncestorDir(files))
+	}
 	if err := client.DoJSON(ctx, http.MethodPost, "/v1/audit", protocol.AuditRequest{
 		Kind:           kind,
 		Language:       *lang,
 		Tool:           *tool,
-		Config:         *configValue,
+		Config:         configPath,
 		Targets:        splitCSV(*targets),
 		Files:          reqFiles,
 		TimeoutSeconds: *timeout,
@@ -1689,6 +1696,7 @@ Examples:
 func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {
 	out := make([]protocol.SourceFile, 0, len(files))
 	seen := map[string]struct{}{}
+	fileBaseDir := commonAncestorDir(files)
 	addPath := func(localPath, requestPath string) error {
 		file, err := sourceFileForPath(localPath, requestPath)
 		if err != nil {
@@ -1710,7 +1718,7 @@ func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {
 		if info.IsDir() {
 			return nil, fmt.Errorf("--file expects a file, got directory: %s", filePath)
 		}
-		if err := addPath(filePath, ""); err != nil {
+		if err := addPath(filePath, requestPathForLocalFileFromBase(filePath, fileBaseDir)); err != nil {
 			return nil, err
 		}
 	}
@@ -1834,4 +1842,60 @@ func requestPathForLocalFile(path string) string {
 		}
 	}
 	return filepath.Base(path)
+}
+
+func requestPathForLocalFileFromBase(path, baseDir string) string {
+	if strings.TrimSpace(baseDir) != "" {
+		absPath, err := filepath.Abs(path)
+		if err == nil {
+			absPath = filepath.Clean(absPath)
+			if rel, relErr := filepath.Rel(baseDir, absPath); relErr == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+				return filepath.ToSlash(rel)
+			}
+		}
+	}
+	return requestPathForLocalFile(path)
+}
+
+func commonAncestorDir(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	firstPath, err := filepath.Abs(paths[0])
+	if err != nil {
+		return ""
+	}
+	common := filepath.Dir(filepath.Clean(firstPath))
+	for _, path := range paths[1:] {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return ""
+		}
+		absPath = filepath.Clean(absPath)
+		for {
+			rel, relErr := filepath.Rel(common, absPath)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				break
+			}
+			parent := filepath.Dir(common)
+			if parent == common {
+				return ""
+			}
+			common = parent
+		}
+	}
+	if filepath.Dir(common) == common {
+		return ""
+	}
+	return common
+}
+
+func containsPath(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return true
+		}
+	}
+	return false
 }
