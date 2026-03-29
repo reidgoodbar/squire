@@ -1,75 +1,84 @@
 # Squire CLI
 
-Standalone repo for the Squire command-line client.
+Squire is a CLI for running short validation and offload jobs in clean remote runtimes. Use it for cross-environment checks, fresh validation loops, target compilation checks, ephemeral SQL sandboxes, and short heavy jobs that are awkward to run locally.
 
-## What It Does
+## Quick start
 
-- authenticates against the Squire API
-- updates the installed CLI from the published release channel
-- stores local session state in `~/.squire/config.json`
-- runs `verify`
-- runs `test` for short fresh-runtime test suites
-- runs `lint` for fresh-toolchain lint and static-analysis checks
-- runs `audit` for dependency, secret, and Semgrep checks
-- runs `build` for clean packaging/build sanity checks
-- runs `bench` for short comparative timing runs
-- runs `browser` for constrained offline headless Chromium jobs
-- includes `deps`, which is currently disabled on the public service under the zero-egress policy
-- runs `sql` against ephemeral SQLite and Postgres sandboxes
-- runs `compile` for cross-target Go and Rust build checks
-- runs `solve` for Z3 and MiniZinc jobs
-- runs `data` and `media` jobs in isolated fresh runtimes
+```bash
+curl -fsSL https://squire.run/install.sh | bash
+squire login
+squire --help
+```
 
-## Agent Workflows
+Defaults to:
 
-Squire is intentionally CLI-first. It works well in terminal-first coding-agent workflows and automated shell-based validation loops that need clean disposable runtimes without adding a new protocol layer.
+- `https://api.squire.run`
 
-Claude Code, Codex, and similar tools are examples, not special integrations.
+Works on:
 
-Copy the example instruction files from `docs/agent/` into your own repo or environment and trim them to fit your workflow:
+- macOS
+- Linux
+- WSL
+
+Update later with:
+
+```bash
+squire update
+```
+
+## Command discovery
+
+Use these first:
+
+- `squire --help` shows the command catalog
+- `squire --help --json` shows the command catalog in machine-readable form
+- `squire <command> --help` shows command-specific usage
+
+Prefer `--json` when another tool or agent will read the result.
+
+## Task-to-command mapping
+
+Use Squire when a task is environment-sensitive, target-sensitive, or short but heavy.
+
+- shell, Python, or Node runtime validation -> `squire verify`
+- short clean test runs -> `squire test`
+- lint or static analysis -> `squire lint`
+- Go or Rust target compilation -> `squire compile`
+- SQLite or Postgres validation -> `squire sql`
+- dependency, security, secret, or static checks -> `squire audit`
+- solver tasks -> `squire solve`
+- pandas, polars, or pyarrow jobs -> `squire data`
+- ffmpeg or media transforms -> `squire media`
+- offline headless browser verification -> `squire browser`
+- packaging or build sanity checks -> `squire build`
+- short comparative timing runs -> `squire bench`
+
+Public-service note:
+
+- `deps` exists in the CLI, but is currently disabled on the public service under the zero-egress policy
+
+## Agent workflows
+
+Squire is intentionally CLI-first and works well in terminal-first coding-agent workflows such as Claude Code, Codex, and shell-driven automation.
+
+Copy and trim the example instruction files in `docs/agent/` for your own environment:
 
 - `docs/agent/CLAUDE.md.example`
 - `docs/agent/SKILLS.md.example`
 - `docs/agent/CODEX.md.example`
 - `docs/agent/squire-usage-guidelines.md`
 
-These are templates for common agent setups, not product-specific lock-in.
+Prefer local execution for tiny trivial checks. Prefer Squire when correctness depends on a fresh environment or when the task is too annoying to run locally.
 
-Use Squire when a task is environment-sensitive, dependency-sensitive, compile-target-sensitive, short but heavy, or easier to reason about with structured JSON output. Prefer local execution for tiny trivial checks.
-
-Current zero-egress policy notes:
+## Current public-service limits
 
 - `browser` is offline-only and does not fetch remote `http://` or `https://` URLs
 - `deps` is currently disabled on the public service because sandbox egress is not allowed
 - `audit` supports secret scanning and local-config static analysis; dependency audit and remote Semgrep configs are disabled
 
-For command discovery:
-
-- `squire --help` prints the full command catalog with one-line guidance
-- `squire --help --json` prints the command catalog in a machine-readable form for agents
-- `squire <command> --help` prints command-specific usage
-
-Optional MCP mode:
-
-- `squire mcp serve` exposes the same Squire command surface over MCP stdio for MCP-compatible hosts and editors
-- the MCP server reuses the current local Squire login/session
-- Squire remains CLI-first; MCP is an optional wrapper, not a separate backend
-
-## Default API
-
-The published CLI defaults to:
-
-```text
-https://api.squire.run
-```
-
-Override per command with `--api-base-url` or globally with `SQUIRE_API_BASE_URL`.
-
-## Commands
+## Command examples
 
 ```bash
-squire update
-squire mcp serve
 squire verify --lang python --file script.py --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
@@ -84,28 +93,24 @@ squire data --script transform.py --input big.csv --json
 squire media --script clip.py --input video.mp4 --json
 ```
 
-`browser`, `test`, `lint`, `audit`, `build`, `bench`, and `compile` stage local files through the shared request-file path. Text files are sent directly; binary assets such as images are automatically staged safely so real directory trees work without rewriting them as text.
+## Optional MCP mode
 
-## Local Build
+```bash
+squire mcp serve
+```
+
+This exposes the same Squire command surface over MCP stdio and reuses the current local Squire session. Squire remains CLI-first; MCP is an optional wrapper.
+
+## Local build
 
 ```bash
 go build -o ./bin/squire ./cmd/squire
 ```
 
-## Release Packaging
-
-Create release archives locally:
+## Release packaging
 
 ```bash
 ./scripts/build-release.sh
 ```
 
-Artifacts are written to `dist/` using stable names such as:
-
-- `squire_darwin_amd64.tar.gz`
-- `squire_darwin_arm64.tar.gz`
-- `squire_linux_amd64.tar.gz`
-- `squire_linux_arm64.tar.gz`
-
-Those names are what `https://squire.run/install.sh` downloads from the latest GitHub release.
-The published archives also embed the release version so `squire update` can report what it installed.
+Artifacts go to `dist/` and use the same stable names that `https://squire.run/install.sh` downloads.
