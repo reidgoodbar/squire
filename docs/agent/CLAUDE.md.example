@@ -18,7 +18,7 @@ Use Squire when the task is:
 Prefer these commands:
 
 - `squire verify` for fresh Linux runtime checks across targets
-- `squire deps` for clean Python or Node install validation
+- `squire deps` exists, but is currently disabled on the public service under the zero-egress policy
 - `squire compile` for Go or Rust target compilation checks
 - `squire test` for short clean test runs
 - `squire lint` for clean lint and static-analysis runs
@@ -30,7 +30,7 @@ Prefer these commands:
 - `squire build` for packaging/build sanity checks
 - `squire solve` for Z3 or MiniZinc tasks
 
-Do not use Squire for long-running workflows, persistent environments, arbitrary remote shells, or unrestricted internet tasks unless the command explicitly supports that behavior.
+Do not use Squire for long-running workflows, persistent environments, arbitrary remote shells, or unrestricted internet tasks.
 
 Prefer `--json` when another tool or agent will read the result.
 
@@ -40,7 +40,6 @@ Examples:
 
 ```bash
 squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
-squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire data --script transform.py --input big.csv --json

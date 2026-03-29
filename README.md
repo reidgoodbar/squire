@@ -13,8 +13,8 @@ Standalone repo for the Squire command-line client.
 - runs `audit` for dependency, secret, and Semgrep checks
 - runs `build` for clean packaging/build sanity checks
 - runs `bench` for short comparative timing runs
-- runs `browser` for constrained headless Chromium jobs
-- runs `deps` for fresh dependency-install checks
+- runs `browser` for constrained offline headless Chromium jobs
+- includes `deps`, which is currently disabled on the public service under the zero-egress policy
 - runs `sql` against ephemeral SQLite and Postgres sandboxes
 - runs `compile` for cross-target Go and Rust build checks
 - runs `solve` for Z3 and MiniZinc jobs
@@ -36,6 +36,12 @@ Copy the example instruction files from `docs/agent/` into your own repo or envi
 These are templates for common agent setups, not product-specific lock-in.
 
 Use Squire when a task is environment-sensitive, dependency-sensitive, compile-target-sensitive, short but heavy, or easier to reason about with structured JSON output. Prefer local execution for tiny trivial checks.
+
+Current zero-egress policy notes:
+
+- `browser` is offline-only and does not fetch remote `http://` or `https://` URLs
+- `deps` is currently disabled on the public service because sandbox egress is not allowed
+- `audit` supports secret scanning and local-config static analysis; dependency audit and remote Semgrep configs are disabled
 
 For command discovery:
 
@@ -71,7 +77,6 @@ squire audit --secrets --path src --json
 squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
 squire bench --lang python --file bench.py --targets py310,py311 --json
 squire browser --file index.html --screenshot page.png --json
-squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
 squire sql --dialect sqlite --query "SELECT 1" --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire solve --solver z3 --file constraints.smt2 --json

@@ -657,6 +657,28 @@ func TestBrowserJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestBrowserRemoteURLRejectedInCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: "sqh_test",
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"browser", "--url", "https://example.com"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected usage exit, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "browser remote URLs are disabled") {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestCompileJSONRequestViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

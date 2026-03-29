@@ -364,7 +364,7 @@ func mcpToolMap() map[string]mcpTool {
 		mcpCLIJSONTool(
 			"deps",
 			"Squire Deps",
-			"Validate Python or Node dependency installation in a fresh environment.",
+			"Dependency validation surface. The public zero-egress service currently rejects deps requests.",
 			schemaObject(map[string]interface{}{
 				"language": schemaString("Dependency language: python or node."),
 				"file":     schemaString("Path to the dependency manifest to upload."),
@@ -528,11 +528,11 @@ func mcpToolMap() map[string]mcpTool {
 			"Squire Audit",
 			"Run dependency, secret, or static security checks.",
 			schemaObject(map[string]interface{}{
-				"language": schemaString("Audit language. Required for dependency audit."),
+				"language": schemaString("Audit language. Dependency audit is currently disabled under the zero-egress policy."),
 				"secrets":  schemaBoolean("Run the built-in secret scanner."),
 				"static":   schemaBoolean("Run static analysis."),
 				"tool":     schemaString("Audit tool, such as semgrep."),
-				"config":   schemaString("Static analysis config, such as p/security."),
+				"config":   schemaString("Static analysis config. Use a staged local config file path."),
 				"files":    schemaStringArray("Local file paths to stage."),
 				"paths":    schemaStringArray("Local directory paths to stage recursively."),
 				"targets":  schemaStringList("Audit targets as an array or CSV string."),
@@ -677,16 +677,15 @@ func mcpToolMap() map[string]mcpTool {
 		mcpCLIJSONTool(
 			"browser",
 			"Squire Browser",
-			"Run constrained headless browser verification.",
+			"Run constrained headless browser verification in an offline sandbox.",
 			schemaObject(map[string]interface{}{
-				"browser":       schemaString("Browser engine, currently chromium."),
-				"script":        schemaString("Path to a browser automation script to stage."),
-				"url":           schemaString("URL to open. Remote URLs require allow_network."),
-				"screenshot":    schemaString("Optional screenshot filename to produce."),
-				"allow_network": schemaBoolean("Allow outbound browser network access for remote URLs."),
-				"files":         schemaStringArray("Local file paths to stage."),
-				"paths":         schemaStringArray("Local directory paths to stage recursively."),
-				"timeout":       schemaInteger("Browser timeout in seconds."),
+				"browser":    schemaString("Browser engine, currently chromium."),
+				"script":     schemaString("Path to a browser automation script to stage."),
+				"url":        schemaString("Offline URL to open, such as a file:// URL."),
+				"screenshot": schemaString("Optional screenshot filename to produce."),
+				"files":      schemaStringArray("Local file paths to stage."),
+				"paths":      schemaStringArray("Local directory paths to stage recursively."),
+				"timeout":    schemaInteger("Browser timeout in seconds."),
 			}),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				args := make([]string, 0)
@@ -701,11 +700,6 @@ func mcpToolMap() map[string]mcpTool {
 				}
 				if screenshot := optionalString(arguments, "screenshot"); screenshot != "" {
 					args = append(args, "--screenshot", screenshot)
-				}
-				if allowNetwork, ok, err := optionalBool(arguments, "allow_network"); err != nil {
-					return nil, "", err
-				} else if ok && allowNetwork {
-					args = append(args, "--allow-network")
 				}
 				if files, err := optionalStringArray(arguments, "files"); err != nil {
 					return nil, "", err

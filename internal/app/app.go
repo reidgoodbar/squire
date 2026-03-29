@@ -55,7 +55,7 @@ func rootCommandCatalog() []rootCommandHelp {
 		{Name: "logout", Category: "session", Summary: "clear the local Squire session"},
 		{Name: "mcp", Category: "integration", Summary: "serve the Squire tool surface over MCP stdio"},
 		{Name: "verify", Category: "validation", Summary: "run shell, Python, or Node checks in fresh Linux runtimes"},
-		{Name: "deps", Category: "validation", Summary: "validate dependency installation in fresh Python or Node environments"},
+		{Name: "deps", Category: "validation", Summary: "dependency validation surface; currently disabled on the public zero-egress service"},
 		{Name: "sql", Category: "validation", Summary: "run ephemeral SQLite or Postgres validation"},
 		{Name: "test", Category: "validation", Summary: "run short clean test suites in fresh runtimes"},
 		{Name: "lint", Category: "validation", Summary: "run lint and static analysis in fresh toolchains"},
@@ -685,11 +685,11 @@ func runLint(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	lang := fs.String("lang", "", "Audit language. Phase 2 supports python dependency audit.")
+	lang := fs.String("lang", "", "Audit language. Dependency audit is currently disabled on the public zero-egress service.")
 	secrets := fs.Bool("secrets", false, "Run the built-in secret scanner")
 	static := fs.Bool("static", false, "Run static analysis")
 	tool := fs.String("tool", "", "Audit tool. Phase 2 supports semgrep for static analysis.")
-	configValue := fs.String("config", "", "Static analysis config, such as p/security or a staged config file path")
+	configValue := fs.String("config", "", "Static analysis config as a staged local file path")
 	var files multiStringFlag
 	var paths multiStringFlag
 	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
@@ -900,9 +900,8 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.SetOutput(stderr)
 	browser := fs.String("browser", "chromium", "Browser runtime. Phase 3 supports chromium.")
 	scriptPath := fs.String("script", "", "Path to a browser automation script to stage")
-	url := fs.String("url", "", "URL to open. Remote URLs require --allow-network")
+	url := fs.String("url", "", "URL to open. Remote URLs are disabled; stage local files instead")
 	screenshot := fs.String("screenshot", "", "Optional screenshot filename to produce as an artifact")
-	allowNetwork := fs.Bool("allow-network", false, "Allow outbound browser network access for remote URLs")
 	var files multiStringFlag
 	var paths multiStringFlag
 	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
@@ -927,6 +926,10 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if *scriptPath != "" {
 		requestScriptPath = requestPathForLocalFile(*scriptPath)
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(*url)), "http://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(*url)), "https://") {
+		fmt.Fprintln(stderr, "browser remote URLs are disabled; upload local files instead")
+		return exitUsage
+	}
 	if *url == "" && requestScriptPath == "" && len(reqFiles) == 0 {
 		fmt.Fprintln(stderr, "provide --url, --script, or staged files for browser execution")
 		return exitUsage
@@ -945,7 +948,6 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		ScriptPath:     requestScriptPath,
 		URL:            *url,
 		ScreenshotName: *screenshot,
-		AllowNetwork:   *allowNetwork,
 		TimeoutSeconds: *timeout,
 	}, &resp); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -1551,6 +1553,8 @@ Examples:
 func printDepsHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire deps --lang <python|node> --file <path> [--targets <csv>] [--timeout <seconds>] [--json]
 
+The public service currently disables deps under the zero-egress policy.
+
 Examples:
   squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
   squire deps --lang node --file package.json --json
@@ -1588,12 +1592,13 @@ Examples:
 }
 
 func printAuditHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire audit [--lang python --file <path>] [--secrets | --static --tool semgrep --config <config>] [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire audit [--secrets | --static --tool semgrep --config <local-config>] [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
+
+Dependency audit is disabled under the current zero-egress policy. Semgrep static audit requires a staged local config file if you need a custom config.
 
 Examples:
-  squire audit --lang python --file requirements.txt --json
   squire audit --secrets --path ./src --json
-  squire audit --static --tool semgrep --config p/security --path ./src --json
+  squire audit --static --tool semgrep --config semgrep.yml --file semgrep.yml --path ./src --json
 `)
 }
 
@@ -1617,11 +1622,12 @@ Examples:
 }
 
 func printBrowserHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--allow-network] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--json]
+
+Browser runs are offline-only. Remote http:// and https:// URLs are disabled.
 
 Examples:
   squire browser --script login-test.js --browser chromium --json
-  squire browser --url https://example.com --screenshot page.png --allow-network --json
   squire browser --file index.html --screenshot page.png --json
 `)
 }

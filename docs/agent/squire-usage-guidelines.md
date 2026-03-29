@@ -23,7 +23,7 @@ The tool-specific example files in this folder are just variants of the same pat
 ## Command Selection
 
 - `squire verify`: shell, Python, or Node checks across fresh Linux targets
-- `squire deps`: clean Python or Node dependency-install validation
+- `squire deps`: present in the CLI, but currently disabled on the public service under the zero-egress policy
 - `squire compile`: Go or Rust compilation checks for target environments
 - `squire test`: short clean test runs
 - `squire lint`: clean lint and static-analysis runs
@@ -45,7 +45,7 @@ Preferred naming:
 
 - long-running workflows
 - arbitrary remote shells
-- unrestricted internet tasks unless explicitly supported
+- unrestricted internet tasks
 - general interactive development
 - persistent environments
 
@@ -55,6 +55,8 @@ Preferred naming:
 - prefer `--json` for agent-driven loops
 - keep Squire for short validation runs, not full development
 - rerun locally only when the task is trivial or easier to debug locally
+- treat `browser` as offline-only and upload local files instead of pointing it at remote URLs
+- avoid planning around `deps` on the public service until there is a network-free design for it
 
 ## Optional MCP Mode
 
@@ -66,7 +68,6 @@ Use MCP when your host expects tool discovery through MCP. Use the normal CLI di
 
 ```bash
 squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
-squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire lint --lang python --tool ruff --file app.py --json
