@@ -25,6 +25,7 @@ The tool-specific example files in this folder are just variants of the same pat
 - `squire verify`: shell, Python, or Node checks across fresh Linux targets
 - `squire deps`: present in the CLI, but currently disabled on the public service under the zero-egress policy
 - `squire compile`: Go or Rust compilation checks for target environments
+- `squire quantum simulate`: offline Qiskit Aer simulations for bounded quantum experiments
 - `squire test`: short clean test runs
 - `squire lint`: clean lint and static-analysis runs
 - `squire sql`: ephemeral SQLite or Postgres validation
@@ -57,6 +58,7 @@ Preferred naming:
 - rerun locally only when the task is trivial or easier to debug locally
 - treat `browser` as offline-only and upload local files instead of pointing it at remote URLs
 - avoid planning around `deps` on the public service until there is a network-free design for it
+- plan around `quantum simulate` as a trusted-only public feature with no outbound network
 
 ## Optional MCP Mode
 
@@ -69,6 +71,7 @@ Use MCP when your host expects tool discovery through MCP. Use the normal CLI di
 ```bash
 squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+squire quantum simulate --file shor.py --shots 2048 --json
 squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire lint --lang python --tool ruff --file app.py --json
 squire sql --dialect sqlite --query "SELECT 1" --json

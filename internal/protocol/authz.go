@@ -43,6 +43,7 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeSQLRun,
 			ScopeCompileRun,
 			ScopeSolveRun,
+			ScopeQuantumRun,
 			ScopeTestRun,
 			ScopeLintRun,
 			ScopeAuditRun,
@@ -63,6 +64,7 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeSQLRun,
 			ScopeCompileRun,
 			ScopeSolveRun,
+			ScopeQuantumRun,
 			ScopeTestRun,
 			ScopeLintRun,
 			ScopeAuditRun,
@@ -72,7 +74,27 @@ func AllowedTokenScopesForTier(tier string) []string {
 			ScopeScaleData,
 			ScopeScaleMedia,
 		}
-	case TrustTrusted, TrustGitHubBasic:
+	case TrustTrusted:
+		return []string{
+			ScopeUserRead,
+			ScopeVerifyRun,
+			ScopeDataRun,
+			ScopeMediaRun,
+			ScopeDepsRun,
+			ScopeSQLRun,
+			ScopeCompileRun,
+			ScopeSolveRun,
+			ScopeQuantumRun,
+			ScopeTestRun,
+			ScopeLintRun,
+			ScopeAuditRun,
+			ScopeBuildRun,
+			ScopeBenchRun,
+			ScopeBrowserRun,
+			ScopeScaleData,
+			ScopeScaleMedia,
+		}
+	case TrustGitHubBasic:
 		return []string{
 			ScopeUserRead,
 			ScopeVerifyRun,

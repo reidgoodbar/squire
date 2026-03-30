@@ -1180,6 +1180,72 @@ func TestSolveJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestQuantumSimulateJSONRequestViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	entryPath := filepath.Join(projectDir, "shor.py")
+	helperPath := filepath.Join(projectDir, "helpers.py")
+	if err := os.WriteFile(entryPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(helperPath, []byte("VALUE = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/quantum/simulate" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.QuantumSimulateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.EntryFile != "shor.py" || req.Shots != 2048 || req.Backend != "aer_simulator" || len(req.Files) != 2 {
+			t.Fatalf("unexpected quantum request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.QuantumSimulateResponse{
+			RequestID: "req_quantum",
+			Status:    "ok",
+			RuntimeMS: 42,
+			Backend:   "aer_simulator",
+			Shots:     2048,
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"quantum", "simulate", "--file", entryPath, "--file", helperPath, "--shots", "2048", "--backend", "aer_simulator", "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_quantum"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
 func TestUpdateInstallsReleaseArchive(t *testing.T) {
 	installDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
@@ -1249,7 +1315,7 @@ func TestRootHelpListsNewCommands(t *testing.T) {
 		t.Fatalf("unexpected exit code: %d", code)
 	}
 	text := stdout.String()
-	for _, needle := range []string{"squire update", "squire mcp", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire data", "squire media", "squire --help --json"} {
+	for _, needle := range []string{"squire update", "squire mcp", "squire deps", "squire sql", "squire test", "squire lint", "squire audit", "squire build", "squire bench", "squire browser", "squire compile", "squire solve", "squire quantum", "squire data", "squire media", "squire --help --json"} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected root help to contain %q, got %s", needle, text)
 		}
@@ -1280,6 +1346,7 @@ func TestRootHelpJSONListsCommands(t *testing.T) {
 		"verify":  false,
 		"deps":    false,
 		"compile": false,
+		"quantum": false,
 		"data":    false,
 		"media":   false,
 		"scale":   false,
@@ -1384,10 +1451,134 @@ func TestMCPToolsListIncludesCoreCommands(t *testing.T) {
 		name, _ := tool["name"].(string)
 		seen[name] = true
 	}
-	for _, name := range []string{"help", "whoami", "verify", "deps", "sql", "test", "lint", "audit", "build", "bench", "browser", "compile", "solve", "data", "media"} {
+	for _, name := range []string{"help", "whoami", "verify", "deps", "sql", "test", "lint", "audit", "build", "bench", "browser", "compile", "solve", "quantum_simulate", "data", "media"} {
 		if !seen[name] {
 			t.Fatalf("missing MCP tool %q in %v", name, seen)
 		}
+	}
+}
+
+func TestMCPQuantumSimulateToolCallUsesExistingCLIFlow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	entryPath := filepath.Join(projectDir, "shor.py")
+	if err := os.WriteFile(entryPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/quantum/simulate" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.QuantumSimulateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.EntryFile != "shor.py" || req.Shots != 1024 {
+			t.Fatalf("unexpected quantum request: %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.QuantumSimulateResponse{
+			RequestID: "req_quantum_mcp",
+			Status:    "ok",
+			RuntimeMS: 55,
+			Backend:   "aer_simulator",
+			Shots:     1024,
+		})
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	requests := []map[string]interface{}{
+		{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "initialize",
+			"params": map[string]interface{}{
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]interface{}{},
+				"clientInfo": map[string]interface{}{
+					"name":    "test-client",
+					"version": "1.0.0",
+				},
+			},
+		},
+		{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name": "quantum_simulate",
+				"arguments": map[string]interface{}{
+					"files": []string{entryPath},
+				},
+			},
+		},
+	}
+
+	var stdin bytes.Buffer
+	for _, request := range requests {
+		data, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdin.Write(data)
+		stdin.WriteByte('\n')
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, &stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	var responses []map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	for {
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode mcp response: %v\nraw=%s", err, stdout.String())
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(responses), stdout.String())
+	}
+
+	callResult, ok := responses[1]["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing tools/call result: %+v", responses[1])
+	}
+	structured, ok := callResult["structuredContent"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing structuredContent: %+v", callResult)
+	}
+	if structured["request_id"] != "req_quantum_mcp" {
+		t.Fatalf("unexpected structured response: %+v", structured)
 	}
 }
 

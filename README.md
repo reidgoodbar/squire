@@ -44,6 +44,7 @@ Use Squire when a task is environment-sensitive, target-sensitive, or short but 
 - short clean test runs -> `squire test`
 - lint or static analysis -> `squire lint`
 - Go or Rust target compilation -> `squire compile`
+- offline Qiskit Aer simulation -> `squire quantum simulate`
 - SQLite or Postgres validation -> `squire sql`
 - dependency, security, secret, or static checks -> `squire audit`
 - solver tasks -> `squire solve`
@@ -75,6 +76,7 @@ Prefer local execution for tiny trivial checks. Prefer Squire when correctness d
 - `browser` is offline-only and does not fetch remote `http://` or `https://` URLs
 - `deps` is currently disabled on the public service because sandbox egress is not allowed
 - `audit` supports secret scanning and local-config static analysis; dependency audit and remote Semgrep configs are disabled
+- `quantum simulate` is offline-only and currently requires `trusted` access or higher on the public service
 
 ## Command examples
 
@@ -82,6 +84,7 @@ Prefer local execution for tiny trivial checks. Prefer Squire when correctness d
 squire verify --lang python --file script.py --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
+squire quantum simulate --file shor.py --shots 2048 --json
 squire audit --secrets --path src --json
 squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
 squire bench --lang python --file bench.py --targets py310,py311 --json
@@ -92,6 +95,8 @@ squire solve --solver z3 --file constraints.smt2 --json
 squire data --script transform.py --input big.csv --json
 squire media --script clip.py --input video.mp4 --json
 ```
+
+A tiny runnable quantum example is in `examples/quantum/shor.py`.
 
 ## Optional MCP mode
 

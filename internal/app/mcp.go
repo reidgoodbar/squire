@@ -291,6 +291,7 @@ func (s *mcpServer) listTools() []map[string]interface{} {
 		"browser",
 		"compile",
 		"solve",
+		"quantum_simulate",
 		"data",
 		"media",
 	}
@@ -788,6 +789,46 @@ func mcpToolMap() map[string]mcpTool {
 				return args, "", nil
 			},
 		),
+		{
+			Name:        "quantum_simulate",
+			Title:       "Squire Quantum Simulate",
+			Description: "Run an offline Qiskit Aer simulation in a dedicated runtime.",
+			InputSchema: schemaObject(map[string]interface{}{
+				"files":   schemaStringArray("Local file paths to stage. The first file is the Python entry script."),
+				"shots":   schemaInteger("Shot count passed to the simulation."),
+				"backend": schemaString("Quantum backend. v1 supports only aer_simulator."),
+				"timeout": schemaInteger("Simulation timeout in seconds."),
+			}, "files"),
+			Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
+				_ = ctx
+				files, err := requiredStringArray(arguments, "files")
+				if err != nil {
+					return mcpToolResult{}, err
+				}
+				args := []string{"quantum", "simulate"}
+				for _, file := range files {
+					args = append(args, "--file", file)
+				}
+				if shots, ok, err := optionalInt(arguments, "shots"); err != nil {
+					return mcpToolResult{}, err
+				} else if ok {
+					args = append(args, "--shots", fmt.Sprintf("%d", shots))
+				}
+				if backend := optionalString(arguments, "backend"); backend != "" {
+					args = append(args, "--backend", backend)
+				}
+				if timeout, ok, err := optionalInt(arguments, "timeout"); err != nil {
+					return mcpToolResult{}, err
+				} else if ok {
+					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				args = append(args, "--json")
+				var stdout bytes.Buffer
+				var stderr bytes.Buffer
+				code := Run(args, strings.NewReader(""), &stdout, &stderr)
+				return parseMCPCLIResult(stdout.String(), stderr.String(), code), nil
+			},
+		},
 		mcpCLIJSONTool(
 			"data",
 			"Squire Data",

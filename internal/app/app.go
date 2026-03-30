@@ -67,6 +67,7 @@ func rootCommandCatalog() []rootCommandHelp {
 		{Name: "browser", Category: "validation", Summary: "run constrained headless browser verification"},
 		{Name: "compile", Category: "validation", Summary: "check Go or Rust compilation for target environments"},
 		{Name: "solve", Category: "validation", Summary: "run Z3 or MiniZinc solver jobs"},
+		{Name: "quantum", Category: "validation", Summary: "run offline Qiskit Aer simulations in a dedicated runtime"},
 		{Name: "data", Category: "jobs", Summary: "run heavier pandas, polars, or pyarrow-style data jobs"},
 		{Name: "media", Category: "jobs", Summary: "run ffmpeg and media transformation jobs"},
 		{Name: "scale", Category: "jobs", Summary: "compatibility alias for data and media", Aliases: []string{"data", "media"}},
@@ -108,6 +109,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runCompile(ctx, args[1:], stdout, stderr)
 	case "solve":
 		return runSolve(ctx, args[1:], stdout, stderr)
+	case "quantum":
+		return runQuantum(ctx, args[1:], stdout, stderr)
 	case "data":
 		return runMode(ctx, args[1:], stdin, stdout, stderr, "data")
 	case "media":
@@ -186,6 +189,8 @@ func printCommandHelp(command string, stdout, stderr io.Writer) bool {
 		printCompileHelp(stdout)
 	case "solve":
 		printSolveHelp(stdout)
+	case "quantum":
+		printQuantumHelp(stdout)
 	case "data":
 		printDataHelp(stdout)
 	case "media":
@@ -1108,6 +1113,88 @@ func runSolve(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 }
 
+func runQuantum(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printQuantumHelp(stderr)
+		return exitUsage
+	}
+	switch args[0] {
+	case "simulate":
+		return runQuantumSimulate(ctx, args[1:], stdout, stderr)
+	case "help", "--help", "-h":
+		printQuantumHelp(stdout)
+		return exitOK
+	default:
+		fmt.Fprintf(stderr, "unknown quantum subcommand %q\n\n", args[0])
+		printQuantumHelp(stderr)
+		return exitUsage
+	}
+}
+
+func runQuantumSimulate(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("quantum simulate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var files multiStringFlag
+	fs.Var(&files, "file", "Path to the entry script to stage; repeat to add helper modules or assets")
+	shots := fs.Int("shots", 1024, "Shot count passed to the simulation via SQUIRE_QUANTUM_SHOTS")
+	backend := fs.String("backend", "aer_simulator", "Quantum backend. v1 supports only aer_simulator")
+	timeout := fs.Int("timeout", 300, "Quantum simulation timeout in seconds")
+	jsonOut := fs.Bool("json", false, "Print raw JSON response")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
+	fs.Usage = func() { printQuantumHelp(fs.Output()) }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if len(files) == 0 {
+		fmt.Fprintln(stderr, "at least one --file is required")
+		return exitUsage
+	}
+
+	reqFiles, err := collectRequestFiles(files, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitUsage
+	}
+	entryFile := reqFiles[0].Path
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	client := httpclient.New(pickBaseURL(*apiBaseURL, cfg.APIBaseURL), cfg.SessionToken)
+	var resp protocol.QuantumSimulateResponse
+	if err := client.DoJSON(ctx, http.MethodPost, "/v1/quantum/simulate", protocol.QuantumSimulateRequest{
+		EntryFile:      entryFile,
+		Files:          reqFiles,
+		Shots:          *shots,
+		Backend:        *backend,
+		TimeoutSeconds: *timeout,
+	}, &resp); err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitRemoteError
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(resp)
+	} else {
+		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Backend, resp.RuntimeMS)
+		if len(resp.Artifacts) > 0 {
+			fmt.Fprintf(stdout, "artifacts: %d\n", len(resp.Artifacts))
+		}
+		if resp.AgentSummary != "" {
+			fmt.Fprintln(stdout, resp.AgentSummary)
+		}
+	}
+	switch resp.Status {
+	case "ok":
+		return exitOK
+	case "timeout":
+		return exitTimeout
+	default:
+		return exitRemoteError
+	}
+}
+
 func runMode(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, mode string) int {
 	fs := flag.NewFlagSet(mode, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1305,7 +1392,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_ = json.NewEncoder(stdout).Encode(resp)
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ntest rph: %d\nlint rph: %d\naudit rph: %d\nbuild rph: %d\nbench rph: %d\nbrowser rph: %d\ncompile rph: %d\nsolve rph: %d\nfeatures: %s\n",
+	fmt.Fprintf(stdout, "user: %s\ntrust: %s\nverify rpm: %d\ndata rph: %d\nmedia rph: %d\ndeps rph: %d\nsql rph: %d\ntest rph: %d\nlint rph: %d\naudit rph: %d\nbuild rph: %d\nbench rph: %d\nbrowser rph: %d\ncompile rph: %d\nsolve rph: %d\nquantum rph: %d\nfeatures: %s\n",
 		resp.UserID,
 		resp.TrustTier,
 		resp.Quotas.VerifyRequestsPerMinute,
@@ -1321,6 +1408,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		resp.Quotas.BrowserRequestsPerHour,
 		resp.Quotas.CompileRequestsPerHour,
 		resp.Quotas.SolveRequestsPerHour,
+		resp.Quotas.QuantumRequestsPerHour,
 		strings.Join(resp.FeatureFlags, ","),
 	)
 	return exitOK
@@ -1490,6 +1578,7 @@ Validation:
   squire browser    run constrained headless browser verification
   squire compile    check Go or Rust compilation for target environments
   squire solve      run Z3 or MiniZinc solver jobs
+  squire quantum    run offline Qiskit Aer simulations in a dedicated runtime
 
 Jobs:
   squire data       run heavier pandas, polars, or pyarrow-style data jobs
@@ -1500,6 +1589,7 @@ Examples:
   squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12
   squire browser --path website/public --screenshot page.png --json
   squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
+  squire quantum simulate --file shor.py --json
 
 Use "squire <command> --help" for command-specific usage.
 Use "squire --help --json" for a machine-readable command catalog.
@@ -1637,6 +1727,22 @@ func printSolveHelp(w io.Writer) {
 Examples:
   squire solve --solver z3 --file constraints.smt2 --json
   squire solve --solver minizinc --file model.mzn --data data.dzn --json
+`)
+}
+
+func printQuantumHelp(w io.Writer) {
+	fmt.Fprint(w, `Usage:
+  squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--json]
+
+Notes:
+  - the first --file is the Python entry script
+  - additional --file values stage helper modules or local assets
+  - v1 supports only the offline Aer simulator backend
+  - the public service currently requires trusted access or higher for quantum simulate
+
+Examples:
+  squire quantum simulate --file shor.py --json
+  squire quantum simulate --file shor.py --file helpers.py --shots 2048 --timeout 300 --json
 `)
 }
 

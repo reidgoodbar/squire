@@ -24,6 +24,7 @@ const (
 	ScopeSQLRun     = "sql:run"
 	ScopeCompileRun = "compile:run"
 	ScopeSolveRun   = "solve:run"
+	ScopeQuantumRun = "quantum:run"
 	ScopeTestRun    = "test:run"
 	ScopeLintRun    = "lint:run"
 	ScopeAuditRun   = "audit:run"
@@ -52,6 +53,7 @@ type Quotas struct {
 	SQLRequestsPerHour      int `json:"sql_requests_per_hour"`
 	CompileRequestsPerHour  int `json:"compile_requests_per_hour"`
 	SolveRequestsPerHour    int `json:"solve_requests_per_hour"`
+	QuantumRequestsPerHour  int `json:"quantum_requests_per_hour"`
 	TestRequestsPerHour     int `json:"test_requests_per_hour"`
 	LintRequestsPerHour     int `json:"lint_requests_per_hour"`
 	AuditRequestsPerHour    int `json:"audit_requests_per_hour"`
@@ -65,6 +67,7 @@ type Quotas struct {
 	SQLConcurrency          int `json:"sql_concurrency"`
 	CompileConcurrency      int `json:"compile_concurrency"`
 	SolveConcurrency        int `json:"solve_concurrency"`
+	QuantumConcurrency      int `json:"quantum_concurrency"`
 	TestConcurrency         int `json:"test_concurrency"`
 	LintConcurrency         int `json:"lint_concurrency"`
 	AuditConcurrency        int `json:"audit_concurrency"`
@@ -84,6 +87,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      240,
 			CompileRequestsPerHour:  120,
 			SolveRequestsPerHour:    240,
+			QuantumRequestsPerHour:  40,
 			TestRequestsPerHour:     180,
 			LintRequestsPerHour:     240,
 			AuditRequestsPerHour:    180,
@@ -97,6 +101,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          10,
 			CompileConcurrency:      6,
 			SolveConcurrency:        10,
+			QuantumConcurrency:      4,
 			TestConcurrency:         8,
 			LintConcurrency:         10,
 			AuditConcurrency:        8,
@@ -113,6 +118,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      120,
 			CompileRequestsPerHour:  48,
 			SolveRequestsPerHour:    120,
+			QuantumRequestsPerHour:  24,
 			TestRequestsPerHour:     80,
 			LintRequestsPerHour:     120,
 			AuditRequestsPerHour:    80,
@@ -126,6 +132,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          4,
 			CompileConcurrency:      3,
 			SolveConcurrency:        4,
+			QuantumConcurrency:      2,
 			TestConcurrency:         3,
 			LintConcurrency:         4,
 			AuditConcurrency:        3,
@@ -142,6 +149,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      60,
 			CompileRequestsPerHour:  24,
 			SolveRequestsPerHour:    60,
+			QuantumRequestsPerHour:  12,
 			TestRequestsPerHour:     40,
 			LintRequestsPerHour:     80,
 			AuditRequestsPerHour:    40,
@@ -155,6 +163,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          3,
 			CompileConcurrency:      2,
 			SolveConcurrency:        3,
+			QuantumConcurrency:      1,
 			TestConcurrency:         2,
 			LintConcurrency:         3,
 			AuditConcurrency:        2,
@@ -171,6 +180,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLRequestsPerHour:      30,
 			CompileRequestsPerHour:  12,
 			SolveRequestsPerHour:    30,
+			QuantumRequestsPerHour:  0,
 			TestRequestsPerHour:     20,
 			LintRequestsPerHour:     40,
 			AuditRequestsPerHour:    20,
@@ -184,6 +194,7 @@ func QuotasForTrustTier(tier string) Quotas {
 			SQLConcurrency:          2,
 			CompileConcurrency:      1,
 			SolveConcurrency:        2,
+			QuantumConcurrency:      0,
 			TestConcurrency:         1,
 			LintConcurrency:         2,
 			AuditConcurrency:        1,
@@ -199,10 +210,12 @@ func QuotasForTrustTier(tier string) Quotas {
 func FeaturesForTrustTier(tier string) []string {
 	switch tier {
 	case TrustAdmin:
-		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale", "admin"}
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "quantum", "audit", "build", "bench", "browser", "scale", "admin"}
 	case TrustScaleAllowed:
-		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale"}
-	case TrustTrusted, TrustGitHubBasic:
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "quantum", "audit", "build", "bench", "browser", "scale"}
+	case TrustTrusted:
+		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "quantum", "audit", "build", "bench", "browser", "scale"}
+	case TrustGitHubBasic:
 		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "audit", "build", "bench", "browser", "scale"}
 	default:
 		return nil
@@ -538,6 +551,28 @@ type SolveResponse struct {
 	CombinedOutput string            `json:"combined_output"`
 	Truncated      bool              `json:"truncated"`
 	AgentSummary   string            `json:"agent_summary"`
+}
+
+type QuantumSimulateRequest struct {
+	EntryFile      string       `json:"entry_file"`
+	Files          []SourceFile `json:"files"`
+	Shots          int          `json:"shots,omitempty"`
+	Backend        string       `json:"backend,omitempty"`
+	TimeoutSeconds int          `json:"timeout_seconds,omitempty"`
+}
+
+type QuantumSimulateResponse struct {
+	RequestID      string     `json:"request_id"`
+	Status         string     `json:"status"`
+	RuntimeMS      int64      `json:"runtime_ms"`
+	Backend        string     `json:"backend"`
+	Shots          int        `json:"shots"`
+	Artifacts      []Artifact `json:"artifacts,omitempty"`
+	Stdout         string     `json:"stdout"`
+	Stderr         string     `json:"stderr"`
+	CombinedOutput string     `json:"combined_output"`
+	Truncated      bool       `json:"truncated"`
+	AgentSummary   string     `json:"agent_summary"`
 }
 
 type JobResponse struct {
