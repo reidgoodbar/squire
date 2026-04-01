@@ -81,7 +81,7 @@ Prefer local execution for tiny trivial checks. Prefer Squire when correctness d
 ## Command examples
 
 ```bash
-squire verify --lang python --file script.py --json
+squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12 --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
 squire quantum simulate --file shor.py --shots 2048 --json
