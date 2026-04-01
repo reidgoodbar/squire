@@ -76,5 +76,5 @@ squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire lint --lang python --tool ruff --file app.py --json
 squire sql --dialect sqlite --query "SELECT 1" --json
 squire data --script transform.py --input big.csv --json
-squire media --script clip.py --input video.mp4 --json
+squire media --script clip.py --input image.png --json
 ```

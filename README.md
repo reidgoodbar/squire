@@ -93,7 +93,7 @@ squire sql --dialect sqlite --query "SELECT 1" --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire solve --solver z3 --file constraints.smt2 --json
 squire data --script transform.py --input big.csv --json
-squire media --script clip.py --input video.mp4 --json
+squire media --script clip.py --input image.png --json
 ```
 
 A tiny runnable quantum example is in `examples/quantum/shor.py`.

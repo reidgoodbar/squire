@@ -45,5 +45,5 @@ squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire quantum simulate --file shor.py --shots 2048 --json
 squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire data --script transform.py --input big.csv --json
-squire media --script clip.py --input video.mp4 --json
+squire media --script clip.py --input image.png --json
 ```

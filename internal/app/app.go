@@ -1759,7 +1759,7 @@ func printMediaHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage: squire media --script <path> [--input <path>] [--timeout <seconds>] [--json]
 
 Examples:
-  squire media --script clip.py --input video.mp4 --json
+  squire media --script clip.py --input image.png --json
 `)
 }
 
@@ -1770,7 +1770,7 @@ Compatibility alias for "squire data" and "squire media".
 
 Examples:
   squire scale --mode data --script transform.py --input big.csv --json
-  squire scale --mode media --script clip.py --input video.mp4 --json
+  squire scale --mode media --script clip.py --input image.png --json
 `)
 }
 
