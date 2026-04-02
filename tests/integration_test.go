@@ -42,7 +42,8 @@ func TestDataMultipartStreamingViaCLI(t *testing.T) {
 	}
 
 	requestSeen := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -146,7 +147,8 @@ func TestDepsJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -213,7 +215,8 @@ func TestSQLJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -278,7 +281,8 @@ func TestTestJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -349,7 +353,8 @@ func TestLintJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -418,7 +423,8 @@ func TestAuditJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -487,7 +493,8 @@ func TestBuildJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -551,7 +558,8 @@ func TestBenchJSONRequestViaCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Fatalf("unexpected auth header: %q", got)
@@ -1709,6 +1717,343 @@ func TestMCPVerifyToolCallUsesExistingCLIFlow(t *testing.T) {
 	content, ok := callResult["content"].([]interface{})
 	if !ok || len(content) == 0 {
 		t.Fatalf("missing content blocks: %+v", callResult)
+	}
+}
+
+func TestMCPMediaToolCallCanDownloadArtifacts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustScaleAllowed,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	projectDir := t.TempDir()
+	scriptPath := filepath.Join(projectDir, "clip.py")
+	if err := os.WriteFile(scriptPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(projectDir, "image.png")
+	if err := os.WriteFile(inputPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	downloadDir := filepath.Join(projectDir, "artifacts")
+	artifactBody := []byte("artifact-body")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/media":
+			_ = json.NewEncoder(w).Encode(protocol.ScaleResponse{
+				RequestID: "req_media_mcp",
+				Status:    "ok",
+				Mode:      "media",
+				Artifacts: []protocol.Artifact{{
+					Name:        "square.png",
+					ContentType: "image/png",
+					SizeBytes:   int64(len(artifactBody)),
+					DownloadURL: server.URL + "/v1/jobs/req_media_mcp/artifacts/square.png",
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/req_media_mcp/artifacts/square.png":
+			if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+				t.Fatalf("unexpected download auth header: %q", got)
+			}
+			_, _ = w.Write(artifactBody)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustScaleAllowed,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	requests := []map[string]interface{}{
+		{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "initialize",
+			"params": map[string]interface{}{
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]interface{}{},
+				"clientInfo": map[string]interface{}{
+					"name":    "test-client",
+					"version": "1.0.0",
+				},
+			},
+		},
+		{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name": "media",
+				"arguments": map[string]interface{}{
+					"script":                 scriptPath,
+					"input":                  inputPath,
+					"download_artifacts_dir": downloadDir,
+				},
+			},
+		},
+	}
+
+	var stdin bytes.Buffer
+	for _, request := range requests {
+		data, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdin.Write(data)
+		stdin.WriteByte('\n')
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, &stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(downloadDir, "square.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, artifactBody) {
+		t.Fatalf("unexpected artifact contents: %q", data)
+	}
+
+	var responses []map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	for {
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode mcp response: %v\nraw=%s", err, stdout.String())
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(responses), stdout.String())
+	}
+	callResult, ok := responses[1]["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing tools/call result: %+v", responses[1])
+	}
+	structured, ok := callResult["structuredContent"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing structuredContent: %+v", callResult)
+	}
+	if structured["request_id"] != "req_media_mcp" {
+		t.Fatalf("unexpected structured response: %+v", structured)
+	}
+}
+
+func TestMediaCLIArtifactDownloadUsesAuthenticatedFetch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustScaleAllowed,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	scriptPath := filepath.Join(t.TempDir(), "clip.py")
+	if err := os.WriteFile(scriptPath, []byte("print('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(inputPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	downloadDir := filepath.Join(t.TempDir(), "downloads")
+	artifactBody := []byte("artifact-bytes")
+	downloadSeen := false
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/media":
+			if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+				t.Fatalf("unexpected auth header: %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(protocol.ScaleResponse{
+				RequestID: "req_media",
+				Status:    "ok",
+				Mode:      "media",
+				Artifacts: []protocol.Artifact{
+					{
+						Name:        "square.png",
+						ContentType: "image/png",
+						SizeBytes:   int64(len(artifactBody)),
+						DownloadURL: server.URL + "/v1/jobs/req_media/artifacts/square.png",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/req_media/artifacts/square.png":
+			if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+				t.Fatalf("unexpected download auth header: %q", got)
+			}
+			if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "squire-cli/") {
+				t.Fatalf("unexpected user agent: %q", got)
+			}
+			downloadSeen = true
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(artifactBody)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustScaleAllowed,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"media", "--script", scriptPath, "--input", inputPath, "--download-artifacts", downloadDir, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	if !downloadSeen {
+		t.Fatal("expected authenticated artifact download")
+	}
+	data, err := os.ReadFile(filepath.Join(downloadDir, "square.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, artifactBody) {
+		t.Fatalf("unexpected artifact contents: %q", data)
+	}
+	if !strings.Contains(stdout.String(), `"request_id":"req_media"`) {
+		t.Fatalf("unexpected cli stdout: %s", stdout.String())
+	}
+}
+
+func TestBuildCLIArtifactDownloadUsesTargetSubdirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_test"
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   "http://placeholder",
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	manifestPath := filepath.Join(t.TempDir(), "package.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"name":"demo","version":"1.0.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	downloadDir := filepath.Join(t.TempDir(), "downloads")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/build":
+			_ = json.NewEncoder(w).Encode(protocol.BuildResponse{
+				RequestID: "req_build",
+				Language:  "node",
+				Summary:   protocol.BuildSummary{Passed: 2},
+				Results: []protocol.BuildResult{
+					{
+						Target:    "linux/amd64",
+						Status:    "pass",
+						RuntimeMS: 10,
+						Artifacts: []protocol.Artifact{{
+							Name:        "package.tgz",
+							ContentType: "application/gzip",
+							SizeBytes:   3,
+							DownloadURL: server.URL + "/v1/jobs/req_build/artifacts/linux_amd64.tgz",
+						}},
+					},
+					{
+						Target:    "linux/arm64",
+						Status:    "pass",
+						RuntimeMS: 11,
+						Artifacts: []protocol.Artifact{{
+							Name:        "package.tgz",
+							ContentType: "application/gzip",
+							SizeBytes:   3,
+							DownloadURL: server.URL + "/v1/jobs/req_build/artifacts/linux_arm64.tgz",
+						}},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/req_build/artifacts/linux_amd64.tgz":
+			_, _ = w.Write([]byte("amd"))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/req_build/artifacts/linux_arm64.tgz":
+			_, _ = w.Write([]byte("arm"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeCLIConfig(t, home, protocol.CLIConfig{
+		APIBaseURL:   server.URL,
+		SessionToken: token,
+		UserID:       "user-test",
+		TrustTier:    protocol.TrustTrusted,
+		TokenType:    protocol.TokenTypeHeadless,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"build", "--lang", "node", "--file", manifestPath, "--download-artifacts", downloadDir}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	amd, err := os.ReadFile(filepath.Join(downloadDir, "linux_amd64", "package.tgz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(amd) != "amd" {
+		t.Fatalf("unexpected amd64 artifact: %q", amd)
+	}
+	arm, err := os.ReadFile(filepath.Join(downloadDir, "linux_arm64", "package.tgz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arm) != "arm" {
+		t.Fatalf("unexpected arm64 artifact: %q", arm)
+	}
+	if !strings.Contains(stdout.String(), "downloaded artifacts: 2") {
+		t.Fatalf("expected download summary in stdout, got %s", stdout.String())
+	}
+}
+
+func TestMediaHelpMentionsFFmpegAndArtifactDownloads(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"help", "media"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+	text := stdout.String()
+	for _, needle := range []string{"ffmpeg", "SQUIRE_INPUT_PATH", "SQUIRE_OUTPUT_DIR", "--download-artifacts"} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected media help to contain %q, got %s", needle, text)
+		}
 	}
 }
 

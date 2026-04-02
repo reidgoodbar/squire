@@ -590,11 +590,12 @@ func mcpToolMap() map[string]mcpTool {
 			"Squire Build",
 			"Run packaging and build sanity checks in clean environments.",
 			schemaObject(map[string]interface{}{
-				"language": schemaString("Build language: python or node."),
-				"files":    schemaStringArray("Local file paths to stage."),
-				"paths":    schemaStringArray("Local directory paths to stage recursively."),
-				"targets":  schemaStringList("Build targets as an array or CSV string."),
-				"timeout":  schemaInteger("Build timeout in seconds."),
+				"language":               schemaString("Build language: python or node."),
+				"files":                  schemaStringArray("Local file paths to stage."),
+				"paths":                  schemaStringArray("Local directory paths to stage recursively."),
+				"targets":                schemaStringList("Build targets as an array or CSV string."),
+				"timeout":                schemaInteger("Build timeout in seconds."),
+				"download_artifacts_dir": schemaString("Optional local directory to download build artifacts into."),
 			}, "language"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
@@ -623,6 +624,9 @@ func mcpToolMap() map[string]mcpTool {
 					return nil, "", err
 				} else if ok {
 					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				if dir := optionalString(arguments, "download_artifacts_dir"); dir != "" {
+					args = append(args, "--download-artifacts", dir)
 				}
 				return args, "", nil
 			},
@@ -680,13 +684,14 @@ func mcpToolMap() map[string]mcpTool {
 			"Squire Browser",
 			"Run constrained headless browser verification in an offline sandbox.",
 			schemaObject(map[string]interface{}{
-				"browser":    schemaString("Browser engine, currently chromium."),
-				"script":     schemaString("Path to a browser automation script to stage."),
-				"url":        schemaString("Offline URL to open, such as a file:// URL."),
-				"screenshot": schemaString("Optional screenshot filename to produce."),
-				"files":      schemaStringArray("Local file paths to stage."),
-				"paths":      schemaStringArray("Local directory paths to stage recursively."),
-				"timeout":    schemaInteger("Browser timeout in seconds."),
+				"browser":                schemaString("Browser engine, currently chromium."),
+				"script":                 schemaString("Path to a browser automation script to stage."),
+				"url":                    schemaString("Offline URL to open, such as a file:// URL."),
+				"screenshot":             schemaString("Optional screenshot filename to produce."),
+				"files":                  schemaStringArray("Local file paths to stage."),
+				"paths":                  schemaStringArray("Local directory paths to stage recursively."),
+				"timeout":                schemaInteger("Browser timeout in seconds."),
+				"download_artifacts_dir": schemaString("Optional local directory to download screenshots or other browser artifacts into."),
 			}),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				args := make([]string, 0)
@@ -720,6 +725,9 @@ func mcpToolMap() map[string]mcpTool {
 					return nil, "", err
 				} else if ok {
 					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+				}
+				if dir := optionalString(arguments, "download_artifacts_dir"); dir != "" {
+					args = append(args, "--download-artifacts", dir)
 				}
 				return args, "", nil
 			},
@@ -794,10 +802,11 @@ func mcpToolMap() map[string]mcpTool {
 			Title:       "Squire Quantum Simulate",
 			Description: "Run an offline Qiskit Aer simulation in a dedicated runtime.",
 			InputSchema: schemaObject(map[string]interface{}{
-				"files":   schemaStringArray("Local file paths to stage. The first file is the Python entry script."),
-				"shots":   schemaInteger("Shot count passed to the simulation."),
-				"backend": schemaString("Quantum backend. v1 supports only aer_simulator."),
-				"timeout": schemaInteger("Simulation timeout in seconds."),
+				"files":                  schemaStringArray("Local file paths to stage. The first file is the Python entry script."),
+				"shots":                  schemaInteger("Shot count passed to the simulation."),
+				"backend":                schemaString("Quantum backend. v1 supports only aer_simulator."),
+				"timeout":                schemaInteger("Simulation timeout in seconds."),
+				"download_artifacts_dir": schemaString("Optional local directory to download generated quantum artifacts into."),
 			}, "files"),
 			Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
 				_ = ctx
@@ -822,6 +831,9 @@ func mcpToolMap() map[string]mcpTool {
 				} else if ok {
 					args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
 				}
+				if dir := optionalString(arguments, "download_artifacts_dir"); dir != "" {
+					args = append(args, "--download-artifacts", dir)
+				}
 				args = append(args, "--json")
 				var stdout bytes.Buffer
 				var stderr bytes.Buffer
@@ -832,12 +844,13 @@ func mcpToolMap() map[string]mcpTool {
 		mcpCLIJSONTool(
 			"data",
 			"Squire Data",
-			"Run heavier pandas, polars, or pyarrow-style data jobs.",
+			"Run Python data jobs with pandas, polars, and pyarrow in an offline sandbox.",
 			schemaObject(map[string]interface{}{
-				"script":     schemaString("Path to the Python script to execute."),
-				"input":      schemaString("Path to an input file for multipart upload."),
-				"stdin_text": schemaString("Small inline input payload to send over stdin mode."),
-				"timeout":    schemaInteger("Job timeout in seconds."),
+				"script":                 schemaString("Path to the Python script to execute."),
+				"input":                  schemaString("Path to an input file for multipart upload."),
+				"stdin_text":             schemaString("Small inline input payload to send over stdin mode."),
+				"timeout":                schemaInteger("Job timeout in seconds."),
+				"download_artifacts_dir": schemaString("Optional local directory to download generated data artifacts into."),
 			}, "script"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				return buildMCPModeArgs(arguments)
@@ -846,12 +859,13 @@ func mcpToolMap() map[string]mcpTool {
 		mcpCLIJSONTool(
 			"media",
 			"Squire Media",
-			"Run ffmpeg and media transformation jobs.",
+			"Run Python plus ffmpeg media transformation jobs in an offline sandbox.",
 			schemaObject(map[string]interface{}{
-				"script":     schemaString("Path to the Python script to execute."),
-				"input":      schemaString("Path to an input file for multipart upload."),
-				"stdin_text": schemaString("Small inline input payload to send over stdin mode."),
-				"timeout":    schemaInteger("Job timeout in seconds."),
+				"script":                 schemaString("Path to the Python script to execute."),
+				"input":                  schemaString("Path to an input file for multipart upload."),
+				"stdin_text":             schemaString("Small inline input payload to send over stdin mode."),
+				"timeout":                schemaInteger("Job timeout in seconds."),
+				"download_artifacts_dir": schemaString("Optional local directory to download generated media artifacts into."),
 			}, "script"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				return buildMCPModeArgs(arguments)
@@ -999,6 +1013,9 @@ func buildMCPModeArgs(arguments map[string]interface{}) ([]string, string, error
 		return nil, "", err
 	} else if ok {
 		args = append(args, "--timeout", fmt.Sprintf("%d", timeout))
+	}
+	if dir := optionalString(arguments, "download_artifacts_dir"); dir != "" {
+		args = append(args, "--download-artifacts", dir)
 	}
 	return args, stdinText, nil
 }

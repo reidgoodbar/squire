@@ -68,8 +68,13 @@ Copy and trim the example instruction files in `docs/agent/` for your own enviro
 - `docs/agent/SKILLS.md.example`
 - `docs/agent/CODEX.md.example`
 - `docs/agent/squire-usage-guidelines.md`
+- `docs/agent/tool-constraints.md`
 
 Prefer local execution for tiny trivial checks. Prefer Squire when correctness depends on a fresh environment or when the task is too annoying to run locally.
+
+For per-tool runtime, network, input, output, and public-service constraints, start with:
+
+- `docs/agent/tool-constraints.md`
 
 ## Current public-service limits
 
@@ -78,22 +83,38 @@ Prefer local execution for tiny trivial checks. Prefer Squire when correctness d
 - `audit` supports secret scanning and local-config static analysis; dependency audit and remote Semgrep configs are disabled
 - `quantum simulate` is offline-only and currently requires `trusted` access or higher on the public service
 
+## Artifact downloads
+
+Artifact-producing commands can download outputs locally:
+
+```bash
+squire media --script square.py --input image.png --download-artifacts ./out --json
+```
+
+Use `--download-artifacts <dir>` for:
+
+- `squire data`
+- `squire media`
+- `squire browser`
+- `squire build`
+- `squire quantum simulate`
+
 ## Command examples
 
 ```bash
 squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12 --json
 squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
 squire lint --lang python --tool ruff --file app.py --json
-squire quantum simulate --file shor.py --shots 2048 --json
+squire quantum simulate --file shor.py --shots 2048 --download-artifacts ./quantum-out --json
 squire audit --secrets --path src --json
-squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
+squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --download-artifacts ./dist --json
 squire bench --lang python --file bench.py --targets py310,py311 --json
-squire browser --path website/public --screenshot page.png --json
+squire browser --path website/public --screenshot page.png --download-artifacts ./browser-out --json
 squire sql --dialect sqlite --query "SELECT 1" --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
 squire solve --solver z3 --file constraints.smt2 --json
-squire data --script transform.py --input big.csv --json
-squire media --script clip.py --input image.png --json
+squire data --script transform.py --input big.csv --download-artifacts ./data-out --json
+squire media --script clip.py --input image.png --download-artifacts ./media-out --json
 ```
 
 A tiny runnable quantum example is in `examples/quantum/shor.py`.

@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"squire/internal/buildinfo"
 	"squire/internal/config"
 	"squire/internal/httpclient"
 	"squire/internal/protocol"
@@ -68,8 +69,8 @@ func rootCommandCatalog() []rootCommandHelp {
 		{Name: "compile", Category: "validation", Summary: "check Go or Rust compilation for target environments"},
 		{Name: "solve", Category: "validation", Summary: "run Z3 or MiniZinc solver jobs"},
 		{Name: "quantum", Category: "validation", Summary: "run offline Qiskit Aer simulations in a dedicated runtime"},
-		{Name: "data", Category: "jobs", Summary: "run heavier pandas, polars, or pyarrow-style data jobs"},
-		{Name: "media", Category: "jobs", Summary: "run ffmpeg and media transformation jobs"},
+		{Name: "data", Category: "jobs", Summary: "run Python data jobs with pandas, polars, or pyarrow"},
+		{Name: "media", Category: "jobs", Summary: "run Python plus ffmpeg media transformation jobs"},
 		{Name: "scale", Category: "jobs", Summary: "compatibility alias for data and media", Aliases: []string{"data", "media"}},
 	}
 }
@@ -775,6 +776,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
 	targets := fs.String("targets", "", "Comma-separated build targets")
 	timeout := fs.Int("timeout", 120, "Build timeout in seconds")
+	downloadDir := fs.String("download-artifacts", "", "Download returned build artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
 	fs.Usage = func() { printBuildHelp(fs.Output()) }
@@ -812,12 +814,24 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, err)
 		return exitRemoteError
 	}
+	downloadCount := 0
+	if *downloadDir != "" {
+		count, err := downloadArtifactPlans(ctx, client, *downloadDir, buildArtifactDownloadPlans(resp))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		downloadCount = count
+	}
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
 		fmt.Fprintf(stdout, "request %s: %d passed, %d failed\n", resp.RequestID, resp.Summary.Passed, resp.Summary.Failed)
 		for _, result := range resp.Results {
 			fmt.Fprintf(stdout, "- %s: %s (%d ms, %d artifacts)\n", result.Target, result.Status, result.RuntimeMS, len(result.Artifacts))
+		}
+		if downloadCount > 0 {
+			fmt.Fprintf(stdout, "downloaded artifacts: %d -> %s\n", downloadCount, *downloadDir)
 		}
 		if resp.AgentSummary != "" {
 			fmt.Fprintln(stdout, resp.AgentSummary)
@@ -907,6 +921,7 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.Var(&files, "file", "Path to a file to stage; repeat for multiple files")
 	fs.Var(&paths, "path", "Path to a directory tree to stage; repeat for multiple paths")
 	timeout := fs.Int("timeout", 45, "Browser timeout in seconds")
+	downloadDir := fs.String("download-artifacts", "", "Download returned browser artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
 	fs.Usage = func() { printBrowserHelp(fs.Output()) }
@@ -953,6 +968,15 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, err)
 		return exitRemoteError
 	}
+	downloadCount := 0
+	if *downloadDir != "" {
+		count, err := downloadArtifactPlans(ctx, client, *downloadDir, topLevelArtifactDownloadPlans(resp.Artifacts))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		downloadCount = count
+	}
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
@@ -965,6 +989,9 @@ func runBrowser(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		}
 		if len(resp.Artifacts) > 0 {
 			fmt.Fprintf(stdout, "artifacts: %d\n", len(resp.Artifacts))
+		}
+		if downloadCount > 0 {
+			fmt.Fprintf(stdout, "downloaded artifacts: %d -> %s\n", downloadCount, *downloadDir)
 		}
 		if resp.AgentSummary != "" {
 			fmt.Fprintln(stdout, resp.AgentSummary)
@@ -1139,6 +1166,7 @@ func runQuantumSimulate(ctx context.Context, args []string, stdout, stderr io.Wr
 	shots := fs.Int("shots", 1024, "Shot count passed to the simulation via SQUIRE_QUANTUM_SHOTS")
 	backend := fs.String("backend", "aer_simulator", "Quantum backend. v1 supports only aer_simulator")
 	timeout := fs.Int("timeout", 300, "Quantum simulation timeout in seconds")
+	downloadDir := fs.String("download-artifacts", "", "Download returned quantum artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
 	fs.Usage = func() { printQuantumHelp(fs.Output()) }
@@ -1174,12 +1202,24 @@ func runQuantumSimulate(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintln(stderr, err)
 		return exitRemoteError
 	}
+	downloadCount := 0
+	if *downloadDir != "" {
+		count, err := downloadArtifactPlans(ctx, client, *downloadDir, topLevelArtifactDownloadPlans(resp.Artifacts))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		downloadCount = count
+	}
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
 		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Backend, resp.RuntimeMS)
 		if len(resp.Artifacts) > 0 {
 			fmt.Fprintf(stdout, "artifacts: %d\n", len(resp.Artifacts))
+		}
+		if downloadCount > 0 {
+			fmt.Fprintf(stdout, "downloaded artifacts: %d -> %s\n", downloadCount, *downloadDir)
 		}
 		if resp.AgentSummary != "" {
 			fmt.Fprintln(stdout, resp.AgentSummary)
@@ -1202,6 +1242,7 @@ func runMode(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	inputPath := fs.String("input", "", "Path to an input file for multipart upload")
 	useStdin := fs.Bool("stdin", false, "Read small input payload from stdin and send JSON")
 	timeout := fs.Int("timeout", 120, "Job timeout in seconds")
+	downloadDir := fs.String("download-artifacts", "", "Download returned artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
 	fs.Usage = func() {
@@ -1266,12 +1307,25 @@ func runMode(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 	}
 
+	downloadCount := 0
+	if *downloadDir != "" {
+		count, err := downloadArtifactPlans(ctx, client, *downloadDir, topLevelArtifactDownloadPlans(resp.Artifacts))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		downloadCount = count
+	}
+
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
 		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Mode, resp.RuntimeMS)
 		for _, artifact := range resp.Artifacts {
 			fmt.Fprintf(stdout, "- artifact: %s (%d bytes)\n", artifact.Name, artifact.SizeBytes)
+		}
+		if downloadCount > 0 {
+			fmt.Fprintf(stdout, "downloaded artifacts: %d -> %s\n", downloadCount, *downloadDir)
 		}
 		if resp.AgentSummary != "" {
 			fmt.Fprintln(stdout, resp.AgentSummary)
@@ -1295,6 +1349,7 @@ func runScaleAlias(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	inputPath := fs.String("input", "", "Path to an input file for multipart upload")
 	useStdin := fs.Bool("stdin", false, "Read small input payload from stdin and send JSON")
 	timeout := fs.Int("timeout", 120, "Job timeout in seconds")
+	downloadDir := fs.String("download-artifacts", "", "Download returned artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
 	fs.Usage = func() { printScaleAliasHelp(fs.Output()) }
@@ -1352,10 +1407,25 @@ func runScaleAlias(ctx context.Context, args []string, stdin io.Reader, stdout, 
 			return exitRemoteError
 		}
 	}
+	downloadCount := 0
+	if *downloadDir != "" {
+		count, err := downloadArtifactPlans(ctx, client, *downloadDir, topLevelArtifactDownloadPlans(resp.Artifacts))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		downloadCount = count
+	}
 	if *jsonOut {
 		_ = json.NewEncoder(stdout).Encode(resp)
 	} else {
 		fmt.Fprintf(stdout, "request %s: %s (%s, %d ms)\n", resp.RequestID, resp.Status, resp.Mode, resp.RuntimeMS)
+		for _, artifact := range resp.Artifacts {
+			fmt.Fprintf(stdout, "- artifact: %s (%d bytes)\n", artifact.Name, artifact.SizeBytes)
+		}
+		if downloadCount > 0 {
+			fmt.Fprintf(stdout, "downloaded artifacts: %d -> %s\n", downloadCount, *downloadDir)
+		}
 	}
 	switch resp.Status {
 	case "ok":
@@ -1365,6 +1435,133 @@ func runScaleAlias(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	default:
 		return exitRemoteError
 	}
+}
+
+type artifactDownloadPlan struct {
+	artifact     protocol.Artifact
+	relativePath string
+}
+
+func topLevelArtifactDownloadPlans(artifacts []protocol.Artifact) []artifactDownloadPlan {
+	plans := make([]artifactDownloadPlan, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		plans = append(plans, artifactDownloadPlan{
+			artifact:     artifact,
+			relativePath: sanitizeArtifactFilename(artifact.Name),
+		})
+	}
+	return plans
+}
+
+func buildArtifactDownloadPlans(resp protocol.BuildResponse) []artifactDownloadPlan {
+	plans := make([]artifactDownloadPlan, 0)
+	for _, result := range resp.Results {
+		targetDir := sanitizeArtifactPathSegment(result.Target)
+		for _, artifact := range result.Artifacts {
+			plans = append(plans, artifactDownloadPlan{
+				artifact:     artifact,
+				relativePath: filepath.Join(targetDir, sanitizeArtifactFilename(artifact.Name)),
+			})
+		}
+	}
+	return plans
+}
+
+func sanitizeArtifactFilename(name string) string {
+	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
+	if name == "" || name == "." || name == string(os.PathSeparator) {
+		return "artifact.bin"
+	}
+	return name
+}
+
+func sanitizeArtifactPathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "artifacts"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+	return replacer.Replace(value)
+}
+
+func downloadArtifactPlans(ctx context.Context, client *httpclient.Client, destRoot string, plans []artifactDownloadPlan) (int, error) {
+	if len(plans) == 0 {
+		return 0, nil
+	}
+	root := filepath.Clean(destRoot)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return 0, fmt.Errorf("create artifact directory: %w", err)
+	}
+	rootWithSep := root + string(os.PathSeparator)
+	downloaded := 0
+	for _, plan := range plans {
+		relative := filepath.Clean(plan.relativePath)
+		if relative == "." || relative == "" {
+			relative = sanitizeArtifactFilename(plan.artifact.Name)
+		}
+		destPath := filepath.Clean(filepath.Join(root, relative))
+		if destPath != root && !strings.HasPrefix(destPath, rootWithSep) {
+			return downloaded, fmt.Errorf("refusing to write artifact outside %s", root)
+		}
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			return downloaded, fmt.Errorf("create artifact subdirectory: %w", err)
+		}
+		if err := downloadArtifactFile(ctx, client, plan.artifact.DownloadURL, destPath); err != nil {
+			return downloaded, err
+		}
+		downloaded++
+	}
+	return downloaded, nil
+}
+
+func downloadArtifactFile(ctx context.Context, client *httpclient.Client, rawURL, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("build artifact request: %w", err)
+	}
+	req.Header.Set("Accept", "*/*")
+	if client.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.Token)
+	}
+	req.Header.Set("User-Agent", "squire-cli/"+buildinfo.CurrentVersion())
+
+	resp, err := client.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download artifact: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("download artifact %s: %s%s", filepath.Base(destPath), resp.Status, formatArtifactDownloadBody(body))
+	}
+
+	tmpPath := destPath + ".part"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open artifact file: %w", err)
+	}
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write artifact: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close artifact file: %w", err)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("finalize artifact file: %w", err)
+	}
+	return nil
+}
+
+func formatArtifactDownloadBody(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return ""
+	}
+	return ": " + text
 }
 
 func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -1581,8 +1778,8 @@ Validation:
   squire quantum    run offline Qiskit Aer simulations in a dedicated runtime
 
 Jobs:
-  squire data       run heavier pandas, polars, or pyarrow-style data jobs
-  squire media      run ffmpeg and media transformation jobs
+  squire data       run Python data jobs with pandas, polars, or pyarrow
+  squire media      run Python plus ffmpeg media transformation jobs
   squire scale      compatibility alias for data and media
 
 Examples:
@@ -1593,6 +1790,7 @@ Examples:
 
 Use "squire <command> --help" for command-specific usage.
 Use "squire --help --json" for a machine-readable command catalog.
+See docs/agent/tool-constraints.md for per-tool runtime, network, and public-service constraints.
 `)
 }
 
@@ -1681,11 +1879,13 @@ Examples:
 }
 
 func printBuildHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire build --lang <python|node> [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire build --lang <python|node> [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
+
+Offline packaging/build sanity checks. Use --download-artifacts to fetch built outputs locally.
 
 Examples:
   squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
-  squire build --lang node --file package.json --path src --targets linux --json
+  squire build --lang node --file package.json --path src --targets linux --download-artifacts ./dist --json
 `)
 }
 
@@ -1700,15 +1900,16 @@ Examples:
 }
 
 func printBrowserHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
 
 Browser runs are offline-only. Remote http:// and https:// URLs are disabled.
 Stage full local asset trees with --path when you need images, fonts, or other binary files.
+Use --download-artifacts to fetch screenshots or other generated files locally.
 
 Examples:
   squire browser --script login-test.js --browser chromium --json
   squire browser --file index.html --screenshot page.png --json
-  squire browser --path website/public --screenshot page.png --json
+  squire browser --path website/public --screenshot page.png --download-artifacts ./browser-out --json
 `)
 }
 
@@ -1732,45 +1933,54 @@ Examples:
 
 func printQuantumHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage:
-  squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--json]
+  squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
 
-Notes:
+	Notes:
   - the first --file is the Python entry script
   - additional --file values stage helper modules or local assets
   - v1 supports only the offline Aer simulator backend
   - the public service currently requires trusted access or higher for quantum simulate
+  - use --download-artifacts to fetch files written under /workspace/output locally
 
 Examples:
   squire quantum simulate --file shor.py --json
-  squire quantum simulate --file shor.py --file helpers.py --shots 2048 --timeout 300 --json
+  squire quantum simulate --file shor.py --file helpers.py --shots 2048 --timeout 300 --download-artifacts ./quantum-out --json
 `)
 }
 
 func printDataHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire data --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire data --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
+
+Runs a Python 3.11 data runtime with pandas, polars, and pyarrow available.
+Stage large inputs with --input or small text with --stdin. Scripts read SQUIRE_INPUT_PATH and write artifacts to SQUIRE_OUTPUT_DIR.
 
 Examples:
   squire data --script transform.py --input big.csv --json
   cat small.csv | squire data --script transform.py --stdin --json
+  squire data --script transform.py --input big.csv --download-artifacts ./data-out --json
 `)
 }
 
 func printMediaHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire media --script <path> [--input <path>] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire media --script <path> [--input <path>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
+
+Runs a Python 3.11 media runtime with ffmpeg installed.
+Scripts read SQUIRE_INPUT_PATH and write output files to SQUIRE_OUTPUT_DIR.
 
 Examples:
   squire media --script clip.py --input image.png --json
+  squire media --script square.py --input image.png --download-artifacts ./media-out --json
 `)
 }
 
 func printScaleAliasHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire scale --mode <data|media> --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--json]
+	fmt.Fprint(w, `Usage: squire scale --mode <data|media> --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
 
 Compatibility alias for "squire data" and "squire media".
 
 Examples:
   squire scale --mode data --script transform.py --input big.csv --json
-  squire scale --mode media --script clip.py --input image.png --json
+  squire scale --mode media --script clip.py --input image.png --download-artifacts ./media-out --json
 `)
 }
 

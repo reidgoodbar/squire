@@ -4,6 +4,10 @@ Squire is for short, stateless, disposable validation work. It is a good fit whe
 
 The tool-specific example files in this folder are just variants of the same pattern. Squire is not tied to one agent product.
 
+For runtime, network, file-staging, artifact, and public-service details by command, use:
+
+- `docs/agent/tool-constraints.md`
+
 ## Use Squire When
 
 - the task is environment-sensitive
@@ -59,6 +63,7 @@ Preferred naming:
 - treat `browser` as offline-only and upload local files instead of pointing it at remote URLs
 - avoid planning around `deps` on the public service until there is a network-free design for it
 - plan around `quantum simulate` as a trusted-only public feature with no outbound network
+- use `--download-artifacts <dir>` for `data`, `media`, `browser`, `build`, or `quantum simulate` when you need the generated files back locally
 
 ## Optional MCP Mode
 
@@ -71,10 +76,10 @@ Use MCP when your host expects tool discovery through MCP. Use the normal CLI di
 ```bash
 squire verify --lang bash --targets alpine-3.20,ubuntu-24.04,debian-12 --file script.sh --json
 squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
-squire quantum simulate --file shor.py --shots 2048 --json
+squire quantum simulate --file shor.py --shots 2048 --download-artifacts ./quantum-out --json
 squire test --lang python --targets py310,py311 --cmd "pytest -q" --json
 squire lint --lang python --tool ruff --file app.py --json
 squire sql --dialect sqlite --query "SELECT 1" --json
-squire data --script transform.py --input big.csv --json
-squire media --script clip.py --input image.png --json
+squire data --script transform.py --input big.csv --download-artifacts ./data-out --json
+squire media --script clip.py --input image.png --download-artifacts ./media-out --json
 ```
