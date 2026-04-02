@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	cliapp "squire/app"
@@ -74,5 +75,39 @@ func TestGeneratedCatalogDocsStayInSync(t *testing.T) {
 	}
 	if string(websiteFile) != website {
 		t.Fatal("website/public/commands.html is out of sync with the catalog renderer")
+	}
+}
+
+func TestGeneratedDocsContainEveryCatalogCommand(t *testing.T) {
+	markdown, err := catalog.RenderMarkdownReference()
+	if err != nil {
+		t.Fatal(err)
+	}
+	website, err := catalog.RenderWebsiteCommandsPage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range catalog.AllCommands() {
+		humanPath := "squire " + strings.ReplaceAll(cmd.Path, ".", " ")
+		if !strings.Contains(markdown, humanPath) {
+			t.Fatalf("markdown reference missing %q", humanPath)
+		}
+		if !strings.Contains(website, humanPath) {
+			t.Fatalf("website commands page missing %q", humanPath)
+		}
+	}
+}
+
+func TestCLIHelpCommandWorksForEveryCatalogPath(t *testing.T) {
+	for _, cmd := range catalog.AllCommands() {
+		args := append([]string{"help"}, strings.Fields(strings.ReplaceAll(cmd.Path, ".", " "))...)
+		var stdout, stderr bytes.Buffer
+		code := cliapp.Run(args, bytes.NewReader(nil), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("help failed for %q: code=%d stderr=%s", cmd.Path, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), cmd.Description) {
+			t.Fatalf("help output for %q missing description", cmd.Path)
+		}
 	}
 }

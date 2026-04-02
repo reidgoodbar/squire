@@ -1,6 +1,10 @@
 package catalog
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestCatalogLoadsAndContainsExpectedCommands(t *testing.T) {
 	c := MustLoad()
@@ -62,5 +66,56 @@ func TestRootHelpJSONIncludesPolicyMetadata(t *testing.T) {
 	}
 	if !quantum.RequiresTrusted {
 		t.Fatal("expected quantum.simulate to require trusted access")
+	}
+}
+
+func TestEveryCatalogCommandRendersHelp(t *testing.T) {
+	for _, cmd := range AllCommands() {
+		text, ok := CommandHelpText(cmd.Path)
+		if !ok {
+			t.Fatalf("missing help text for %q", cmd.Path)
+		}
+		if !strings.Contains(text, cmd.Description) {
+			t.Fatalf("help text for %q missing description", cmd.Path)
+		}
+		if cmd.Usage != "" && !strings.Contains(text, cmd.Usage) {
+			t.Fatalf("help text for %q missing usage", cmd.Path)
+		}
+	}
+}
+
+func TestEveryMCPCommandHasValidSchemaMetadata(t *testing.T) {
+	for _, cmd := range MCPCommands() {
+		if strings.TrimSpace(cmd.MCPToolName) == "" {
+			t.Fatalf("command %q missing MCP tool name", cmd.Path)
+		}
+		schema := cmd.MCPInputSchema
+		if schema == nil {
+			t.Fatalf("command %q missing MCP input schema", cmd.Path)
+		}
+		if schema["type"] != "object" {
+			t.Fatalf("command %q schema type = %v, want object", cmd.Path, schema["type"])
+		}
+		if schema["additionalProperties"] != false {
+			t.Fatalf("command %q schema must set additionalProperties=false", cmd.Path)
+		}
+		if _, ok := schema["properties"].(map[string]interface{}); !ok {
+			t.Fatalf("command %q schema missing object properties", cmd.Path)
+		}
+	}
+}
+
+func TestRootHelpJSONRoundTrips(t *testing.T) {
+	payload := RootHelpJSON()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded RootHelpPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.AllCommands) != len(AllCommands()) {
+		t.Fatalf("decoded all_commands mismatch: got %d want %d", len(decoded.AllCommands), len(AllCommands()))
 	}
 }
