@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"squire/internal/buildinfo"
+	"squire/internal/catalog"
 )
 
 const mcpProtocolVersionLatest = "2025-11-25"
@@ -93,7 +94,7 @@ func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 func runMCPServe(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { printMCPHelp(fs.Output()) }
+	fs.Usage = func() { printCatalogCommandHelpPath(fs.Output(), "mcp.serve") }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -277,60 +278,21 @@ func (s *mcpServer) handleMessage(ctx context.Context, raw []byte) (*mcpJSONRPCR
 }
 
 func (s *mcpServer) listTools() []map[string]interface{} {
-	ordered := []string{
-		"help",
-		"whoami",
-		"verify",
-		"deps",
-		"sql",
-		"test",
-		"lint",
-		"audit",
-		"build",
-		"bench",
-		"browser",
-		"compile",
-		"solve",
-		"quantum_simulate",
-		"data",
-		"media",
-	}
-	out := make([]map[string]interface{}, 0, len(ordered))
-	for _, name := range ordered {
-		tool := s.tools[name]
-		out = append(out, map[string]interface{}{
-			"name":        tool.Name,
-			"title":       tool.Title,
-			"description": tool.Description,
-			"inputSchema": tool.InputSchema,
-		})
-	}
-	return out
+	return catalog.MCPToolMetadata()
 }
 
 func mcpToolMap() map[string]mcpTool {
+	quantumCommand := mustCatalogMCPCommand("quantum_simulate")
 	tools := []mcpTool{
 		mcpHelpTool(),
 		mcpCLIJSONTool(
 			"whoami",
-			"Squire WhoAmI",
-			"Return the authenticated Squire identity, trust tier, quotas, and feature flags.",
-			schemaObject(nil),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				return nil, "", nil
 			},
 		),
 		mcpCLIJSONTool(
 			"verify",
-			"Squire Verify",
-			"Run shell, Python, or Node checks in fresh Linux runtimes.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Language to execute: bash, python, or node."),
-				"code":     schemaString("Inline code snippet to verify."),
-				"file":     schemaString("Path to a local script file to upload."),
-				"targets":  schemaStringList("Target matrix as an array or CSV string."),
-				"timeout":  schemaInteger("Per-target timeout in seconds."),
-			}, "language"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -364,14 +326,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"deps",
-			"Squire Deps",
-			"Dependency validation surface. The public zero-egress service currently rejects deps requests.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Dependency language: python or node."),
-				"file":     schemaString("Path to the dependency manifest to upload."),
-				"targets":  schemaStringList("Dependency targets as an array or CSV string."),
-				"timeout":  schemaInteger("Dependency install timeout in seconds."),
-			}, "language", "file"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -395,17 +349,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"sql",
-			"Squire SQL",
-			"Run ephemeral SQLite or Postgres validation.",
-			schemaObject(map[string]interface{}{
-				"dialect":    schemaString("SQL dialect: sqlite or postgres-16."),
-				"file":       schemaString("Path to a SQL file containing statements to apply."),
-				"schema":     schemaString("Path to a schema file to apply before the query."),
-				"query":      schemaString("Inline SQL query to execute after schema setup."),
-				"query_file": schemaString("Path to a query file to execute after schema setup."),
-				"explain":    schemaBoolean("Request an execution plan when the dialect supports it."),
-				"timeout":    schemaInteger("SQL timeout in seconds."),
-			}, "dialect"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				dialect, err := requiredString(arguments, "dialect")
 				if err != nil {
@@ -449,15 +392,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"test",
-			"Squire Test",
-			"Run short clean test suites in fresh runtimes.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Test language: python, node, or bash."),
-				"files":    schemaStringArray("Local file paths to stage for the test run."),
-				"command":  schemaString("Restricted test command, such as pytest -q or npm test."),
-				"targets":  schemaStringList("Runtime targets as an array or CSV string."),
-				"timeout":  schemaInteger("Test timeout in seconds."),
-			}, "language", "files"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -487,15 +421,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"lint",
-			"Squire Lint",
-			"Run lint and static analysis in fresh toolchains.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Lint language: python, js, ts, or rust."),
-				"tool":     schemaString("Lint tool: ruff, eslint, or clippy."),
-				"files":    schemaStringArray("Local file paths to stage for the lint run."),
-				"targets":  schemaStringList("Lint targets as an array or CSV string."),
-				"timeout":  schemaInteger("Lint timeout in seconds."),
-			}, "language", "tool", "files"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -526,19 +451,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"audit",
-			"Squire Audit",
-			"Run dependency, secret, or static security checks.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Audit language. Dependency audit is currently disabled under the zero-egress policy."),
-				"secrets":  schemaBoolean("Run the built-in secret scanner."),
-				"static":   schemaBoolean("Run static analysis."),
-				"tool":     schemaString("Audit tool, such as semgrep."),
-				"config":   schemaString("Static analysis config. Use a staged local config file path."),
-				"files":    schemaStringArray("Local file paths to stage."),
-				"paths":    schemaStringArray("Local directory paths to stage recursively."),
-				"targets":  schemaStringList("Audit targets as an array or CSV string."),
-				"timeout":  schemaInteger("Audit timeout in seconds."),
-			}),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				args := make([]string, 0)
 				if language := optionalString(arguments, "language"); language != "" {
@@ -587,16 +499,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"build",
-			"Squire Build",
-			"Run packaging and build sanity checks in clean environments.",
-			schemaObject(map[string]interface{}{
-				"language":               schemaString("Build language: python or node."),
-				"files":                  schemaStringArray("Local file paths to stage."),
-				"paths":                  schemaStringArray("Local directory paths to stage recursively."),
-				"targets":                schemaStringList("Build targets as an array or CSV string."),
-				"timeout":                schemaInteger("Build timeout in seconds."),
-				"download_artifacts_dir": schemaString("Optional local directory to download build artifacts into."),
-			}, "language"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -633,16 +535,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"bench",
-			"Squire Bench",
-			"Run short comparative benchmark jobs in fresh runtimes.",
-			schemaObject(map[string]interface{}{
-				"language":   schemaString("Benchmark language: python, bash, or go."),
-				"files":      schemaStringArray("Local file paths to stage."),
-				"paths":      schemaStringArray("Local directory paths to stage recursively."),
-				"targets":    schemaStringList("Benchmark targets as an array or CSV string."),
-				"iterations": schemaInteger("Number of benchmark iterations."),
-				"timeout":    schemaInteger("Benchmark timeout in seconds."),
-			}, "language"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -681,18 +573,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"browser",
-			"Squire Browser",
-			"Run constrained headless browser verification in an offline sandbox.",
-			schemaObject(map[string]interface{}{
-				"browser":                schemaString("Browser engine, currently chromium."),
-				"script":                 schemaString("Path to a browser automation script to stage."),
-				"url":                    schemaString("Offline URL to open, such as a file:// URL."),
-				"screenshot":             schemaString("Optional screenshot filename to produce."),
-				"files":                  schemaStringArray("Local file paths to stage."),
-				"paths":                  schemaStringArray("Local directory paths to stage recursively."),
-				"timeout":                schemaInteger("Browser timeout in seconds."),
-				"download_artifacts_dir": schemaString("Optional local directory to download screenshots or other browser artifacts into."),
-			}),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				args := make([]string, 0)
 				if browser := optionalString(arguments, "browser"); browser != "" {
@@ -734,14 +614,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"compile",
-			"Squire Compile",
-			"Check Go or Rust compilation for target environments.",
-			schemaObject(map[string]interface{}{
-				"language": schemaString("Compile language: go or rust."),
-				"files":    schemaStringArray("Local file paths to stage for compilation."),
-				"targets":  schemaStringList("Compile targets as an array or CSV string."),
-				"timeout":  schemaInteger("Compile timeout in seconds."),
-			}, "language", "files"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				language, err := requiredString(arguments, "language")
 				if err != nil {
@@ -768,14 +640,6 @@ func mcpToolMap() map[string]mcpTool {
 		),
 		mcpCLIJSONTool(
 			"solve",
-			"Squire Solve",
-			"Run Z3 or MiniZinc solver jobs.",
-			schemaObject(map[string]interface{}{
-				"solver":  schemaString("Solver: z3 or minizinc."),
-				"file":    schemaString("Path to the solver input file."),
-				"data":    schemaString("Optional MiniZinc .dzn data file."),
-				"timeout": schemaInteger("Solver timeout in seconds."),
-			}, "solver", "file"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				solver, err := requiredString(arguments, "solver")
 				if err != nil {
@@ -798,16 +662,10 @@ func mcpToolMap() map[string]mcpTool {
 			},
 		),
 		{
-			Name:        "quantum_simulate",
-			Title:       "Squire Quantum Simulate",
-			Description: "Run an offline Qiskit Aer simulation in a dedicated runtime.",
-			InputSchema: schemaObject(map[string]interface{}{
-				"files":                  schemaStringArray("Local file paths to stage. The first file is the Python entry script."),
-				"shots":                  schemaInteger("Shot count passed to the simulation."),
-				"backend":                schemaString("Quantum backend. v1 supports only aer_simulator."),
-				"timeout":                schemaInteger("Simulation timeout in seconds."),
-				"download_artifacts_dir": schemaString("Optional local directory to download generated quantum artifacts into."),
-			}, "files"),
+			Name:        quantumCommand.MCPToolName,
+			Title:       quantumCommand.Title,
+			Description: quantumCommand.Description,
+			InputSchema: quantumCommand.MCPInputSchema,
 			Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
 				_ = ctx
 				files, err := requiredStringArray(arguments, "files")
@@ -843,30 +701,12 @@ func mcpToolMap() map[string]mcpTool {
 		},
 		mcpCLIJSONTool(
 			"data",
-			"Squire Data",
-			"Run Python data jobs with pandas, polars, and pyarrow in an offline sandbox.",
-			schemaObject(map[string]interface{}{
-				"script":                 schemaString("Path to the Python script to execute."),
-				"input":                  schemaString("Path to an input file for multipart upload."),
-				"stdin_text":             schemaString("Small inline input payload to send over stdin mode."),
-				"timeout":                schemaInteger("Job timeout in seconds."),
-				"download_artifacts_dir": schemaString("Optional local directory to download generated data artifacts into."),
-			}, "script"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				return buildMCPModeArgs(arguments)
 			},
 		),
 		mcpCLIJSONTool(
 			"media",
-			"Squire Media",
-			"Run Python plus ffmpeg media transformation jobs in an offline sandbox.",
-			schemaObject(map[string]interface{}{
-				"script":                 schemaString("Path to the Python script to execute."),
-				"input":                  schemaString("Path to an input file for multipart upload."),
-				"stdin_text":             schemaString("Small inline input payload to send over stdin mode."),
-				"timeout":                schemaInteger("Job timeout in seconds."),
-				"download_artifacts_dir": schemaString("Optional local directory to download generated media artifacts into."),
-			}, "script"),
 			func(arguments map[string]interface{}) ([]string, string, error) {
 				return buildMCPModeArgs(arguments)
 			},
@@ -881,29 +721,28 @@ func mcpToolMap() map[string]mcpTool {
 }
 
 func mcpHelpTool() mcpTool {
+	cmd := mustCatalogMCPCommand("help")
 	return mcpTool{
-		Name:        "help",
-		Title:       "Squire Help",
-		Description: "Return the Squire command catalog or command-specific help text.",
-		InputSchema: schemaObject(map[string]interface{}{
-			"command": schemaString("Optional Squire command name for command-specific help."),
-		}),
+		Name:        cmd.MCPToolName,
+		Title:       cmd.Title,
+		Description: cmd.Description,
+		InputSchema: cmd.MCPInputSchema,
 		Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
 			_ = ctx
 			command := optionalString(arguments, "command")
 			if command == "" {
-				payload := rootHelpPayload{
-					Name:        "squire",
-					Description: "CLI-first stateless remote validation and execution in clean disposable runtimes.",
-					Commands:    rootCommandCatalog(),
-				}
+				payload := catalog.RootHelpJSON()
 				var text bytes.Buffer
 				printRootHelp(&text)
 				return mcpToolResult{
 					Structured: map[string]interface{}{
-						"name":        payload.Name,
-						"description": payload.Description,
-						"commands":    payload.Commands,
+						"name":         payload.Name,
+						"description":  payload.Description,
+						"commands":     payload.Commands,
+						"all_commands": payload.AllCommands,
+						"by_category":  payload.ByCategory,
+						"by_path":      payload.ByPath,
+						"mcp_tools":    payload.MCPTools,
 					},
 					Text: text.String(),
 				}, nil
@@ -931,12 +770,13 @@ func mcpHelpTool() mcpTool {
 	}
 }
 
-func mcpCLIJSONTool(name, title, description string, inputSchema map[string]interface{}, buildArgs func(map[string]interface{}) ([]string, string, error)) mcpTool {
+func mcpCLIJSONTool(name string, buildArgs func(map[string]interface{}) ([]string, string, error)) mcpTool {
+	cmd := mustCatalogMCPCommand(name)
 	return mcpTool{
-		Name:        name,
-		Title:       title,
-		Description: description,
-		InputSchema: inputSchema,
+		Name:        cmd.MCPToolName,
+		Title:       cmd.Title,
+		Description: cmd.Description,
+		InputSchema: cmd.MCPInputSchema,
 		Handler: func(ctx context.Context, arguments map[string]interface{}) (mcpToolResult, error) {
 			_ = ctx
 			args, stdinText, err := buildArgs(arguments)
@@ -951,6 +791,14 @@ func mcpCLIJSONTool(name, title, description string, inputSchema map[string]inte
 			return parseMCPCLIResult(stdout.String(), stderr.String(), code), nil
 		},
 	}
+}
+
+func mustCatalogMCPCommand(toolName string) catalog.Command {
+	cmd, ok := catalog.FindByMCPToolName(toolName)
+	if !ok {
+		panic("missing catalog metadata for MCP tool " + toolName)
+	}
+	return cmd
 }
 
 func parseMCPCLIResult(stdout, stderr string, code int) mcpToolResult {
@@ -1018,62 +866,6 @@ func buildMCPModeArgs(arguments map[string]interface{}) ([]string, string, error
 		args = append(args, "--download-artifacts", dir)
 	}
 	return args, stdinText, nil
-}
-
-func schemaObject(properties map[string]interface{}, required ...string) map[string]interface{} {
-	if properties == nil {
-		properties = map[string]interface{}{}
-	}
-	out := map[string]interface{}{
-		"type":                 "object",
-		"properties":           properties,
-		"additionalProperties": false,
-	}
-	if len(required) > 0 {
-		out["required"] = required
-	}
-	return out
-}
-
-func schemaString(description string) map[string]interface{} {
-	return map[string]interface{}{
-		"type":        "string",
-		"description": description,
-	}
-}
-
-func schemaBoolean(description string) map[string]interface{} {
-	return map[string]interface{}{
-		"type":        "boolean",
-		"description": description,
-	}
-}
-
-func schemaInteger(description string) map[string]interface{} {
-	return map[string]interface{}{
-		"type":        "integer",
-		"description": description,
-	}
-}
-
-func schemaStringArray(description string) map[string]interface{} {
-	return map[string]interface{}{
-		"type":        "array",
-		"description": description,
-		"items": map[string]interface{}{
-			"type": "string",
-		},
-	}
-}
-
-func schemaStringList(description string) map[string]interface{} {
-	return map[string]interface{}{
-		"description": description,
-		"anyOf": []map[string]interface{}{
-			schemaString("Comma-separated string."),
-			schemaStringArray("Array of strings."),
-		},
-	}
 }
 
 func requiredString(arguments map[string]interface{}, key string) (string, error) {

@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"squire/internal/buildinfo"
+	"squire/internal/catalog"
 	"squire/internal/config"
 	"squire/internal/httpclient"
 	"squire/internal/protocol"
@@ -37,42 +38,89 @@ const (
 	exitSignal      = 130
 )
 
-type rootCommandHelp struct {
-	Name     string   `json:"name"`
-	Category string   `json:"category"`
-	Summary  string   `json:"summary"`
-	Aliases  []string `json:"aliases,omitempty"`
+type rootCommandHandler func(context.Context, []string, io.Reader, io.Writer, io.Writer) int
+
+type rootDispatchEntry struct {
+	Name    string
+	Aliases []string
+	Handler rootCommandHandler
 }
 
-type rootHelpPayload struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Commands    []rootCommandHelp `json:"commands"`
-}
-
-func rootCommandCatalog() []rootCommandHelp {
-	return []rootCommandHelp{
-		{Name: "login", Category: "session", Summary: "authenticate against the Squire API"},
-		{Name: "update", Category: "session", Summary: "install the latest published Squire CLI"},
-		{Name: "whoami", Category: "session", Summary: "show the authenticated user, quotas, and features"},
-		{Name: "logout", Category: "session", Summary: "clear the local Squire session"},
-		{Name: "mcp", Category: "integration", Summary: "serve the Squire tool surface over MCP stdio"},
-		{Name: "verify", Category: "validation", Summary: "run shell, Python, or Node checks in fresh Linux runtimes"},
-		{Name: "deps", Category: "validation", Summary: "dependency validation surface; currently disabled on the public zero-egress service"},
-		{Name: "sql", Category: "validation", Summary: "run ephemeral SQLite or Postgres validation"},
-		{Name: "test", Category: "validation", Summary: "run short clean test suites in fresh runtimes"},
-		{Name: "lint", Category: "validation", Summary: "run lint and static analysis in fresh toolchains"},
-		{Name: "audit", Category: "validation", Summary: "run dependency, secret, and static security checks"},
-		{Name: "build", Category: "validation", Summary: "run packaging and build sanity checks"},
-		{Name: "bench", Category: "validation", Summary: "run short comparative benchmark jobs"},
-		{Name: "browser", Category: "validation", Summary: "run constrained headless browser verification"},
-		{Name: "compile", Category: "validation", Summary: "check Go or Rust compilation for target environments"},
-		{Name: "solve", Category: "validation", Summary: "run Z3 or MiniZinc solver jobs"},
-		{Name: "quantum", Category: "validation", Summary: "run offline Qiskit Aer simulations in a dedicated runtime"},
-		{Name: "data", Category: "jobs", Summary: "run Python data jobs with pandas, polars, or pyarrow"},
-		{Name: "media", Category: "jobs", Summary: "run Python plus ffmpeg media transformation jobs"},
-		{Name: "scale", Category: "jobs", Summary: "compatibility alias for data and media", Aliases: []string{"data", "media"}},
+func rootDispatchEntries() []rootDispatchEntry {
+	return []rootDispatchEntry{
+		{Name: "help", Aliases: []string{"--help", "-h"}, Handler: func(_ context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runRootHelp(args, stdout, stderr)
+		}},
+		{Name: "login", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runLogin(ctx, args, stdout, stderr)
+		}},
+		{Name: "update", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runUpdate(ctx, args, stdout, stderr)
+		}},
+		{Name: "whoami", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runWhoAmI(ctx, args, stdout, stderr)
+		}},
+		{Name: "logout", Handler: func(_ context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runLogout(args, stdout, stderr)
+		}},
+		{Name: "mcp", Handler: runMCP},
+		{Name: "verify", Handler: runVerify},
+		{Name: "deps", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runDeps(ctx, args, stdout, stderr)
+		}},
+		{Name: "sql", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runSQL(ctx, args, stdout, stderr)
+		}},
+		{Name: "test", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runTest(ctx, args, stdout, stderr)
+		}},
+		{Name: "lint", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runLint(ctx, args, stdout, stderr)
+		}},
+		{Name: "audit", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runAudit(ctx, args, stdout, stderr)
+		}},
+		{Name: "build", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runBuild(ctx, args, stdout, stderr)
+		}},
+		{Name: "bench", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runBench(ctx, args, stdout, stderr)
+		}},
+		{Name: "browser", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runBrowser(ctx, args, stdout, stderr)
+		}},
+		{Name: "compile", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runCompile(ctx, args, stdout, stderr)
+		}},
+		{Name: "solve", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runSolve(ctx, args, stdout, stderr)
+		}},
+		{Name: "quantum", Handler: func(ctx context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+			return runQuantum(ctx, args, stdout, stderr)
+		}},
+		{Name: "data", Handler: func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+			return runMode(ctx, args, stdin, stdout, stderr, "data")
+		}},
+		{Name: "media", Handler: func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+			return runMode(ctx, args, stdin, stdout, stderr, "media")
+		}},
+		{Name: "scale", Handler: runScaleAlias},
 	}
+}
+
+func findRootDispatchEntry(name string) (rootDispatchEntry, bool) {
+	name = strings.TrimSpace(name)
+	for _, entry := range rootDispatchEntries() {
+		if entry.Name == name {
+			return entry, true
+		}
+		for _, alias := range entry.Aliases {
+			if alias == name {
+				return entry, true
+			}
+		}
+	}
+	return rootDispatchEntry{}, false
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -83,54 +131,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		printRootHelp(stderr)
 		return exitUsage
 	}
-	switch args[0] {
-	case "login":
-		return runLogin(ctx, args[1:], stdout, stderr)
-	case "update":
-		return runUpdate(ctx, args[1:], stdout, stderr)
-	case "verify":
-		return runVerify(ctx, args[1:], stdin, stdout, stderr)
-	case "deps":
-		return runDeps(ctx, args[1:], stdout, stderr)
-	case "sql":
-		return runSQL(ctx, args[1:], stdout, stderr)
-	case "test":
-		return runTest(ctx, args[1:], stdout, stderr)
-	case "lint":
-		return runLint(ctx, args[1:], stdout, stderr)
-	case "audit":
-		return runAudit(ctx, args[1:], stdout, stderr)
-	case "build":
-		return runBuild(ctx, args[1:], stdout, stderr)
-	case "bench":
-		return runBench(ctx, args[1:], stdout, stderr)
-	case "browser":
-		return runBrowser(ctx, args[1:], stdout, stderr)
-	case "compile":
-		return runCompile(ctx, args[1:], stdout, stderr)
-	case "solve":
-		return runSolve(ctx, args[1:], stdout, stderr)
-	case "quantum":
-		return runQuantum(ctx, args[1:], stdout, stderr)
-	case "data":
-		return runMode(ctx, args[1:], stdin, stdout, stderr, "data")
-	case "media":
-		return runMode(ctx, args[1:], stdin, stdout, stderr, "media")
-	case "scale":
-		return runScaleAlias(ctx, args[1:], stdin, stdout, stderr)
-	case "whoami":
-		return runWhoAmI(ctx, args[1:], stdout, stderr)
-	case "logout":
-		return runLogout(args[1:], stdout, stderr)
-	case "mcp":
-		return runMCP(ctx, args[1:], stdin, stdout, stderr)
-	case "help", "--help", "-h":
-		return runRootHelp(args[1:], stdout, stderr)
-	default:
+	entry, ok := findRootDispatchEntry(args[0])
+	if !ok {
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printRootHelp(stderr)
 		return exitUsage
 	}
+	return entry.Handler(ctx, args[1:], stdin, stdout, stderr)
 }
 
 func runRootHelp(args []string, stdout, stderr io.Writer) int {
@@ -143,19 +150,22 @@ func runRootHelp(args []string, stdout, stderr io.Writer) int {
 	}
 	rest := fs.Args()
 	if len(rest) > 0 {
-		if !printCommandHelp(rest[0], stdout, stderr) {
-			fmt.Fprintf(stderr, "unknown command %q\n\n", rest[0])
+		commandPath := strings.Join(rest, " ")
+		if !printCommandHelp(commandPath, stdout, stderr) {
+			fmt.Fprintf(stderr, "unknown command %q\n\n", commandPath)
 			printRootHelp(stderr)
 			return exitUsage
 		}
 		return exitOK
 	}
 	if *jsonOut {
-		_ = json.NewEncoder(stdout).Encode(rootHelpPayload{
-			Name:        "squire",
-			Description: "CLI-first stateless remote validation and execution in clean disposable runtimes.",
-			Commands:    rootCommandCatalog(),
-		})
+		payload, err := catalog.RootHelpJSONBytes()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return exitRemoteError
+		}
+		_, _ = stdout.Write(payload)
+		_, _ = stdout.Write([]byte("\n"))
 		return exitOK
 	}
 	printRootHelp(stdout)
@@ -163,51 +173,12 @@ func runRootHelp(args []string, stdout, stderr io.Writer) int {
 }
 
 func printCommandHelp(command string, stdout, stderr io.Writer) bool {
-	switch command {
-	case "login":
-		printLoginHelp(stdout)
-	case "update":
-		printUpdateHelp(stdout)
-	case "verify":
-		printVerifyHelp(stdout)
-	case "deps":
-		printDepsHelp(stdout)
-	case "sql":
-		printSQLHelp(stdout)
-	case "test":
-		printTestHelp(stdout)
-	case "lint":
-		printLintHelp(stdout)
-	case "audit":
-		printAuditHelp(stdout)
-	case "build":
-		printBuildHelp(stdout)
-	case "bench":
-		printBenchHelp(stdout)
-	case "browser":
-		printBrowserHelp(stdout)
-	case "compile":
-		printCompileHelp(stdout)
-	case "solve":
-		printSolveHelp(stdout)
-	case "quantum":
-		printQuantumHelp(stdout)
-	case "data":
-		printDataHelp(stdout)
-	case "media":
-		printMediaHelp(stdout)
-	case "scale":
-		printScaleAliasHelp(stdout)
-	case "whoami":
-		printWhoAmIHelp(stdout)
-	case "logout":
-		printLogoutHelp(stdout)
-	case "mcp":
-		printMCPHelp(stdout)
-	default:
+	text, ok := catalog.CommandHelpText(command)
+	if !ok {
 		_ = stderr
 		return false
 	}
+	_, _ = io.WriteString(stdout, text)
 	return true
 }
 
@@ -1169,7 +1140,7 @@ func runQuantumSimulate(ctx context.Context, args []string, stdout, stderr io.Wr
 	downloadDir := fs.String("download-artifacts", "", "Download returned quantum artifacts into this local directory")
 	jsonOut := fs.Bool("json", false, "Print raw JSON response")
 	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this request")
-	fs.Usage = func() { printQuantumHelp(fs.Output()) }
+	fs.Usage = func() { printCatalogCommandHelpPath(fs.Output(), "quantum.simulate") }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -1752,261 +1723,95 @@ func openBrowser(target string) error {
 }
 
 func printRootHelp(w io.Writer) {
-	fmt.Fprint(w, `Squire is a CLI-first tool for stateless remote validation in clean disposable runtimes.
-
-Session:
-  squire login      authenticate against the Squire API
-  squire update     install the latest published Squire CLI
-  squire whoami     show the authenticated user, quotas, and features
-  squire logout     clear the local Squire session
-
-Integration:
-  squire mcp        serve the Squire tool surface over MCP stdio
-
-Validation:
-  squire verify     run shell, Python, or Node checks in fresh Linux runtimes
-  squire deps       dependency validation surface; currently disabled on the public zero-egress service
-  squire sql        run ephemeral SQLite or Postgres validation
-  squire test       run short clean test suites in fresh runtimes
-  squire lint       run lint and static analysis in fresh toolchains
-  squire audit      run dependency, secret, and static security checks
-  squire build      run packaging and build sanity checks
-  squire bench      run short comparative benchmark jobs
-  squire browser    run constrained headless browser verification
-  squire compile    check Go or Rust compilation for target environments
-  squire solve      run Z3 or MiniZinc solver jobs
-  squire quantum    run offline Qiskit Aer simulations in a dedicated runtime
-
-Jobs:
-  squire data       run Python data jobs with pandas, polars, or pyarrow
-  squire media      run Python plus ffmpeg media transformation jobs
-  squire scale      compatibility alias for data and media
-
-Examples:
-  squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12
-  squire browser --path website/public --screenshot page.png --json
-  squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
-  squire quantum simulate --file shor.py --json
-
-Use "squire <command> --help" for command-specific usage.
-Use "squire --help --json" for a machine-readable command catalog.
-See docs/agent/tool-constraints.md for per-tool runtime, network, and public-service constraints.
-`)
+	_, _ = io.WriteString(w, catalog.RootHelpText())
 }
 
 func printLoginHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire login [--token <SQUIRE_TOKEN>] [--json]
-
-Default behavior opens a browser for GitHub OAuth and stores session config in ~/.squire/config.json.
-
-Examples:
-  squire login
-  squire login --token sqh_...
-`)
+	printCatalogCommandHelpPath(w, "login")
 }
 
 func printUpdateHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire update [--version <tag|latest>] [--install-dir <path>] [--json]
-
-Downloads the published CLI release for the current OS and architecture and replaces the local squire binary in place.
-
-Examples:
-  squire update
-  squire update --version v0.5.1
-  squire update --install-dir ~/.local/bin --json
-`)
+	printCatalogCommandHelpPath(w, "update")
 }
 
 func printVerifyHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire verify --lang <bash|python|node> [--code <snippet> | --file <path>] [--targets <csv>] [--timeout <seconds>] [--json]
-
-Examples:
-  echo "print('hi')" | squire verify --lang python --targets alpine-3.20,ubuntu-24.04,debian-12 --json
-  squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12
-`)
+	printCatalogCommandHelpPath(w, "verify")
 }
 
 func printDepsHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire deps --lang <python|node> --file <path> [--targets <csv>] [--timeout <seconds>] [--json]
-
-The public service currently disables deps under the zero-egress policy.
-
-Examples:
-  squire deps --lang python --file requirements.txt --targets py310,py311,py312 --json
-  squire deps --lang node --file package.json --json
-`)
+	printCatalogCommandHelpPath(w, "deps")
 }
 
 func printSQLHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire sql --dialect <sqlite|postgres-16> [--file <path> | --schema <path> --query <sql> | --schema <path> --query-file <path>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire sql --dialect sqlite --query "SELECT 1" --json
-  squire sql --dialect sqlite --schema schema.sql --query-file query.sql --json
-  squire sql --dialect postgres-16 --file migration.sql --json
-`)
+	printCatalogCommandHelpPath(w, "sql")
 }
 
 func printTestHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire test --lang <python|node|bash> --file <path> [--file <path> ...] [--cmd <command>] [--targets <csv>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire test --lang python --file test_app.py --cmd "pytest -q" --targets py310,py311 --json
-  squire test --lang node --file package.json --file test/app.test.mjs --cmd "npm test" --targets node20,node22 --json
-  squire test --lang bash --file test.sh --targets alpine-3.20,ubuntu-24.04 --json
-`)
+	printCatalogCommandHelpPath(w, "test")
 }
 
 func printLintHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire lint --lang <python|js|ts|rust> --tool <ruff|eslint|clippy> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire lint --lang python --tool ruff --file app.py --json
-  squire lint --lang ts --tool eslint --file src/index.ts --json
-  squire lint --lang rust --tool clippy --file Cargo.toml --file src/main.rs --targets stable,nightly --json
-`)
+	printCatalogCommandHelpPath(w, "lint")
 }
 
 func printAuditHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire audit [--secrets | --static --tool semgrep --config <local-config>] [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]
-
-Dependency audit is disabled under the current zero-egress policy. Semgrep static audit requires a staged local config file if you need a custom config.
-
-Examples:
-  squire audit --secrets --path ./src --json
-  squire audit --static --tool semgrep --config semgrep.yml --file semgrep.yml --path ./src --json
-`)
+	printCatalogCommandHelpPath(w, "audit")
 }
 
 func printBuildHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire build --lang <python|node> [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-Offline packaging/build sanity checks. Use --download-artifacts to fetch built outputs locally.
-
-Examples:
-  squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --json
-  squire build --lang node --file package.json --path src --targets linux --download-artifacts ./dist --json
-`)
+	printCatalogCommandHelpPath(w, "build")
 }
 
 func printBenchHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire bench --lang <python|bash|go> [--file <path> | --path <dir>] ... [--targets <csv>] [--iterations <count>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire bench --lang python --file bench.py --targets py310,py311,py312 --json
-  squire bench --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04 --json
-  squire bench --lang go --file main.go --targets linux/amd64 --json
-`)
+	printCatalogCommandHelpPath(w, "bench")
 }
 
 func printBrowserHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-Browser runs are offline-only. Remote http:// and https:// URLs are disabled.
-Stage full local asset trees with --path when you need images, fonts, or other binary files.
-Use --download-artifacts to fetch screenshots or other generated files locally.
-
-Examples:
-  squire browser --script login-test.js --browser chromium --json
-  squire browser --file index.html --screenshot page.png --json
-  squire browser --path website/public --screenshot page.png --download-artifacts ./browser-out --json
-`)
+	printCatalogCommandHelpPath(w, "browser")
 }
 
 func printCompileHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire compile --lang <go|rust> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json
-  squire compile --lang rust --file Cargo.toml --file src/main.rs --targets linux/amd64-musl,linux/arm64 --json
-`)
+	printCatalogCommandHelpPath(w, "compile")
 }
 
 func printSolveHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire solve --solver <z3|minizinc> --file <path> [--data <path>] [--timeout <seconds>] [--json]
-
-Examples:
-  squire solve --solver z3 --file constraints.smt2 --json
-  squire solve --solver minizinc --file model.mzn --data data.dzn --json
-`)
+	printCatalogCommandHelpPath(w, "solve")
 }
 
 func printQuantumHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage:
-  squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-	Notes:
-  - the first --file is the Python entry script
-  - additional --file values stage helper modules or local assets
-  - v1 supports only the offline Aer simulator backend
-  - the public service currently requires trusted access or higher for quantum simulate
-  - use --download-artifacts to fetch files written under /workspace/output locally
-
-Examples:
-  squire quantum simulate --file shor.py --json
-  squire quantum simulate --file shor.py --file helpers.py --shots 2048 --timeout 300 --download-artifacts ./quantum-out --json
-`)
+	printCatalogCommandHelpPath(w, "quantum")
 }
 
 func printDataHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire data --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-Runs a Python 3.11 data runtime with pandas, polars, and pyarrow available.
-Stage large inputs with --input or small text with --stdin. Scripts read SQUIRE_INPUT_PATH and write artifacts to SQUIRE_OUTPUT_DIR.
-
-Examples:
-  squire data --script transform.py --input big.csv --json
-  cat small.csv | squire data --script transform.py --stdin --json
-  squire data --script transform.py --input big.csv --download-artifacts ./data-out --json
-`)
+	printCatalogCommandHelpPath(w, "data")
 }
 
 func printMediaHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire media --script <path> [--input <path>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-Runs a Python 3.11 media runtime with ffmpeg installed.
-Scripts read SQUIRE_INPUT_PATH and write output files to SQUIRE_OUTPUT_DIR.
-
-Examples:
-  squire media --script clip.py --input image.png --json
-  squire media --script square.py --input image.png --download-artifacts ./media-out --json
-`)
+	printCatalogCommandHelpPath(w, "media")
 }
 
 func printScaleAliasHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire scale --mode <data|media> --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]
-
-Compatibility alias for "squire data" and "squire media".
-
-Examples:
-  squire scale --mode data --script transform.py --input big.csv --json
-  squire scale --mode media --script clip.py --input image.png --download-artifacts ./media-out --json
-`)
+	printCatalogCommandHelpPath(w, "scale")
 }
 
 func printWhoAmIHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire whoami [--json]
-
-Shows the authenticated user, trust tier, quotas, and feature flags.
-`)
+	printCatalogCommandHelpPath(w, "whoami")
 }
 
 func printLogoutHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire logout [--json]
-
-Clears the locally stored Squire session config.
-`)
+	printCatalogCommandHelpPath(w, "logout")
 }
 
 func printMCPHelp(w io.Writer) {
-	fmt.Fprint(w, `Usage: squire mcp serve
+	printCatalogCommandHelpPath(w, "mcp")
+}
 
-Starts a stdio MCP server that exposes Squire tools for MCP-compatible clients.
-The server reuses the current local Squire login/session.
-
-Examples:
-  squire mcp serve
-`)
+func printCatalogCommandHelpPath(w io.Writer, path string) {
+	text, ok := catalog.CommandHelpText(path)
+	if !ok {
+		panic("missing catalog help for " + path)
+	}
+	_, _ = io.WriteString(w, text)
 }
 
 func collectRequestFiles(files, paths []string) ([]protocol.SourceFile, error) {

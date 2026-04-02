@@ -36,6 +36,10 @@ Use these first:
 
 Prefer `--json` when another tool or agent will read the result.
 
+For the full generated command catalog, public-policy notes, and examples, see:
+
+- `docs/commands.generated.md`
+
 ## Task-to-command mapping
 
 Use Squire when a task is environment-sensitive, target-sensitive, or short but heavy.
@@ -75,6 +79,7 @@ Prefer local execution for tiny trivial checks. Prefer Squire when correctness d
 For per-tool runtime, network, input, output, and public-service constraints, start with:
 
 - `docs/agent/tool-constraints.md`
+- `docs/commands.generated.md`
 
 ## Current public-service limits
 

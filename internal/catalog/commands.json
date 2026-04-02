@@ -1,0 +1,1636 @@
+{
+  "name": "squire",
+  "description": "Squire is a CLI-first tool for stateless remote validation in clean disposable runtimes.",
+  "agent_description": "Use Squire when correctness depends on a fresh environment, a specific target runtime, or a short heavy job that is better off your local machine.",
+  "featured_examples": [
+    "squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12",
+    "squire browser --path website/public --screenshot page.png --download-artifacts ./browser-out --json",
+    "squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json",
+    "squire quantum simulate --file shor.py --download-artifacts ./quantum-out --json"
+  ],
+  "commands": [
+    {
+      "name": "help",
+      "path": "help",
+      "category": "discovery",
+      "title": "Squire Help",
+      "summary": "show the command catalog or command-specific help",
+      "description": "Show the top-level Squire command catalog or help for a specific command. This is the canonical discovery surface for humans and agents before choosing a command.",
+      "usage": "squire help [--json] [command [subcommand]]",
+      "when_to_use": [
+        "You need to discover the available command surface.",
+        "An agent needs structured capability metadata before selecting a tool."
+      ],
+      "when_not_to_use": [
+        "You already know the exact command and flags you need."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "The richer machine-readable form is available through squire --help --json."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "help",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Optional command path, such as verify or quantum simulate."
+          }
+        },
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire --help",
+        "squire --help --json",
+        "squire help media",
+        "squire help quantum simulate"
+      ],
+      "help_flags": [
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print the full machine-readable command catalog."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "command [subcommand]",
+          "description": "Optional command path to show command-specific help."
+        }
+      ],
+      "agent_hint": "Start here if you do not already know the correct command or current public-service policy.",
+      "stability": "core",
+      "audience": "both"
+    },
+    {
+      "name": "login",
+      "path": "login",
+      "category": "session",
+      "title": "Squire Login",
+      "summary": "authenticate against the Squire API",
+      "description": "Authenticate the local CLI against the Squire API. Browser-based GitHub OAuth is the default path; headless token login is available for automation and CI.",
+      "usage": "squire login [--token <SQUIRE_TOKEN>] [--json]",
+      "when_to_use": [
+        "You are setting up a new machine or shell session.",
+        "You need a fresh session token with the latest scopes."
+      ],
+      "when_not_to_use": [
+        "You are already logged in and the current session still works."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "The default public login flow uses GitHub OAuth."
+      ],
+      "supports_json": true,
+      "mcp_exposed": false,
+      "examples": [
+        "squire login",
+        "squire login --token sqh_..."
+      ],
+      "help_flags": [
+        {
+          "name": "token",
+          "type": "string",
+          "description": "Squire-issued headless token for CI or non-browser login."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print machine-readable login output."
+        }
+      ],
+      "agent_hint": "Use token login for non-interactive automation; otherwise prefer the normal browser flow.",
+      "stability": "core",
+      "audience": "both"
+    },
+    {
+      "name": "update",
+      "path": "update",
+      "category": "session",
+      "title": "Squire Update",
+      "summary": "install the latest published Squire CLI",
+      "description": "Download the published Squire CLI release for the current OS and architecture and replace the local binary in place.",
+      "usage": "squire update [--version <tag|latest>] [--install-dir <path>] [--json]",
+      "when_to_use": [
+        "You want the newest published CLI with the latest command surface and fixes."
+      ],
+      "when_not_to_use": [
+        "You are developing the CLI locally and want to run the current source tree instead."
+      ],
+      "public_status": "enabled",
+      "supports_json": true,
+      "mcp_exposed": false,
+      "examples": [
+        "squire update",
+        "squire update --version v0.6.3 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "version",
+          "type": "string",
+          "description": "Release tag to install. Defaults to latest.",
+          "default": "latest"
+        },
+        {
+          "name": "install-dir",
+          "type": "string",
+          "description": "Directory to install the binary into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print machine-readable update output."
+        }
+      ],
+      "agent_hint": "Use this after install or when help/docs mention behavior your local binary does not have.",
+      "stability": "core",
+      "audience": "both"
+    },
+    {
+      "name": "whoami",
+      "path": "whoami",
+      "category": "session",
+      "title": "Squire WhoAmI",
+      "summary": "show the authenticated user, quotas, and features",
+      "description": "Return the current authenticated identity, trust tier, feature flags, token metadata, and server-side quotas.",
+      "usage": "squire whoami [--json]",
+      "when_to_use": [
+        "You need to confirm the current trust tier or public feature access.",
+        "An agent needs to inspect the current quotas before planning heavier work."
+      ],
+      "when_not_to_use": [
+        "You only need to run a command and do not care about session metadata."
+      ],
+      "public_status": "enabled",
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "whoami",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire whoami",
+        "squire whoami --json"
+      ],
+      "help_flags": [
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print the full machine-readable identity and quota payload."
+        }
+      ],
+      "agent_hint": "Use before expensive modules if trust tier, quotas, or feature flags matter.",
+      "stability": "core",
+      "audience": "both"
+    },
+    {
+      "name": "logout",
+      "path": "logout",
+      "category": "session",
+      "title": "Squire Logout",
+      "summary": "clear the local Squire session",
+      "description": "Remove the locally stored Squire session configuration from the current machine.",
+      "usage": "squire logout [--json]",
+      "when_to_use": [
+        "You want to clear the current local session.",
+        "You are switching between identities on the same machine."
+      ],
+      "when_not_to_use": [
+        "You still need the current session token for ongoing work."
+      ],
+      "public_status": "enabled",
+      "supports_json": true,
+      "mcp_exposed": false,
+      "examples": [
+        "squire logout",
+        "squire logout --json"
+      ],
+      "help_flags": [
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print machine-readable logout output."
+        }
+      ],
+      "agent_hint": "Avoid in shared sessions unless the user explicitly wants to clear local auth.",
+      "stability": "core",
+      "audience": "both"
+    },
+    {
+      "name": "mcp",
+      "path": "mcp",
+      "category": "integration",
+      "title": "Squire MCP",
+      "summary": "serve the Squire tool surface over MCP stdio",
+      "description": "Expose the Squire command surface over MCP stdio for clients that expect tool discovery through MCP.",
+      "usage": "squire mcp serve",
+      "when_to_use": [
+        "Your host expects MCP tool discovery and stdio transport."
+      ],
+      "when_not_to_use": [
+        "A plain terminal workflow is simpler."
+      ],
+      "public_status": "enabled",
+      "supports_json": false,
+      "mcp_exposed": false,
+      "examples": [
+        "squire mcp serve"
+      ],
+      "agent_hint": "Prefer direct CLI use unless an MCP host requires this wrapper.",
+      "stability": "advanced",
+      "audience": "agent",
+      "subcommands": [
+        {
+          "name": "serve",
+          "path": "mcp.serve",
+          "category": "integration",
+          "title": "Squire MCP Serve",
+          "summary": "start the MCP stdio server",
+          "description": "Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session.",
+          "usage": "squire mcp serve",
+          "when_to_use": [
+            "Your MCP client needs Squire tools over stdio."
+          ],
+          "when_not_to_use": [
+            "You only need the normal CLI."
+          ],
+          "public_status": "enabled",
+          "supports_json": false,
+          "mcp_exposed": false,
+          "examples": [
+            "squire mcp serve"
+          ],
+          "agent_hint": "This is a local wrapper around the CLI, not a separate remote protocol surface.",
+          "stability": "advanced",
+          "audience": "agent"
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "path": "verify",
+      "category": "validation",
+      "title": "Squire Verify",
+      "summary": "run shell, Python, or Node checks in fresh Linux runtimes",
+      "description": "Run small inline snippets or staged scripts in fresh Linux containers across the supported target images.",
+      "usage": "squire verify --lang <bash|python|node> [--code <inline> | --file <path>] [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need a clean runtime check across Linux targets.",
+        "You are debugging OS-sensitive or environment-sensitive behavior."
+      ],
+      "when_not_to_use": [
+        "The command is trivial and local execution is faster.",
+        "You need a persistent environment or long-running workflow."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Use exact target IDs such as alpine-3.20, ubuntu-24.04, and debian-12.",
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "verify",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": {
+            "type": "string",
+            "description": "Language to execute: bash, python, or node."
+          },
+          "code": {
+            "type": "string",
+            "description": "Inline code snippet to verify."
+          },
+          "file": {
+            "type": "string",
+            "description": "Path to a local script file to upload."
+          },
+          "targets": {
+            "description": "Target matrix as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Per-target timeout in seconds."
+          }
+        },
+        "required": ["language"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire verify --lang bash --file script.sh --targets alpine-3.20,ubuntu-24.04,debian-12 --json",
+        "squire verify --lang python --code \"print('ok')\" --targets ubuntu-24.04 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Verify language: bash, python, or node.",
+          "enum": ["bash", "python", "node"]
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "description": "Inline code snippet to run."
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "description": "Local script file to upload."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated target list.",
+          "default": "alpine-3.20,ubuntu-24.04,debian-12"
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Per-target timeout in seconds.",
+          "default": "20"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Prefer for small runtime repros and environment validation loops before using heavier tools.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "deps",
+      "path": "deps",
+      "category": "validation",
+      "title": "Squire Deps",
+      "summary": "dependency validation surface; currently disabled on the public zero-egress service",
+      "description": "Validate whether dependency manifests install in a clean environment. The CLI surface exists, but the public zero-egress service currently rejects deps jobs.",
+      "usage": "squire deps --lang <python|node> --file <path> [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need dependency-install validation in a clean environment when the service policy allows it."
+      ],
+      "when_not_to_use": [
+        "You are targeting the current public service, where deps is disabled."
+      ],
+      "public_status": "disabled",
+      "policy_notes": [
+        "The current public service rejects deps requests because outbound sandbox network access is not allowed."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "deps",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": {
+            "type": "string",
+            "description": "Dependency language: python or node."
+          },
+          "file": {
+            "type": "string",
+            "description": "Path to the dependency manifest to upload."
+          },
+          "targets": {
+            "description": "Dependency targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Dependency install timeout in seconds."
+          }
+        },
+        "required": ["language", "file"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire deps --lang python --file requirements.txt --targets py310,py311 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Dependency language.",
+          "enum": ["python", "node"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "description": "Dependency manifest file to upload."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated dependency targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Dependency check timeout in seconds."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Do not plan around deps on the public service until there is a network-free design for it.",
+      "stability": "advanced",
+      "audience": "both",
+      "disabled_reason": "disabled on the public service under the zero-egress policy"
+    },
+    {
+      "name": "sql",
+      "path": "sql",
+      "category": "validation",
+      "title": "Squire SQL",
+      "summary": "run ephemeral SQLite or Postgres validation",
+      "description": "Run SQLite or Postgres schema, query, and migration validation in a fresh disposable database sandbox.",
+      "usage": "squire sql --dialect <sqlite|postgres-16> [--file <path> | --schema <path> --query <sql> | --query-file <path>] [--explain] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need clean SQLite or Postgres validation without local database setup."
+      ],
+      "when_not_to_use": [
+        "You need a persistent database or long-lived connection."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled.",
+        "Postgres runs in a fresh request-scoped helper inside the sandbox."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "sql",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "dialect": {
+            "type": "string",
+            "description": "SQL dialect: sqlite or postgres-16."
+          },
+          "file": {
+            "type": "string",
+            "description": "Path to a SQL file containing statements to apply."
+          },
+          "schema": {
+            "type": "string",
+            "description": "Path to a schema file to apply before the query."
+          },
+          "query": {
+            "type": "string",
+            "description": "Inline SQL query to execute after schema setup."
+          },
+          "query_file": {
+            "type": "string",
+            "description": "Path to a query file to execute after schema setup."
+          },
+          "explain": {
+            "type": "boolean",
+            "description": "Request an execution plan when the dialect supports it."
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "SQL timeout in seconds."
+          }
+        },
+        "required": ["dialect"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire sql --dialect sqlite --query \"SELECT 1\" --json",
+        "squire sql --dialect postgres-16 --file migration.sql --json"
+      ],
+      "help_flags": [
+        {
+          "name": "dialect",
+          "type": "string",
+          "required": true,
+          "description": "SQL dialect.",
+          "enum": ["sqlite", "postgres-16"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "description": "SQL file containing statements to apply."
+        },
+        {
+          "name": "schema",
+          "type": "string",
+          "description": "Schema file to apply before a query."
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "description": "Inline SQL query."
+        },
+        {
+          "name": "query-file",
+          "type": "string",
+          "description": "Query file to execute after schema setup."
+        },
+        {
+          "name": "explain",
+          "type": "boolean",
+          "description": "Request an execution plan when supported."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "SQL timeout in seconds.",
+          "default": "20"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Prefer for schema, migration, and query validation when you want a clean DB per request.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "test",
+      "path": "test",
+      "category": "validation",
+      "title": "Squire Test",
+      "summary": "run short clean test suites in fresh runtimes",
+      "description": "Run small or medium test jobs in clean runtimes with a target matrix for Python, Node, or Bash.",
+      "usage": "squire test --lang <python|node|bash> --file <path> [--file <path> ...] [--cmd <command>] [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need a fresh test environment without local drift.",
+        "You want a short target matrix instead of full CI."
+      ],
+      "when_not_to_use": [
+        "You need a full CI pipeline or long-running test suite."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "test",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": {
+            "type": "string",
+            "description": "Test language: python, node, or bash."
+          },
+          "files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Local file paths to stage for the test run."
+          },
+          "command": {
+            "type": "string",
+            "description": "Restricted test command such as pytest -q or npm test."
+          },
+          "targets": {
+            "description": "Runtime targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Test timeout in seconds."
+          }
+        },
+        "required": ["language", "files"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire test --lang python --file test_app.py --cmd \"pytest -q\" --targets py310,py311 --json",
+        "squire test --lang node --file test/app.test.mjs --cmd \"node --test\" --targets node20,node22 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Test language.",
+          "enum": ["python", "node", "bash"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "repeatable": true,
+          "description": "File to stage for the test run."
+        },
+        {
+          "name": "cmd",
+          "type": "string",
+          "description": "Restricted test command such as pytest -q or npm test."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated runtime targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Test timeout in seconds.",
+          "default": "60"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Prefer for short clean validation loops, not as a replacement for full CI.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "lint",
+      "path": "lint",
+      "category": "validation",
+      "title": "Squire Lint",
+      "summary": "run lint and static analysis in fresh toolchains",
+      "description": "Run fixed lint and static-analysis tools in a fresh toolchain so local environment drift does not affect the result.",
+      "usage": "squire lint --lang <python|js|ts|rust> --tool <ruff|eslint|clippy> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need a clean lint result from a fixed supported toolchain."
+      ],
+      "when_not_to_use": [
+        "You need arbitrary plugins or unsupported linters."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled.",
+        "The public service supports ruff, eslint, and clippy."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "lint",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": { "type": "string", "description": "Lint language: python, js, ts, or rust." },
+          "tool": { "type": "string", "description": "Lint tool: ruff, eslint, or clippy." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage for the lint run." },
+          "targets": {
+            "description": "Lint targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": { "type": "integer", "description": "Lint timeout in seconds." }
+        },
+        "required": ["language", "tool", "files"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire lint --lang python --tool ruff --file app.py --json",
+        "squire lint --lang rust --tool clippy --file Cargo.toml --file src/main.rs --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Lint language.",
+          "enum": ["python", "js", "ts", "rust"]
+        },
+        {
+          "name": "tool",
+          "type": "string",
+          "required": true,
+          "description": "Supported lint tool.",
+          "enum": ["ruff", "eslint", "clippy"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "repeatable": true,
+          "description": "File to stage for linting."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated lint targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Lint timeout in seconds.",
+          "default": "45"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Prefer when you want a clean supported linter result without local toolchain drift.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "audit",
+      "path": "audit",
+      "category": "validation",
+      "title": "Squire Audit",
+      "summary": "run dependency, secret, and static security checks",
+      "description": "Run the supported security-focused audit surfaces against staged local files. On the public service this currently means secret scanning and local-config static analysis.",
+      "usage": "squire audit [--secrets | --static] [--lang <language>] [--tool <tool>] [--config <path>] [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need a quick secret scan or a constrained local-config static analysis pass."
+      ],
+      "when_not_to_use": [
+        "You need dependency audit on the current public service.",
+        "You need remote Semgrep configs or unrestricted external lookups."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "The public service supports secret scanning and local-config static analysis.",
+        "Dependency audit and remote Semgrep configs are disabled on the public service.",
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "audit",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": { "type": "string", "description": "Audit language. Dependency audit is currently disabled publicly." },
+          "secrets": { "type": "boolean", "description": "Run the built-in secret scanner." },
+          "static": { "type": "boolean", "description": "Run static analysis." },
+          "tool": { "type": "string", "description": "Audit tool, such as semgrep." },
+          "config": { "type": "string", "description": "Static analysis config as a staged local file path." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage." },
+          "paths": { "type": "array", "items": { "type": "string" }, "description": "Local directory paths to stage recursively." },
+          "targets": {
+            "description": "Audit targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": { "type": "integer", "description": "Audit timeout in seconds." }
+        },
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire audit --secrets --path src --json",
+        "squire audit --static --tool semgrep --config semgrep.yml --path src --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "description": "Dependency audit language. Public dependency audit is currently disabled."
+        },
+        {
+          "name": "secrets",
+          "type": "boolean",
+          "description": "Run the built-in secret scanner."
+        },
+        {
+          "name": "static",
+          "type": "boolean",
+          "description": "Run static analysis."
+        },
+        {
+          "name": "tool",
+          "type": "string",
+          "description": "Audit tool, such as semgrep."
+        },
+        {
+          "name": "config",
+          "type": "string",
+          "description": "Static analysis config as a staged local file path."
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "repeatable": true,
+          "description": "File to stage for auditing."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "repeatable": true,
+          "description": "Directory tree to stage recursively."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated audit targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Audit timeout in seconds.",
+          "default": "60"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use for secret scanning and constrained static checks; do not assume full AppSec platform behavior.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "build",
+      "path": "build",
+      "category": "validation",
+      "title": "Squire Build",
+      "summary": "run packaging and build sanity checks",
+      "description": "Run offline packaging and build sanity checks in clean environments and optionally pull the resulting artifacts back locally.",
+      "usage": "squire build --lang <python|node> [--file <path> | --path <dir>] ... [--targets <csv>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You want a clean package/build sanity check without publishing anything."
+      ],
+      "when_not_to_use": [
+        "You need a full release pipeline or registry publishing."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled.",
+        "Use --download-artifacts to fetch build outputs locally."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "build",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": { "type": "string", "description": "Build language: python or node." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage." },
+          "paths": { "type": "array", "items": { "type": "string" }, "description": "Local directory paths to stage recursively." },
+          "targets": {
+            "description": "Build targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": { "type": "integer", "description": "Build timeout in seconds." },
+          "download_artifacts_dir": { "type": "string", "description": "Optional local directory to download build artifacts into." }
+        },
+        "required": ["language"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire build --lang python --file pyproject.toml --path src --targets manylinux,musllinux --download-artifacts ./dist --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Build language.",
+          "enum": ["python", "node"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "repeatable": true,
+          "description": "File to stage for the build."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "repeatable": true,
+          "description": "Directory tree to stage recursively."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated build targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Build timeout in seconds.",
+          "default": "120"
+        },
+        {
+          "name": "download-artifacts",
+          "type": "string",
+          "description": "Local directory to download build artifacts into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use when you need the built files back locally but do not want the build to happen on your own machine.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "bench",
+      "path": "bench",
+      "category": "validation",
+      "title": "Squire Bench",
+      "summary": "run short comparative benchmark jobs",
+      "description": "Run small, short-lived benchmark jobs in clean runtimes to compare simple timing behavior without turning Squire into a full performance platform.",
+      "usage": "squire bench --lang <python|bash|go> [--file <path> | --path <dir>] ... [--targets <csv>] [--iterations <count>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You want a quick timing comparison in clean runtimes."
+      ],
+      "when_not_to_use": [
+        "You need full performance engineering, profiling, or large load tests."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "bench",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": { "type": "string", "description": "Benchmark language: python, bash, or go." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage." },
+          "paths": { "type": "array", "items": { "type": "string" }, "description": "Local directory paths to stage recursively." },
+          "targets": {
+            "description": "Benchmark targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "iterations": { "type": "integer", "description": "Number of benchmark iterations." },
+          "timeout": { "type": "integer", "description": "Benchmark timeout in seconds." }
+        },
+        "required": ["language"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire bench --lang python --file bench.py --targets py310,py311 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Benchmark language.",
+          "enum": ["python", "bash", "go"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "repeatable": true,
+          "description": "File to stage for benchmarking."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "repeatable": true,
+          "description": "Directory tree to stage recursively."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated benchmark targets."
+        },
+        {
+          "name": "iterations",
+          "type": "integer",
+          "description": "Number of iterations per target.",
+          "default": "5"
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Benchmark timeout in seconds.",
+          "default": "60"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use for short comparative timing signals, not for full load or saturation testing.",
+      "stability": "advanced",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "browser",
+      "path": "browser",
+      "category": "validation",
+      "title": "Squire Browser",
+      "summary": "run constrained headless browser verification",
+      "description": "Run headless Chromium in a constrained offline sandbox and optionally download screenshots or other generated browser artifacts locally.",
+      "usage": "squire browser [--browser chromium] [--script <path>] [--url <file://url>] [--file <path> | --path <dir>] ... [--screenshot <name>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You need offline browser verification against staged local assets.",
+        "You need screenshots or simple DOM/assertion checks in a disposable browser runtime."
+      ],
+      "when_not_to_use": [
+        "You need to fetch remote http:// or https:// URLs on the public service."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "The public service is offline-only for browser runs.",
+        "Stage full local asset trees with --path when you need images, fonts, or other binary files.",
+        "Use --download-artifacts to fetch screenshots or other generated files locally."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "browser",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "browser": { "type": "string", "description": "Browser engine, currently chromium." },
+          "script": { "type": "string", "description": "Path to a browser automation script to stage." },
+          "url": { "type": "string", "description": "Offline URL to open, such as a file:// URL." },
+          "screenshot": { "type": "string", "description": "Optional screenshot filename to produce." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage." },
+          "paths": { "type": "array", "items": { "type": "string" }, "description": "Local directory paths to stage recursively." },
+          "timeout": { "type": "integer", "description": "Browser timeout in seconds." },
+          "download_artifacts_dir": { "type": "string", "description": "Optional local directory to download screenshots or other browser artifacts into." }
+        },
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire browser --path website/public --screenshot page.png --download-artifacts ./browser-out --json"
+      ],
+      "help_flags": [
+        {
+          "name": "browser",
+          "type": "string",
+          "description": "Browser runtime.",
+          "default": "chromium",
+          "enum": ["chromium"]
+        },
+        {
+          "name": "script",
+          "type": "string",
+          "description": "Browser automation script to stage."
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "description": "Offline URL to open, such as file://."
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "repeatable": true,
+          "description": "File to stage for browser execution."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "repeatable": true,
+          "description": "Directory tree to stage recursively."
+        },
+        {
+          "name": "screenshot",
+          "type": "string",
+          "description": "Screenshot filename to produce."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Browser timeout in seconds.",
+          "default": "45"
+        },
+        {
+          "name": "download-artifacts",
+          "type": "string",
+          "description": "Local directory to download screenshots or other browser artifacts into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use staged local assets and artifact downloads. Do not plan around remote URLs on the public service.",
+      "stability": "advanced",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "compile",
+      "path": "compile",
+      "category": "validation",
+      "title": "Squire Compile",
+      "summary": "check Go or Rust compilation for target environments",
+      "description": "Run target-specific Go or Rust compilation checks in clean toolchains without turning Squire into a full CI or release system.",
+      "usage": "squire compile --lang <go|rust> --file <path> [--file <path> ...] [--targets <csv>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need target compilation validation in a clean environment."
+      ],
+      "when_not_to_use": [
+        "You need full repository builds or arbitrary Docker-based build systems."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "compile",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "language": { "type": "string", "description": "Compile language: go or rust." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Local file paths to stage for compilation." },
+          "targets": {
+            "description": "Compile targets as an array or CSV string.",
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "timeout": { "type": "integer", "description": "Compile timeout in seconds." }
+        },
+        "required": ["language", "files"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire compile --lang go --file main.go --targets linux/amd64,linux/arm64 --json",
+        "squire compile --lang rust --file Cargo.toml --file src/main.rs --targets linux/amd64-musl,linux/arm64 --json"
+      ],
+      "help_flags": [
+        {
+          "name": "lang",
+          "type": "string",
+          "required": true,
+          "description": "Compile language.",
+          "enum": ["go", "rust"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "repeatable": true,
+          "description": "File to stage for compilation."
+        },
+        {
+          "name": "targets",
+          "type": "csv",
+          "description": "Comma-separated compile targets."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Compile timeout in seconds.",
+          "default": "90"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use for target sanity checks and compile errors, not for full release builds.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "solve",
+      "path": "solve",
+      "category": "validation",
+      "title": "Squire Solve",
+      "summary": "run Z3 or MiniZinc solver jobs",
+      "description": "Run bounded solver jobs for Z3 or MiniZinc in a fresh disposable sandbox.",
+      "usage": "squire solve --solver <z3|minizinc> --file <path> [--data <path>] [--timeout <seconds>] [--json]",
+      "when_to_use": [
+        "You need a satisfiability or small optimization/model check without local solver setup."
+      ],
+      "when_not_to_use": [
+        "You need arbitrary scripting around solvers or long-running research workloads."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "solve",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "solver": { "type": "string", "description": "Solver: z3 or minizinc." },
+          "file": { "type": "string", "description": "Path to the solver input file." },
+          "data": { "type": "string", "description": "Optional MiniZinc .dzn data file." },
+          "timeout": { "type": "integer", "description": "Solver timeout in seconds." }
+        },
+        "required": ["solver", "file"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire solve --solver z3 --file constraints.smt2 --json",
+        "squire solve --solver minizinc --file model.mzn --data data.dzn --json"
+      ],
+      "help_flags": [
+        {
+          "name": "solver",
+          "type": "string",
+          "required": true,
+          "description": "Solver backend.",
+          "enum": ["z3", "minizinc"]
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "description": "Solver input file."
+        },
+        {
+          "name": "data",
+          "type": "string",
+          "description": "Optional MiniZinc .dzn data file."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Solver timeout in seconds.",
+          "default": "20"
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Use for bounded solver tasks where structured SAT/UNSAT output matters.",
+      "stability": "advanced",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "quantum",
+      "path": "quantum",
+      "category": "validation",
+      "title": "Squire Quantum",
+      "summary": "run offline Qiskit Aer simulations in a dedicated runtime",
+      "description": "Run bounded offline quantum simulations in a dedicated Qiskit Aer runtime.",
+      "usage": "squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You need an offline Qiskit Aer simulation in a fresh remote runtime."
+      ],
+      "when_not_to_use": [
+        "You need notebooks, persistent sessions, hardware providers, or multiple frameworks."
+      ],
+      "public_status": "trusted_only",
+      "policy_notes": [
+        "Quantum runs are offline-only on the public service.",
+        "Trusted access or higher is currently required."
+      ],
+      "supports_json": false,
+      "mcp_exposed": false,
+      "examples": [
+        "squire quantum simulate --file shor.py --download-artifacts ./quantum-out --json"
+      ],
+      "agent_hint": "Treat this as a narrow offline simulation surface, not a general quantum platform.",
+      "stability": "advanced",
+      "audience": "both",
+      "offline_only": true,
+      "requires_trusted": true,
+      "subcommands": [
+        {
+          "name": "simulate",
+          "path": "quantum.simulate",
+          "category": "validation",
+          "title": "Squire Quantum Simulate",
+          "summary": "run an offline Qiskit Aer simulation in a dedicated runtime",
+          "description": "Stage a small Python/Qiskit file set, run the entry file inside an offline Qiskit Aer image, and optionally download generated artifacts locally.",
+          "usage": "squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+          "when_to_use": [
+            "You need bounded Qiskit Aer simulation and the local job is too heavy or noisy."
+          ],
+          "when_not_to_use": [
+            "You need hardware providers, notebooks, or persistent sessions."
+          ],
+          "public_status": "trusted_only",
+          "policy_notes": [
+            "The first --file is the Python entry script.",
+            "Additional --file values stage helper modules or local assets.",
+            "Write files under /workspace/output and use --download-artifacts to retrieve them locally.",
+            "The public service is offline-only and trusted-only for this module."
+          ],
+          "supports_json": true,
+          "mcp_exposed": true,
+          "mcp_tool_name": "quantum_simulate",
+          "mcp_input_schema": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Local file paths to stage. The first file is the Python entry script."
+              },
+              "shots": { "type": "integer", "description": "Shot count passed to the simulation." },
+              "backend": { "type": "string", "description": "Quantum backend. v1 supports only aer_simulator." },
+              "timeout": { "type": "integer", "description": "Simulation timeout in seconds." },
+              "download_artifacts_dir": { "type": "string", "description": "Optional local directory to download generated quantum artifacts into." }
+            },
+            "required": ["files"],
+            "additionalProperties": false
+          },
+          "examples": [
+            "squire quantum simulate --file shor.py --shots 2048 --download-artifacts ./quantum-out --json"
+          ],
+          "help_flags": [
+            {
+              "name": "file",
+              "type": "string",
+              "required": true,
+              "repeatable": true,
+              "description": "First file is the entry script; repeat to stage helper modules or local assets."
+            },
+            {
+              "name": "shots",
+              "type": "integer",
+              "description": "Shot count passed to the simulation.",
+              "default": "1024"
+            },
+            {
+              "name": "backend",
+              "type": "string",
+              "description": "Quantum backend.",
+              "default": "aer_simulator",
+              "enum": ["aer_simulator"]
+            },
+            {
+              "name": "timeout",
+              "type": "integer",
+              "description": "Simulation timeout in seconds.",
+              "default": "300"
+            },
+            {
+              "name": "download-artifacts",
+              "type": "string",
+              "description": "Local directory to download generated quantum artifacts into."
+            },
+            {
+              "name": "json",
+              "type": "boolean",
+              "description": "Print raw JSON response."
+            }
+          ],
+          "agent_hint": "Use for bounded offline simulations only, and plan around trusted-only public access.",
+          "stability": "advanced",
+          "audience": "both",
+          "offline_only": true,
+          "requires_trusted": true
+        }
+      ]
+    },
+    {
+      "name": "data",
+      "path": "data",
+      "category": "jobs",
+      "title": "Squire Data",
+      "summary": "run Python data jobs with pandas, polars, or pyarrow",
+      "description": "Run Python data-processing jobs in a disposable remote runtime with pandas, polars, and pyarrow available.",
+      "usage": "squire data --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You need a heavier data transform in a clean disposable runtime.",
+        "The script should read one staged input and write result files."
+      ],
+      "when_not_to_use": [
+        "The task is tiny and faster to run locally."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Runs in Python 3.11 with pandas, polars, and pyarrow available.",
+        "Scripts read SQUIRE_INPUT_PATH and write generated files to SQUIRE_OUTPUT_DIR.",
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "data",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "script": { "type": "string", "description": "Path to the Python script to execute." },
+          "input": { "type": "string", "description": "Path to an input file for multipart upload." },
+          "stdin_text": { "type": "string", "description": "Small inline input payload to send over stdin mode." },
+          "timeout": { "type": "integer", "description": "Job timeout in seconds." },
+          "download_artifacts_dir": { "type": "string", "description": "Optional local directory to download generated data artifacts into." }
+        },
+        "required": ["script"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire data --script transform.py --input big.csv --download-artifacts ./data-out --json"
+      ],
+      "help_flags": [
+        {
+          "name": "script",
+          "type": "string",
+          "required": true,
+          "description": "Python script to execute."
+        },
+        {
+          "name": "input",
+          "type": "string",
+          "description": "Input file for multipart upload."
+        },
+        {
+          "name": "stdin",
+          "type": "boolean",
+          "description": "Read a small input payload from stdin instead of --input."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Job timeout in seconds.",
+          "default": "120"
+        },
+        {
+          "name": "download-artifacts",
+          "type": "string",
+          "description": "Local directory to download generated data artifacts into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Treat stdout as logs or summary text and treat generated files as artifacts.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "media",
+      "path": "media",
+      "category": "jobs",
+      "title": "Squire Media",
+      "summary": "run Python plus ffmpeg media transformation jobs",
+      "description": "Run Python media jobs in a disposable remote runtime with ffmpeg installed and optionally download the generated files locally.",
+      "usage": "squire media --script <path> [--input <path>] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You need an ffmpeg-based image, audio, or video transformation off your local machine."
+      ],
+      "when_not_to_use": [
+        "The task is tiny and simpler to run locally.",
+        "You need network access or arbitrary package installs in the media runtime."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Runs in Python 3.11 with ffmpeg installed.",
+        "Scripts read SQUIRE_INPUT_PATH and write output files to SQUIRE_OUTPUT_DIR.",
+        "Outbound network is disabled."
+      ],
+      "supports_json": true,
+      "mcp_exposed": true,
+      "mcp_tool_name": "media",
+      "mcp_input_schema": {
+        "type": "object",
+        "properties": {
+          "script": { "type": "string", "description": "Path to the Python script to execute." },
+          "input": { "type": "string", "description": "Path to an input file for multipart upload." },
+          "stdin_text": { "type": "string", "description": "Small inline input payload to send over stdin mode." },
+          "timeout": { "type": "integer", "description": "Job timeout in seconds." },
+          "download_artifacts_dir": { "type": "string", "description": "Optional local directory to download generated media artifacts into." }
+        },
+        "required": ["script"],
+        "additionalProperties": false
+      },
+      "examples": [
+        "squire media --script clip.py --input image.png --download-artifacts ./media-out --json"
+      ],
+      "help_flags": [
+        {
+          "name": "script",
+          "type": "string",
+          "required": true,
+          "description": "Python script to execute."
+        },
+        {
+          "name": "input",
+          "type": "string",
+          "description": "Input file for multipart upload."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Job timeout in seconds.",
+          "default": "120"
+        },
+        {
+          "name": "download-artifacts",
+          "type": "string",
+          "description": "Local directory to download generated media artifacts into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Assume ffmpeg is available. Do not assume Pillow or other extra Python packages unless the runtime is documented to include them.",
+      "stability": "core",
+      "audience": "both",
+      "offline_only": true
+    },
+    {
+      "name": "scale",
+      "path": "scale",
+      "category": "jobs",
+      "title": "Squire Scale Alias",
+      "summary": "compatibility alias for data and media",
+      "description": "Compatibility alias for older scripts that still use squire scale. New usage should prefer squire data or squire media directly.",
+      "usage": "squire scale --mode <data|media> --script <path> [--input <path> | --stdin] [--timeout <seconds>] [--download-artifacts <dir>] [--json]",
+      "when_to_use": [
+        "You are maintaining older scripts that still call squire scale."
+      ],
+      "when_not_to_use": [
+        "You are writing new command invocations."
+      ],
+      "public_status": "enabled",
+      "policy_notes": [
+        "Prefer new usage of squire data or squire media."
+      ],
+      "supports_json": true,
+      "mcp_exposed": false,
+      "examples": [
+        "squire scale --mode media --script clip.py --input image.png --download-artifacts ./media-out --json"
+      ],
+      "help_flags": [
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true,
+          "description": "Compatibility mode.",
+          "enum": ["data", "media"]
+        },
+        {
+          "name": "script",
+          "type": "string",
+          "required": true,
+          "description": "Python script to execute."
+        },
+        {
+          "name": "input",
+          "type": "string",
+          "description": "Input file for multipart upload."
+        },
+        {
+          "name": "stdin",
+          "type": "boolean",
+          "description": "Read a small input payload from stdin instead of --input."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "Job timeout in seconds.",
+          "default": "120"
+        },
+        {
+          "name": "download-artifacts",
+          "type": "string",
+          "description": "Local directory to download generated artifacts into."
+        },
+        {
+          "name": "json",
+          "type": "boolean",
+          "description": "Print raw JSON response."
+        }
+      ],
+      "agent_hint": "Avoid for new usage; keep it only for compatibility with older scripts.",
+      "stability": "compatibility",
+      "audience": "both",
+      "aliases": ["data", "media"],
+      "offline_only": true
+    }
+  ]
+}
