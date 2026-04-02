@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.reidgoodbar/squire",
+  "title": "Squire",
+  "description": "CLI-first remote runtimes for validation and offload tasks, exposed over MCP stdio.",
+  "repository": {
+    "url": "https://github.com/reidgoodbar/squire",
+    "source": "github"
+  },
+  "version": "0.6.3",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/reidgoodbar/squire-mcp:0.6.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SQUIRE_TOKEN",
+          "description": "Required Squire session or headless token used by the MCP wrapper to authenticate to https://api.squire.run.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "SQUIRE_API_BASE_URL",
+          "description": "Optional API base URL override. Defaults to https://api.squire.run.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

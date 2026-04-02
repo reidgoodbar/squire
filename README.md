@@ -132,6 +132,14 @@ squire mcp serve
 
 This exposes the same Squire command surface over MCP stdio and reuses the current local Squire session. Squire remains CLI-first; MCP is an optional wrapper.
 
+Squire is also published to the MCP Registry as `io.github.reidgoodbar/squire`.
+The registry package is a GHCR-backed OCI stdio server that runs the same `squire mcp serve` surface and expects:
+
+- `SQUIRE_TOKEN` required
+- `SQUIRE_API_BASE_URL` optional
+
+Registry metadata lives in `registry/server.json`.
+
 ## Local build
 
 ```bash
