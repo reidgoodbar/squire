@@ -150,6 +150,10 @@ The registry package is a GHCR-backed OCI stdio server that runs the same `squir
 
 Registry metadata lives in `registry/server.json`.
 
+For Cline and other agent-hosted setup, see:
+
+- `llms-install.md`
+
 ## Local build
 
 ```bash
