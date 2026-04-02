@@ -139,27 +139,59 @@ squire logout --json
 
 ### `squire mcp`
 
-Expose the Squire command surface over MCP stdio for clients that expect tool discovery through MCP.
+Manage Squire's MCP integration surface. Use mcp login to bootstrap token-based MCP configuration, or mcp serve to expose the Squire command surface over MCP stdio.
 
-- Usage: `squire mcp serve`
+- Usage: `squire mcp <login|serve>`
 - Public status: `enabled`
+- Use squire mcp login to print SQUIRE_TOKEN and SQUIRE_API_BASE_URL for MCP hosts.
 - Use when:
   - Your host expects MCP tool discovery and stdio transport.
+  - You need copy-paste MCP auth settings for a registry-installed or locally launched Squire MCP server.
 - Avoid when:
   - A plain terminal workflow is simpler.
 
 Examples:
 
 ```bash
+squire mcp login
 squire mcp serve
+```
+
+### `squire mcp login`
+
+Authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server expects.
+
+- Usage: `squire mcp login [--token <SQUIRE_TOKEN>] [--api-base-url <url>] [--json]`
+- Public status: `enabled`
+- Supports `--json` output
+- This prints a bearer token. Treat SQUIRE_TOKEN as a secret.
+- Use when:
+  - You are configuring Squire in an MCP host that expects environment variables.
+  - You want a copy-paste SQUIRE_TOKEN and SQUIRE_API_BASE_URL snippet after logging in.
+- Avoid when:
+  - You only need the normal CLI and do not plan to use an MCP host.
+
+Flags:
+
+- `--token` `<string>`: Squire-issued headless token for CI or non-browser login.
+- `--api-base-url` `<string>`: Override API base URL for this login.
+- `--json`: Print machine-readable MCP bootstrap output, including env vars.
+
+Examples:
+
+```bash
+squire mcp login
+squire mcp login --token sqh_... --json
 ```
 
 ### `squire mcp serve`
 
-Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session.
+Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session or an injected SQUIRE_TOKEN.
 
 - Usage: `squire mcp serve`
 - Public status: `enabled`
+- Run squire mcp login first if you do not already have a local session.
+- SQUIRE_TOKEN and SQUIRE_API_BASE_URL are also accepted through the environment.
 - Use when:
   - Your MCP client needs Squire tools over stdio.
 - Avoid when:
@@ -168,6 +200,7 @@ Start an MCP stdio server that exposes Squire tools and reuses the current local
 Examples:
 
 ```bash
+squire mcp login
 squire mcp serve
 ```
 

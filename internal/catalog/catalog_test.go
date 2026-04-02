@@ -13,6 +13,7 @@ func TestCatalogLoadsAndContainsExpectedCommands(t *testing.T) {
 	}
 	for _, path := range []string{
 		"login",
+		"mcp.login",
 		"mcp.serve",
 		"verify",
 		"browser",

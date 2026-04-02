@@ -126,6 +126,16 @@ A tiny runnable quantum example is in `examples/quantum/shor.py`.
 
 ## Optional MCP mode
 
+Bootstrap MCP auth with:
+
+```bash
+squire mcp login
+```
+
+This logs you in and prints the `SQUIRE_TOKEN` and `SQUIRE_API_BASE_URL` values an MCP host needs.
+
+Then either run the local stdio wrapper:
+
 ```bash
 squire mcp serve
 ```

@@ -193,6 +193,91 @@ func TestDepsJSONRequestViaCLI(t *testing.T) {
 	}
 }
 
+func TestMCPLoginJSONViaCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	token := "sqh_mcp"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if r.URL.Path != "/v1/auth/token/login" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req protocol.LoginTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Token != token {
+			t.Fatalf("unexpected token: %q", req.Token)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.LoginResponse{
+			UserID:       "user-mcp",
+			TrustTier:    protocol.TrustTrusted,
+			TokenType:    protocol.TokenTypeSession,
+			FeatureFlags: []string{"verify", "browser", "mcp"},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "login", "--token", token, "--api-base-url", server.URL, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cli exited %d stderr=%s", code, stderr.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("parse stdout json: %v", err)
+	}
+	if payload["server_name"] != "io.github.reidgoodbar/squire" {
+		t.Fatalf("unexpected server_name: %v", payload["server_name"])
+	}
+	env, ok := payload["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing env payload: %v", payload["env"])
+	}
+	if env["SQUIRE_TOKEN"] != token {
+		t.Fatalf("unexpected env token: %v", env["SQUIRE_TOKEN"])
+	}
+	if env["SQUIRE_API_BASE_URL"] != server.URL {
+		t.Fatalf("unexpected env api base url: %v", env["SQUIRE_API_BASE_URL"])
+	}
+	cfg := readCLIConfig(t, home)
+	if cfg.SessionToken != token || cfg.APIBaseURL != server.URL {
+		t.Fatalf("unexpected saved config: %+v", cfg)
+	}
+}
+
+func TestMCPServeShowsLoginHintWhenNoSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SQUIRE_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected auth exit, got %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "squire mcp login") {
+		t.Fatalf("missing mcp login hint: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "SQUIRE_TOKEN") {
+		t.Fatalf("missing SQUIRE_TOKEN hint: %s", stderr.String())
+	}
+}
+
+func TestMCPServeAcceptsEnvToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SQUIRE_TOKEN", "sqs_env_token")
+
+	stdin := strings.NewReader("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}\n")
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"mcp", "serve"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected clean exit, got %d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestSQLJSONRequestViaCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2070,6 +2155,20 @@ func writeCLIConfig(t *testing.T, home string, cfg protocol.CLIConfig) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readCLIConfig(t *testing.T, home string) protocol.CLIConfig {
+	t.Helper()
+	path := filepath.Join(home, ".squire", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg protocol.CLIConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func writeReleaseArchive(w io.Writer, binary []byte) error {

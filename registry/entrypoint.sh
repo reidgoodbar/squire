@@ -2,7 +2,7 @@
 set -eu
 
 if [ -z "${SQUIRE_TOKEN:-}" ]; then
-	echo "SQUIRE_TOKEN is required" >&2
+	echo "SQUIRE_TOKEN is required. Run 'squire mcp login' locally to generate MCP env vars." >&2
 	exit 64
 fi
 

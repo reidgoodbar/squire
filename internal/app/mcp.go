@@ -13,6 +13,7 @@ import (
 
 	"squire/internal/buildinfo"
 	"squire/internal/catalog"
+	"squire/internal/config"
 )
 
 const mcpProtocolVersionLatest = "2025-11-25"
@@ -79,6 +80,8 @@ func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return exitUsage
 	}
 	switch args[0] {
+	case "login":
+		return runMCPLogin(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return runMCPServe(ctx, args[1:], stdin, stdout, stderr)
 	case "help", "--help", "-h":
@@ -102,11 +105,73 @@ func runMCPServe(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		fmt.Fprintln(stderr, "squire mcp serve does not accept positional arguments")
 		return exitUsage
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return exitAuth
+	}
+	if strings.TrimSpace(cfg.SessionToken) == "" {
+		fmt.Fprintln(stderr, "no Squire token is available for MCP")
+		fmt.Fprintln(stderr, "Run `squire mcp login` to log in and print MCP env vars, or set SQUIRE_TOKEN in your MCP host.")
+		return exitAuth
+	}
 	server := &mcpServer{tools: mcpToolMap()}
 	if err := server.serve(ctx, stdin, stdout); err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitRemoteError
 	}
+	return exitOK
+}
+
+func runMCPLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp login", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	token := fs.String("token", "", "Squire-issued headless token for CI or MCP bootstrap")
+	jsonOut := fs.Bool("json", false, "Print machine-readable MCP bootstrap output")
+	apiBaseURL := fs.String("api-base-url", "", "Override API base URL for this login")
+	fs.Usage = func() { printCatalogCommandHelpPath(fs.Output(), "mcp.login") }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if len(fs.Args()) > 0 {
+		fmt.Fprintln(stderr, "squire mcp login does not accept positional arguments")
+		return exitUsage
+	}
+	result, code := loginAndSave(ctx, *token, *apiBaseURL, stderr)
+	if code != exitOK {
+		return code
+	}
+	baseURL := result.Config.APIBaseURL
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = config.DefaultAPIBaseURL()
+	}
+	payload := map[string]interface{}{
+		"status":     "ok",
+		"user_id":    result.Config.UserID,
+		"trust_tier": result.Config.TrustTier,
+		"token_type": result.Config.TokenType,
+		"server_name": "io.github.reidgoodbar/squire",
+		"env": map[string]string{
+			"SQUIRE_TOKEN":        result.Config.SessionToken,
+			"SQUIRE_API_BASE_URL": baseURL,
+		},
+		"command": "squire mcp serve",
+	}
+	if len(result.FeatureFlags) > 0 {
+		payload["feature_flags"] = result.FeatureFlags
+	}
+	if *jsonOut {
+		_ = json.NewEncoder(stdout).Encode(payload)
+		return exitOK
+	}
+	fmt.Fprintf(stdout, "logged in as %s (%s)\n\n", result.Config.UserID, result.Config.TrustTier)
+	fmt.Fprintln(stdout, "MCP configuration:")
+	fmt.Fprintf(stdout, "export SQUIRE_TOKEN=%s\n", shellQuoteSingle(result.Config.SessionToken))
+	fmt.Fprintf(stdout, "export SQUIRE_API_BASE_URL=%s\n\n", shellQuoteSingle(baseURL))
+	fmt.Fprintln(stdout, "Use those env vars in your MCP host, or run:")
+	fmt.Fprintln(stdout, "squire mcp serve")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Keep SQUIRE_TOKEN secret.")
 	return exitOK
 }
 

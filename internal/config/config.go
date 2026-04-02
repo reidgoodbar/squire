@@ -35,7 +35,11 @@ func Load() (protocol.CLIConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return protocol.CLIConfig{APIBaseURL: DefaultAPIBaseURL()}, nil
+			cfg := protocol.CLIConfig{APIBaseURL: DefaultAPIBaseURL()}
+			if token := os.Getenv("SQUIRE_TOKEN"); token != "" {
+				cfg.SessionToken = token
+			}
+			return cfg, nil
 		}
 		return protocol.CLIConfig{}, err
 	}
@@ -45,6 +49,9 @@ func Load() (protocol.CLIConfig, error) {
 	}
 	if cfg.APIBaseURL == "" {
 		cfg.APIBaseURL = DefaultAPIBaseURL()
+	}
+	if token := os.Getenv("SQUIRE_TOKEN"); token != "" {
+		cfg.SessionToken = token
 	}
 	return cfg, nil
 }

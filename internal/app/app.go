@@ -192,46 +192,70 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	if len(fs.Args()) > 0 {
+		fmt.Fprintln(stderr, "squire login does not accept positional arguments")
+		return exitUsage
+	}
 
+	result, code := loginAndSave(ctx, *token, *apiBaseURL, stderr)
+	if code != exitOK {
+		return code
+	}
+	if *jsonOut {
+		payload := map[string]interface{}{
+			"status":     "ok",
+			"user_id":    result.Config.UserID,
+			"trust_tier": result.Config.TrustTier,
+			"token_type": result.Config.TokenType,
+		}
+		if len(result.FeatureFlags) > 0 {
+			payload["feature_flags"] = result.FeatureFlags
+		}
+		_ = json.NewEncoder(stdout).Encode(payload)
+		return exitOK
+	}
+	fmt.Fprintf(stdout, "logged in as %s (%s)\n", result.Config.UserID, result.Config.TrustTier)
+	return exitOK
+}
+
+type loginSaveResult struct {
+	Config       protocol.CLIConfig
+	FeatureFlags []string
+}
+
+func loginAndSave(ctx context.Context, token, apiBaseURL string, stderr io.Writer) (loginSaveResult, int) {
 	cfg, _ := config.Load()
-	baseURL := pickBaseURL(*apiBaseURL, cfg.APIBaseURL)
+	baseURL := pickBaseURL(apiBaseURL, cfg.APIBaseURL)
 	client := httpclient.New(baseURL, "")
 
-	if *token != "" {
+	if token != "" {
 		var resp protocol.LoginResponse
-		if err := client.DoJSON(ctx, http.MethodPost, "/v1/auth/token/login", protocol.LoginTokenRequest{Token: *token}, &resp); err != nil {
+		if err := client.DoJSON(ctx, http.MethodPost, "/v1/auth/token/login", protocol.LoginTokenRequest{Token: token}, &resp); err != nil {
 			fmt.Fprintln(stderr, err)
-			return exitAuth
+			return loginSaveResult{}, exitAuth
 		}
-		if err := config.Save(protocol.CLIConfig{
+		saved := protocol.CLIConfig{
 			APIBaseURL:   baseURL,
-			SessionToken: *token,
+			SessionToken: token,
 			UserID:       resp.UserID,
 			TrustTier:    resp.TrustTier,
 			TokenType:    resp.TokenType,
 			CreatedAt:    time.Now().UTC(),
-		}); err != nil {
+		}
+		if err := config.Save(saved); err != nil {
 			fmt.Fprintln(stderr, err)
-			return exitRemoteError
+			return loginSaveResult{}, exitRemoteError
 		}
-		if *jsonOut {
-			_ = json.NewEncoder(stdout).Encode(map[string]interface{}{
-				"status":        "ok",
-				"user_id":       resp.UserID,
-				"trust_tier":    resp.TrustTier,
-				"token_type":    resp.TokenType,
-				"feature_flags": resp.FeatureFlags,
-			})
-			return exitOK
-		}
-		fmt.Fprintf(stdout, "logged in as %s (%s)\n", resp.UserID, resp.TrustTier)
-		return exitOK
+		return loginSaveResult{
+			Config:       saved,
+			FeatureFlags: append([]string(nil), resp.FeatureFlags...),
+		}, exitOK
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintln(stderr, "failed to start local callback server:", err)
-		return exitRemoteError
+		return loginSaveResult{}, exitRemoteError
 	}
 	defer listener.Close()
 
@@ -243,27 +267,27 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		ClientNonce: clientNonce,
 	}, &startResp); err != nil {
 		fmt.Fprintln(stderr, err)
-		return exitAuth
+		return loginSaveResult{}, exitAuth
 	}
 
-	type loginResult struct {
+	type browserLoginResult struct {
 		TokenType    string
 		SessionToken string
 		UserID       string
 		TrustTier    string
 		Err          error
 	}
-	resultCh := make(chan loginResult, 1)
+	resultCh := make(chan browserLoginResult, 1)
 	server := &http.Server{ReadHeaderTimeout: 5 * time.Second}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("client_nonce") != clientNonce {
 			http.Error(w, "invalid login nonce", http.StatusBadRequest)
-			resultCh <- loginResult{Err: errors.New("invalid login nonce")}
+			resultCh <- browserLoginResult{Err: errors.New("invalid login nonce")}
 			return
 		}
 		fmt.Fprint(w, "Squire login complete. You can close this window.")
-		resultCh <- loginResult{
+		resultCh <- browserLoginResult{
 			TokenType:    query.Get("token_type"),
 			SessionToken: query.Get("session_token"),
 			UserID:       query.Get("user_id"),
@@ -280,39 +304,37 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	select {
 	case <-ctx.Done():
 		fmt.Fprintln(stderr, "login interrupted")
-		return exitSignal
+		return loginSaveResult{}, exitSignal
 	case result := <-resultCh:
 		if result.Err != nil {
 			fmt.Fprintln(stderr, result.Err)
-			return exitAuth
+			return loginSaveResult{}, exitAuth
 		}
 		if result.SessionToken == "" {
 			fmt.Fprintln(stderr, "login failed: missing session token")
-			return exitAuth
+			return loginSaveResult{}, exitAuth
 		}
-		if err := config.Save(protocol.CLIConfig{
+		saved := protocol.CLIConfig{
 			APIBaseURL:   baseURL,
 			SessionToken: result.SessionToken,
 			UserID:       result.UserID,
 			TrustTier:    result.TrustTier,
 			TokenType:    result.TokenType,
 			CreatedAt:    time.Now().UTC(),
-		}); err != nil {
+		}
+		if err := config.Save(saved); err != nil {
 			fmt.Fprintln(stderr, err)
-			return exitRemoteError
+			return loginSaveResult{}, exitRemoteError
 		}
-		if *jsonOut {
-			_ = json.NewEncoder(stdout).Encode(map[string]interface{}{
-				"status":     "ok",
-				"user_id":    result.UserID,
-				"trust_tier": result.TrustTier,
-				"token_type": result.TokenType,
-			})
-			return exitOK
-		}
-		fmt.Fprintf(stdout, "logged in as %s (%s)\n", result.UserID, result.TrustTier)
-		return exitOK
+		return loginSaveResult{Config: saved}, exitOK
 	}
+}
+
+func shellQuoteSingle(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func runVerify(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {

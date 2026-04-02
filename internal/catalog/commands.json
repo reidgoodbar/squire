@@ -225,11 +225,12 @@
       "path": "mcp",
       "category": "integration",
       "title": "Squire MCP",
-      "summary": "serve the Squire tool surface over MCP stdio",
-      "description": "Expose the Squire command surface over MCP stdio for clients that expect tool discovery through MCP.",
-      "usage": "squire mcp serve",
+      "summary": "log in for MCP hosts or serve the Squire tool surface over MCP stdio",
+      "description": "Manage Squire's MCP integration surface. Use mcp login to bootstrap token-based MCP configuration, or mcp serve to expose the Squire command surface over MCP stdio.",
+      "usage": "squire mcp <login|serve>",
       "when_to_use": [
-        "Your host expects MCP tool discovery and stdio transport."
+        "Your host expects MCP tool discovery and stdio transport.",
+        "You need copy-paste MCP auth settings for a registry-installed or locally launched Squire MCP server."
       ],
       "when_not_to_use": [
         "A plain terminal workflow is simpler."
@@ -238,19 +239,69 @@
       "supports_json": false,
       "mcp_exposed": false,
       "examples": [
+        "squire mcp login",
         "squire mcp serve"
       ],
-      "agent_hint": "Prefer direct CLI use unless an MCP host requires this wrapper.",
+      "policy_notes": [
+        "Use squire mcp login to print SQUIRE_TOKEN and SQUIRE_API_BASE_URL for MCP hosts."
+      ],
+      "agent_hint": "Prefer direct CLI use unless an MCP host requires this wrapper. Use mcp login first if the host needs env-based auth.",
       "stability": "advanced",
       "audience": "agent",
       "subcommands": [
+        {
+          "name": "login",
+          "path": "mcp.login",
+          "category": "integration",
+          "title": "Squire MCP Login",
+          "summary": "log in and print MCP-ready env vars",
+          "description": "Authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server expects.",
+          "usage": "squire mcp login [--token <SQUIRE_TOKEN>] [--api-base-url <url>] [--json]",
+          "when_to_use": [
+            "You are configuring Squire in an MCP host that expects environment variables.",
+            "You want a copy-paste SQUIRE_TOKEN and SQUIRE_API_BASE_URL snippet after logging in."
+          ],
+          "when_not_to_use": [
+            "You only need the normal CLI and do not plan to use an MCP host."
+          ],
+          "public_status": "enabled",
+          "policy_notes": [
+            "This prints a bearer token. Treat SQUIRE_TOKEN as a secret."
+          ],
+          "supports_json": true,
+          "mcp_exposed": false,
+          "examples": [
+            "squire mcp login",
+            "squire mcp login --token sqh_... --json"
+          ],
+          "help_flags": [
+            {
+              "name": "token",
+              "type": "string",
+              "description": "Squire-issued headless token for CI or non-browser login."
+            },
+            {
+              "name": "api-base-url",
+              "type": "string",
+              "description": "Override API base URL for this login."
+            },
+            {
+              "name": "json",
+              "type": "boolean",
+              "description": "Print machine-readable MCP bootstrap output, including env vars."
+            }
+          ],
+          "agent_hint": "Use this as the MCP bootstrap flow. It logs in and prints the env vars that registry and local MCP hosts need.",
+          "stability": "advanced",
+          "audience": "agent"
+        },
         {
           "name": "serve",
           "path": "mcp.serve",
           "category": "integration",
           "title": "Squire MCP Serve",
           "summary": "start the MCP stdio server",
-          "description": "Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session.",
+          "description": "Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session or an injected SQUIRE_TOKEN.",
           "usage": "squire mcp serve",
           "when_to_use": [
             "Your MCP client needs Squire tools over stdio."
@@ -259,9 +310,14 @@
             "You only need the normal CLI."
           ],
           "public_status": "enabled",
+          "policy_notes": [
+            "Run squire mcp login first if you do not already have a local session.",
+            "SQUIRE_TOKEN and SQUIRE_API_BASE_URL are also accepted through the environment."
+          ],
           "supports_json": false,
           "mcp_exposed": false,
           "examples": [
+            "squire mcp login",
             "squire mcp serve"
           ],
           "agent_hint": "This is a local wrapper around the CLI, not a separate remote protocol surface.",
