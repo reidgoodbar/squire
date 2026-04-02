@@ -57,7 +57,4 @@ Validation completed before submission:
 - verified the published MCP Registry package `ghcr.io/reidgoodbar/squire-mcp:0.6.4`
 - verified `initialize`, `tools/list`, and a real `verify` tool call through the published package
 - verified Cline CLI MCP config generation with `cline mcp add`
-
-One honest caveat:
-
-I have validated the documented setup path and the published server package with the Cline CLI, but I have not yet completed an editor-hosted autonomous Cline task that starts from only `README.md` and/or `llms-install.md`.
+- verified a docs-only Cline task with just `README.md` and `llms-install.md`; Cline created a valid `cline_mcp_settings.json` entry for `squire` and verified it

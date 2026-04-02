@@ -56,6 +56,14 @@ Add a `stdio` MCP server that runs:
 squire mcp serve
 ```
 
+If Cline is already running on a machine where `squire login` has been completed, the fastest setup is:
+
+```bash
+cline mcp add squire -- squire mcp serve
+```
+
+That uses the existing local Squire session from `~/.squire/config.json`.
+
 Use these settings:
 
 ```json
