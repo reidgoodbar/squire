@@ -69,7 +69,14 @@ func TestGeneratedCatalogDocsStayInSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	websiteFile, err := os.ReadFile("../../website/public/commands.html")
+	websitePath := "../../website/public/commands.html"
+	if _, err := os.Stat(websitePath); err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("website checkout not present; skipping website sync assertion")
+		}
+		t.Fatal(err)
+	}
+	websiteFile, err := os.ReadFile(websitePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +94,20 @@ func TestGeneratedDocsContainEveryCatalogCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	websiteAvailable := true
+	if _, err := os.Stat("../../website/public/commands.html"); err != nil {
+		if os.IsNotExist(err) {
+			websiteAvailable = false
+		} else {
+			t.Fatal(err)
+		}
+	}
 	for _, cmd := range catalog.AllCommands() {
 		humanPath := "squire " + strings.ReplaceAll(cmd.Path, ".", " ")
 		if !strings.Contains(markdown, humanPath) {
 			t.Fatalf("markdown reference missing %q", humanPath)
 		}
-		if !strings.Contains(website, humanPath) {
+		if websiteAvailable && !strings.Contains(website, humanPath) {
 			t.Fatalf("website commands page missing %q", humanPath)
 		}
 	}
