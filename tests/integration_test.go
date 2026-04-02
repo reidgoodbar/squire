@@ -1460,6 +1460,10 @@ func TestRootHelpJSONListsCommands(t *testing.T) {
 }
 
 func TestMCPToolsListIncludesCoreCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SQUIRE_TOKEN", "sqs_test_mcp")
+
 	requests := []map[string]interface{}{
 		{
 			"jsonrpc": "2.0",
