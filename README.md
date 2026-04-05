@@ -174,3 +174,7 @@ go build -o ./bin/squire ./cmd/squire
 ```
 
 Artifacts go to `dist/` and use the same stable names that `https://squire.run/install.sh` downloads.
+
+## License
+
+MIT. See `LICENSE`.
