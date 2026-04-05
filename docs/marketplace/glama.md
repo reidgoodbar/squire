@@ -27,7 +27,7 @@ Those values are only Glama platform defaults. Squire's MCP server does not requ
 Build steps:
 
 ```json
-["./scripts/build-glama.sh"]
+["bash ./scripts/build-glama.sh"]
 ```
 
 CMD arguments:
@@ -70,14 +70,11 @@ The placeholder token is only for Glama startup checks. Real tool calls require 
 
 Pinned commit SHA:
 
-```text
-475334b
-```
-
-Or leave it blank to use the latest commit on `main`.
+Use the current `main` commit if you want a fixed build, or leave it blank to track `main`.
 
 ## Why this works
 
+- `bash ./scripts/build-glama.sh` avoids execute-bit problems in builders that clone files without preserving script mode.
 - `scripts/build-glama.sh` installs Go `1.26` if Glama's base image does not already have it.
 - The script builds `./bin/squire` from this repo.
 - `squire mcp serve` accepts `SQUIRE_TOKEN` from the environment, so Glama does not need to pre-write `~/.squire/config.json`.
