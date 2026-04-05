@@ -159,6 +159,7 @@ Registry metadata lives in `registry/server.json`.
 For Cline and other agent-hosted setup, see:
 
 - `llms-install.md`
+- `docs/marketplace/glama.md`
 
 ## Local build
 
