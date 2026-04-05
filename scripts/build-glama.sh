@@ -39,4 +39,4 @@ mkdir -p "$bin_dir"
 	CGO_ENABLED=0 "$go_bin" build -ldflags "-X squire/internal/buildinfo.Version=v$(tr -d '[:space:]' < VERSION)" -o "$bin_dir/squire" ./cmd/squire
 )
 
-"$bin_dir/squire" version
+"$bin_dir/squire" --help --json >/dev/null
