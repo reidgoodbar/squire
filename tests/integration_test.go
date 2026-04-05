@@ -247,21 +247,16 @@ func TestMCPLoginJSONViaCLI(t *testing.T) {
 	}
 }
 
-func TestMCPServeShowsLoginHintWhenNoSession(t *testing.T) {
+func TestMCPServeStartsWithoutSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SQUIRE_TOKEN", "")
 
+	stdin := strings.NewReader("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}\n")
 	var stdout, stderr bytes.Buffer
-	code := cliapp.Run([]string{"mcp", "serve"}, bytes.NewReader(nil), &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("expected auth exit, got %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "squire mcp login") {
-		t.Fatalf("missing mcp login hint: %s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "SQUIRE_TOKEN") {
-		t.Fatalf("missing SQUIRE_TOKEN hint: %s", stderr.String())
+	code := cliapp.Run([]string{"mcp", "serve"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected clean exit, got %d stderr=%s", code, stderr.String())
 	}
 }
 
@@ -275,6 +270,44 @@ func TestMCPServeAcceptsEnvToken(t *testing.T) {
 	code := cliapp.Run([]string{"mcp", "serve"}, stdin, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected clean exit, got %d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestWhoAmIJSONWithoutSessionUsesAnonymousPublicIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SQUIRE_TOKEN", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.URL.Path != "/v1/me" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(protocol.MeResponse{
+			RequestID:    "req_me_anon",
+			UserID:       protocol.TrustAnonymous,
+			Login:        protocol.TrustAnonymous,
+			TrustTier:    protocol.TrustAnonymous,
+			FeatureFlags: protocol.FeaturesForTrustTier(protocol.TrustAnonymous),
+			Quotas:       protocol.QuotasForTrustTier(protocol.TrustAnonymous),
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := cliapp.Run([]string{"whoami", "--api-base-url", server.URL, "--json"}, bytes.NewReader(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+	}
+
+	var resp protocol.MeResponse
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("decode whoami response: %v body=%s", err, stdout.String())
+	}
+	if resp.UserID != protocol.TrustAnonymous || resp.TrustTier != protocol.TrustAnonymous {
+		t.Fatalf("unexpected anonymous response: %+v", resp)
 	}
 }
 

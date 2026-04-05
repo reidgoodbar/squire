@@ -37,16 +37,17 @@ squire help quantum simulate
 
 ### `squire login`
 
-Authenticate the local CLI against the Squire API. Browser-based GitHub OAuth is the default path; headless token login is available for automation and CI.
+Optionally authenticate the local CLI against the Squire API. Browser-based GitHub OAuth is the default path; headless token login is available for automation and CI.
 
 - Usage: `squire login [--token <SQUIRE_TOKEN>] [--json]`
 - Public status: `enabled`
 - Supports `--json` output
 - The default public login flow uses GitHub OAuth.
 - Use when:
-  - You are setting up a new machine or shell session.
+  - You want an authenticated identity instead of anonymous public access.
   - You need a fresh session token with the latest scopes.
 - Avoid when:
+  - You only need the public service anonymously.
   - You are already logged in and the current session still works.
 
 Flags:
@@ -83,12 +84,12 @@ Examples:
 
 ```bash
 squire update
-squire update --version v0.6.3 --json
+squire update --version v0.6.5 --json
 ```
 
 ### `squire whoami`
 
-Return the current authenticated identity, trust tier, feature flags, token metadata, and server-side quotas.
+Return the current public or authenticated identity, trust tier, feature flags, token metadata, and server-side quotas.
 
 - Usage: `squire whoami [--json]`
 - Public status: `enabled`
@@ -139,37 +140,39 @@ squire logout --json
 
 ### `squire mcp`
 
-Manage Squire's MCP integration surface. Use mcp login to bootstrap token-based MCP configuration, or mcp serve to expose the Squire command surface over MCP stdio.
+Manage Squire's MCP integration surface. Use mcp serve to expose the Squire command surface over MCP stdio, and mcp login only when you want authenticated identity in an MCP host.
 
 - Usage: `squire mcp <login|serve>`
 - Public status: `enabled`
-- Use squire mcp login to print SQUIRE_TOKEN and SQUIRE_API_BASE_URL for MCP hosts.
+- squire mcp serve works without login on the public service.
+- Use squire mcp login only when your MCP host needs authenticated identity.
 - Use when:
   - Your host expects MCP tool discovery and stdio transport.
-  - You need copy-paste MCP auth settings for a registry-installed or locally launched Squire MCP server.
+  - You want optional authenticated identity in a registry-installed or locally launched Squire MCP server.
 - Avoid when:
   - A plain terminal workflow is simpler.
 
 Examples:
 
 ```bash
-squire mcp login
 squire mcp serve
+squire mcp login
 ```
 
 ### `squire mcp login`
 
-Authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server expects.
+Optionally authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server can use.
 
 - Usage: `squire mcp login [--token <SQUIRE_TOKEN>] [--api-base-url <url>] [--json]`
 - Public status: `enabled`
 - Supports `--json` output
 - This prints a bearer token. Treat SQUIRE_TOKEN as a secret.
+- This is optional for the public service because mcp serve also works anonymously.
 - Use when:
   - You are configuring Squire in an MCP host that expects environment variables.
   - You want a copy-paste SQUIRE_TOKEN and SQUIRE_API_BASE_URL snippet after logging in.
 - Avoid when:
-  - You only need the normal CLI and do not plan to use an MCP host.
+  - You are happy with anonymous public access through mcp serve.
 
 Flags:
 
@@ -186,12 +189,12 @@ squire mcp login --token sqh_... --json
 
 ### `squire mcp serve`
 
-Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session or an injected SQUIRE_TOKEN.
+Start an MCP stdio server that exposes Squire tools over stdio. It works anonymously on the public service and can also reuse an optional local session or SQUIRE_TOKEN.
 
 - Usage: `squire mcp serve`
 - Public status: `enabled`
-- Run squire mcp login first if you do not already have a local session.
-- SQUIRE_TOKEN and SQUIRE_API_BASE_URL are also accepted through the environment.
+- No login is required for public anonymous access.
+- SQUIRE_TOKEN and SQUIRE_API_BASE_URL are accepted through the environment when you want authenticated identity or a custom API endpoint.
 - Use when:
   - Your MCP client needs Squire tools over stdio.
 - Avoid when:
@@ -200,8 +203,8 @@ Start an MCP stdio server that exposes Squire tools and reuses the current local
 Examples:
 
 ```bash
-squire mcp login
 squire mcp serve
+SQUIRE_TOKEN=sqh_... squire mcp serve
 ```
 
 ## Validation
@@ -568,11 +571,9 @@ squire solve --solver minizinc --file model.mzn --data data.dzn --json
 Run bounded offline quantum simulations in a dedicated Qiskit Aer runtime.
 
 - Usage: `squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]`
-- Public status: `trusted-only`
+- Public status: `enabled`
 - Offline only
-- Trusted access required on the public service
 - Quantum runs are offline-only on the public service.
-- Trusted access or higher is currently required.
 - Use when:
   - You need an offline Qiskit Aer simulation in a fresh remote runtime.
 - Avoid when:
@@ -589,7 +590,7 @@ squire quantum simulate --file shor.py --download-artifacts ./quantum-out --json
 Stage a small Python/Qiskit file set, run the entry file inside an offline Qiskit Aer image, and optionally download generated artifacts locally.
 
 - Usage: `squire quantum simulate --file <path> [--file <path> ...] [--shots <count>] [--backend aer_simulator] [--timeout <seconds>] [--download-artifacts <dir>] [--json]`
-- Public status: `trusted-only`
+- Public status: `enabled`
 - Supports `--json` output
 - Offline only
 - Trusted access required on the public service
@@ -597,7 +598,7 @@ Stage a small Python/Qiskit file set, run the entry file inside an offline Qiski
 - The first --file is the Python entry script.
 - Additional --file values stage helper modules or local assets.
 - Write files under /workspace/output and use --download-artifacts to retrieve them locally.
-- The public service is offline-only and trusted-only for this module.
+- The public service is offline-only for this module.
 - Use when:
   - You need bounded Qiskit Aer simulation and the local job is too heavy or noisy.
 - Avoid when:

@@ -8,7 +8,7 @@ func TrustTierRank(tier string) int {
 		return 3
 	case TrustTrusted:
 		return 2
-	case TrustGitHubBasic:
+	case TrustAnonymous, TrustGitHubBasic:
 		return 1
 	default:
 		return 0
@@ -33,6 +33,26 @@ func HasScope(scopes []string, required string) bool {
 
 func AllowedTokenScopesForTier(tier string) []string {
 	switch tier {
+	case TrustAnonymous:
+		return []string{
+			ScopeUserRead,
+			ScopeVerifyRun,
+			ScopeDataRun,
+			ScopeMediaRun,
+			ScopeDepsRun,
+			ScopeSQLRun,
+			ScopeCompileRun,
+			ScopeSolveRun,
+			ScopeQuantumRun,
+			ScopeTestRun,
+			ScopeLintRun,
+			ScopeAuditRun,
+			ScopeBuildRun,
+			ScopeBenchRun,
+			ScopeBrowserRun,
+			ScopeScaleData,
+			ScopeScaleMedia,
+		}
 	case TrustAdmin:
 		return []string{
 			ScopeUserRead,

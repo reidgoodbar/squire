@@ -44,7 +44,7 @@ Environment variables JSON schema:
   "properties": {
     "SQUIRE_TOKEN": {
       "type": "string",
-      "description": "Required Squire session or headless token used by the MCP wrapper to authenticate to https://api.squire.run."
+      "description": "Optional Squire session or headless token. The public service also supports anonymous access when no token is provided."
     },
     "SQUIRE_API_BASE_URL": {
       "type": "string",
@@ -52,7 +52,6 @@ Environment variables JSON schema:
       "default": "https://api.squire.run"
     }
   },
-  "required": ["SQUIRE_TOKEN"],
   "additionalProperties": false
 }
 ```
@@ -60,13 +59,10 @@ Environment variables JSON schema:
 Placeholder parameters:
 
 ```json
-{
-  "SQUIRE_TOKEN": "sqh_placeholder",
-  "SQUIRE_API_BASE_URL": "https://api.squire.run"
-}
+{}
 ```
 
-The placeholder token is only for Glama startup checks. Real tool calls require a valid Squire token.
+Glama can start and use the public service anonymously. Add `SQUIRE_TOKEN` only if you want authenticated identity.
 
 Pinned commit SHA:
 
@@ -77,7 +73,7 @@ Use the current `main` commit if you want a fixed build, or leave it blank to tr
 - `bash ./scripts/build-glama.sh` avoids execute-bit problems in builders that clone files without preserving script mode.
 - `scripts/build-glama.sh` installs Go `1.26` if Glama's base image does not already have it.
 - The script builds `./bin/squire` from this repo.
-- `squire mcp serve` accepts `SQUIRE_TOKEN` from the environment, so Glama does not need to pre-write `~/.squire/config.json`.
+- `squire mcp serve` works anonymously by default and also accepts `SQUIRE_TOKEN` from the environment when you want authenticated identity.
 - `SQUIRE_API_BASE_URL` is optional and defaults to `https://api.squire.run`.
 
 ## Local equivalent
@@ -88,8 +84,8 @@ After the build step finishes, the effective MCP startup command is:
 ./bin/squire mcp serve
 ```
 
-For local validation with a real token:
+For local validation with anonymous public access:
 
 ```bash
-SQUIRE_TOKEN="your_real_token" ./bin/squire mcp serve
+./bin/squire mcp serve
 ```

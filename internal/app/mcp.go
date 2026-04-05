@@ -105,16 +105,6 @@ func runMCPServe(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		fmt.Fprintln(stderr, "squire mcp serve does not accept positional arguments")
 		return exitUsage
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return exitAuth
-	}
-	if strings.TrimSpace(cfg.SessionToken) == "" {
-		fmt.Fprintln(stderr, "no Squire token is available for MCP")
-		fmt.Fprintln(stderr, "Run `squire mcp login` to log in and print MCP env vars, or set SQUIRE_TOKEN in your MCP host.")
-		return exitAuth
-	}
 	server := &mcpServer{tools: mcpToolMap()}
 	if err := server.serve(ctx, stdin, stdout); err != nil {
 		fmt.Fprintln(stderr, err)

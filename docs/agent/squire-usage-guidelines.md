@@ -62,12 +62,12 @@ Preferred naming:
 - rerun locally only when the task is trivial or easier to debug locally
 - treat `browser` as offline-only and upload local files instead of pointing it at remote URLs
 - avoid planning around `deps` on the public service until there is a network-free design for it
-- plan around `quantum simulate` as a trusted-only public feature with no outbound network
+- plan around `quantum simulate` as an offline-only public feature with no outbound network
 - use `--download-artifacts <dir>` for `data`, `media`, `browser`, `build`, or `quantum simulate` when you need the generated files back locally
 
 ## Optional MCP Mode
 
-If your host supports MCP, `squire mcp serve` exposes the same Squire task surface as MCP tools over stdio.
+If your host supports MCP, `squire mcp serve` exposes the same Squire task surface as MCP tools over stdio. Public anonymous access works without login.
 
 Use MCP when your host expects tool discovery through MCP. Use the normal CLI directly when a plain terminal workflow is simpler.
 

@@ -82,7 +82,7 @@ func TestRegistryServerMetadataMatchesCurrentVersion(t *testing.T) {
 	if !ok {
 		t.Fatal("missing SQUIRE_TOKEN environment variable")
 	}
-	if !token.required || !token.secret || token.format != "string" {
+	if token.required || !token.secret || token.format != "string" {
 		t.Fatalf("unexpected SQUIRE_TOKEN metadata: %+v", token)
 	}
 	baseURL, ok := env["SQUIRE_API_BASE_URL"]
@@ -107,9 +107,6 @@ func TestRegistryWrapperFilesStayAligned(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := string(entrypoint)
-	if !strings.Contains(entry, "SQUIRE_TOKEN is required") {
-		t.Fatal("registry entrypoint should require SQUIRE_TOKEN")
-	}
 	if !strings.Contains(entry, "squire mcp serve") {
 		t.Fatal("registry entrypoint should launch squire mcp serve")
 	}
@@ -124,7 +121,7 @@ func TestREADMEReferencesRegistryServer(t *testing.T) {
 	if !strings.Contains(text, "io.github.reidgoodbar/squire") {
 		t.Fatal("README should mention the MCP Registry server name")
 	}
-	if !strings.Contains(text, "SQUIRE_TOKEN") {
-		t.Fatal("README should mention the required MCP Registry token env var")
+	if !strings.Contains(text, "anonymous access") {
+		t.Fatal("README should mention anonymous MCP access")
 	}
 }

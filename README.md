@@ -6,7 +6,6 @@ Squire is a CLI for running short validation and offload jobs in clean remote ru
 
 ```bash
 curl -fsSL https://squire.run/install.sh | bash
-squire login
 squire --help
 ```
 
@@ -86,7 +85,7 @@ For per-tool runtime, network, input, output, and public-service constraints, st
 - `browser` is offline-only and does not fetch remote `http://` or `https://` URLs
 - `deps` is currently disabled on the public service because sandbox egress is not allowed
 - `audit` supports secret scanning and local-config static analysis; dependency audit and remote Semgrep configs are disabled
-- `quantum simulate` is offline-only and currently requires `trusted` access or higher on the public service
+- `quantum simulate` is offline-only on the public service
 
 ## Artifact downloads
 
@@ -126,21 +125,21 @@ A tiny runnable quantum example is in `examples/quantum/shor.py`.
 
 ## Optional MCP mode
 
-Bootstrap MCP auth with:
-
-```bash
-squire mcp login
-```
-
-This logs you in and prints the `SQUIRE_TOKEN` and `SQUIRE_API_BASE_URL` values an MCP host needs.
-
-Then either run the local stdio wrapper:
+Run the local stdio wrapper:
 
 ```bash
 squire mcp serve
 ```
 
-This exposes the same Squire command surface over MCP stdio and reuses the current local Squire session. Squire remains CLI-first; MCP is an optional wrapper.
+This exposes the same Squire command surface over MCP stdio. Public anonymous access works without login. Squire remains CLI-first; MCP is an optional wrapper.
+
+If you want authenticated identity in an MCP host, optionally run:
+
+```bash
+squire mcp login
+```
+
+That prints the `SQUIRE_TOKEN` and `SQUIRE_API_BASE_URL` values an MCP host can use.
 
 For Cline on a machine that already has a working local Squire session, the shortest path is:
 
@@ -149,9 +148,10 @@ cline mcp add squire -- squire mcp serve
 ```
 
 Squire is also published to the MCP Registry as `io.github.reidgoodbar/squire`.
-The registry package is a GHCR-backed OCI stdio server that runs the same `squire mcp serve` surface and expects:
+The registry package is a GHCR-backed OCI stdio server that runs the same `squire mcp serve` surface and supports:
 
-- `SQUIRE_TOKEN` required
+- anonymous access by default
+- `SQUIRE_TOKEN` optional
 - `SQUIRE_API_BASE_URL` optional
 
 Registry metadata lives in `registry/server.json`.

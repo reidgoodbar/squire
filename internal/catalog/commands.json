@@ -70,13 +70,14 @@
       "category": "session",
       "title": "Squire Login",
       "summary": "authenticate against the Squire API",
-      "description": "Authenticate the local CLI against the Squire API. Browser-based GitHub OAuth is the default path; headless token login is available for automation and CI.",
+      "description": "Optionally authenticate the local CLI against the Squire API. Browser-based GitHub OAuth is the default path; headless token login is available for automation and CI.",
       "usage": "squire login [--token <SQUIRE_TOKEN>] [--json]",
       "when_to_use": [
-        "You are setting up a new machine or shell session.",
+        "You want an authenticated identity instead of anonymous public access.",
         "You need a fresh session token with the latest scopes."
       ],
       "when_not_to_use": [
+        "You only need the public service anonymously.",
         "You are already logged in and the current session still works."
       ],
       "public_status": "enabled",
@@ -124,7 +125,7 @@
       "mcp_exposed": false,
       "examples": [
         "squire update",
-        "squire update --version v0.6.3 --json"
+        "squire update --version v0.6.5 --json"
       ],
       "help_flags": [
         {
@@ -153,8 +154,8 @@
       "path": "whoami",
       "category": "session",
       "title": "Squire WhoAmI",
-      "summary": "show the authenticated user, quotas, and features",
-      "description": "Return the current authenticated identity, trust tier, feature flags, token metadata, and server-side quotas.",
+      "summary": "show the current identity, quotas, and features",
+      "description": "Return the current public or authenticated identity, trust tier, feature flags, token metadata, and server-side quotas.",
       "usage": "squire whoami [--json]",
       "when_to_use": [
         "You need to confirm the current trust tier or public feature access.",
@@ -225,12 +226,12 @@
       "path": "mcp",
       "category": "integration",
       "title": "Squire MCP",
-      "summary": "log in for MCP hosts or serve the Squire tool surface over MCP stdio",
-      "description": "Manage Squire's MCP integration surface. Use mcp login to bootstrap token-based MCP configuration, or mcp serve to expose the Squire command surface over MCP stdio.",
+      "summary": "optionally log in for MCP hosts or serve the Squire tool surface over MCP stdio",
+      "description": "Manage Squire's MCP integration surface. Use mcp serve to expose the Squire command surface over MCP stdio, and mcp login only when you want authenticated identity in an MCP host.",
       "usage": "squire mcp <login|serve>",
       "when_to_use": [
         "Your host expects MCP tool discovery and stdio transport.",
-        "You need copy-paste MCP auth settings for a registry-installed or locally launched Squire MCP server."
+        "You want optional authenticated identity in a registry-installed or locally launched Squire MCP server."
       ],
       "when_not_to_use": [
         "A plain terminal workflow is simpler."
@@ -239,13 +240,14 @@
       "supports_json": false,
       "mcp_exposed": false,
       "examples": [
-        "squire mcp login",
-        "squire mcp serve"
+        "squire mcp serve",
+        "squire mcp login"
       ],
       "policy_notes": [
-        "Use squire mcp login to print SQUIRE_TOKEN and SQUIRE_API_BASE_URL for MCP hosts."
+        "squire mcp serve works without login on the public service.",
+        "Use squire mcp login only when your MCP host needs authenticated identity."
       ],
-      "agent_hint": "Prefer direct CLI use unless an MCP host requires this wrapper. Use mcp login first if the host needs env-based auth.",
+      "agent_hint": "Prefer direct CLI use unless an MCP host requires this wrapper. Start with mcp serve directly, and use mcp login only if you need authenticated identity.",
       "stability": "advanced",
       "audience": "agent",
       "subcommands": [
@@ -254,19 +256,20 @@
           "path": "mcp.login",
           "category": "integration",
           "title": "Squire MCP Login",
-          "summary": "log in and print MCP-ready env vars",
-          "description": "Authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server expects.",
+          "summary": "optionally log in and print MCP-ready env vars",
+          "description": "Optionally authenticate with Squire and print the MCP-oriented environment variables a local or registry-installed Squire MCP server can use.",
           "usage": "squire mcp login [--token <SQUIRE_TOKEN>] [--api-base-url <url>] [--json]",
           "when_to_use": [
             "You are configuring Squire in an MCP host that expects environment variables.",
             "You want a copy-paste SQUIRE_TOKEN and SQUIRE_API_BASE_URL snippet after logging in."
           ],
           "when_not_to_use": [
-            "You only need the normal CLI and do not plan to use an MCP host."
+            "You are happy with anonymous public access through mcp serve."
           ],
           "public_status": "enabled",
           "policy_notes": [
-            "This prints a bearer token. Treat SQUIRE_TOKEN as a secret."
+            "This prints a bearer token. Treat SQUIRE_TOKEN as a secret.",
+            "This is optional for the public service because mcp serve also works anonymously."
           ],
           "supports_json": true,
           "mcp_exposed": false,
@@ -291,7 +294,7 @@
               "description": "Print machine-readable MCP bootstrap output, including env vars."
             }
           ],
-          "agent_hint": "Use this as the MCP bootstrap flow. It logs in and prints the env vars that registry and local MCP hosts need.",
+          "agent_hint": "Use this only when an MCP host needs authenticated identity rather than anonymous public access.",
           "stability": "advanced",
           "audience": "agent"
         },
@@ -301,7 +304,7 @@
           "category": "integration",
           "title": "Squire MCP Serve",
           "summary": "start the MCP stdio server",
-          "description": "Start an MCP stdio server that exposes Squire tools and reuses the current local Squire session or an injected SQUIRE_TOKEN.",
+          "description": "Start an MCP stdio server that exposes Squire tools over stdio. It works anonymously on the public service and can also reuse an optional local session or SQUIRE_TOKEN.",
           "usage": "squire mcp serve",
           "when_to_use": [
             "Your MCP client needs Squire tools over stdio."
@@ -311,14 +314,14 @@
           ],
           "public_status": "enabled",
           "policy_notes": [
-            "Run squire mcp login first if you do not already have a local session.",
-            "SQUIRE_TOKEN and SQUIRE_API_BASE_URL are also accepted through the environment."
+            "No login is required for public anonymous access.",
+            "SQUIRE_TOKEN and SQUIRE_API_BASE_URL are accepted through the environment when you want authenticated identity or a custom API endpoint."
           ],
           "supports_json": false,
           "mcp_exposed": false,
           "examples": [
-            "squire mcp login",
-            "squire mcp serve"
+            "squire mcp serve",
+            "SQUIRE_TOKEN=sqh_... squire mcp serve"
           ],
           "agent_hint": "This is a local wrapper around the CLI, not a separate remote protocol surface.",
           "stability": "advanced",
@@ -1362,10 +1365,9 @@
       "when_not_to_use": [
         "You need notebooks, persistent sessions, hardware providers, or multiple frameworks."
       ],
-      "public_status": "trusted_only",
+      "public_status": "enabled",
       "policy_notes": [
-        "Quantum runs are offline-only on the public service.",
-        "Trusted access or higher is currently required."
+        "Quantum runs are offline-only on the public service."
       ],
       "supports_json": false,
       "mcp_exposed": false,
@@ -1376,7 +1378,7 @@
       "stability": "advanced",
       "audience": "both",
       "offline_only": true,
-      "requires_trusted": true,
+      "requires_trusted": false,
       "subcommands": [
         {
           "name": "simulate",
@@ -1392,12 +1394,12 @@
           "when_not_to_use": [
             "You need hardware providers, notebooks, or persistent sessions."
           ],
-          "public_status": "trusted_only",
+          "public_status": "enabled",
           "policy_notes": [
             "The first --file is the Python entry script.",
             "Additional --file values stage helper modules or local assets.",
             "Write files under /workspace/output and use --download-artifacts to retrieve them locally.",
-            "The public service is offline-only and trusted-only for this module."
+            "The public service is offline-only for this module."
           ],
           "supports_json": true,
           "mcp_exposed": true,
@@ -1459,7 +1461,7 @@
               "description": "Print raw JSON response."
             }
           ],
-          "agent_hint": "Use for bounded offline simulations only, and plan around trusted-only public access.",
+          "agent_hint": "Use for bounded offline simulations only, and plan around the stricter timeout and quota limits on the public service.",
           "stability": "advanced",
           "audience": "both",
           "offline_only": true,

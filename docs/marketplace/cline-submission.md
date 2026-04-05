@@ -32,16 +32,16 @@ Squire keeps the same hardened execution model across these tools:
 - read-only rootfs
 - no outbound network by default
 
-I added dedicated Cline-oriented setup guidance in `llms-install.md`, and the MCP bootstrap flow is:
-
-```bash
-squire mcp login
-```
-
-That prints the `SQUIRE_TOKEN` and `SQUIRE_API_BASE_URL` values needed by MCP hosts. The MCP server itself is:
+I added dedicated Cline-oriented setup guidance in `llms-install.md`, and the MCP startup flow is:
 
 ```bash
 squire mcp serve
+```
+
+No login is required for the public service. If a user wants authenticated identity, they can optionally run:
+
+```bash
+squire mcp login
 ```
 
 Squire is also published in the MCP Registry as:
@@ -53,8 +53,8 @@ io.github.reidgoodbar/squire
 Validation completed before submission:
 
 - verified fresh CLI install from `https://squire.run/install.sh`
-- verified `squire mcp login --json`
-- verified the published MCP Registry package `ghcr.io/reidgoodbar/squire-mcp:0.6.4`
+- verified `squire mcp serve` starts without login
+- verified the published MCP Registry package `ghcr.io/reidgoodbar/squire-mcp:0.6.5`
 - verified `initialize`, `tools/list`, and a real `verify` tool call through the published package
 - verified Cline CLI MCP config generation with `cline mcp add`
 - verified a docs-only Cline task with just `README.md` and `llms-install.md`; Cline created a valid `cline_mcp_settings.json` entry for `squire` and verified it

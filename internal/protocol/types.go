@@ -78,6 +78,37 @@ type Quotas struct {
 
 func QuotasForTrustTier(tier string) Quotas {
 	switch tier {
+	case TrustAnonymous:
+		return Quotas{
+			VerifyRequestsPerMinute: 30,
+			DataRequestsPerHour:     16,
+			MediaRequestsPerHour:    8,
+			DepsRequestsPerHour:     0,
+			SQLRequestsPerHour:      30,
+			CompileRequestsPerHour:  12,
+			SolveRequestsPerHour:    30,
+			QuantumRequestsPerHour:  4,
+			TestRequestsPerHour:     20,
+			LintRequestsPerHour:     40,
+			AuditRequestsPerHour:    20,
+			BuildRequestsPerHour:    10,
+			BenchRequestsPerHour:    10,
+			BrowserRequestsPerHour:  6,
+			VerifyConcurrency:       4,
+			DataConcurrency:         2,
+			MediaConcurrency:        2,
+			DepsConcurrency:         0,
+			SQLConcurrency:          2,
+			CompileConcurrency:      1,
+			SolveConcurrency:        2,
+			QuantumConcurrency:      1,
+			TestConcurrency:         2,
+			LintConcurrency:         2,
+			AuditConcurrency:        1,
+			BuildConcurrency:        2,
+			BenchConcurrency:        1,
+			BrowserConcurrency:      1,
+		}
 	case TrustAdmin:
 		return Quotas{
 			VerifyRequestsPerMinute: 240,
@@ -209,6 +240,8 @@ func QuotasForTrustTier(tier string) Quotas {
 
 func FeaturesForTrustTier(tier string) []string {
 	switch tier {
+	case TrustAnonymous:
+		return []string{"verify", "data", "media", "sql", "test", "lint", "compile", "solve", "quantum", "audit", "build", "bench", "browser", "scale"}
 	case TrustAdmin:
 		return []string{"verify", "data", "media", "deps", "sql", "test", "lint", "compile", "solve", "quantum", "audit", "build", "bench", "browser", "scale", "admin"}
 	case TrustScaleAllowed:

@@ -7,19 +7,19 @@
     "url": "https://github.com/reidgoodbar/squire",
     "source": "github"
   },
-  "version": "0.6.4",
+  "version": "0.6.5",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/reidgoodbar/squire-mcp:0.6.4",
+      "identifier": "ghcr.io/reidgoodbar/squire-mcp:0.6.5",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "SQUIRE_TOKEN",
-          "description": "Required Squire session or headless token used by the MCP wrapper to authenticate to https://api.squire.run.",
-          "isRequired": true,
+          "description": "Optional Squire session or headless token. The public service also supports anonymous access when no token is provided.",
+          "isRequired": false,
           "format": "string",
           "isSecret": true
         },

@@ -1660,7 +1660,9 @@ func newScaleMultipartRequest(ctx context.Context, endpoint, token, mode, script
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", "application/json")
 	return req, nil

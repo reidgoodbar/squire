@@ -75,7 +75,7 @@ Use this file when an agent needs to choose the right Squire command and stay wi
 - Staging contract: the first `--file` is the entry script. Helper modules or local assets can be staged with additional `--file` values.
 - Output contract: write files under `SQUIRE_QUANTUM_OUTPUT_DIR` or directly to `SQUIRE_QUANTUM_OUTPUT_PATH`.
 - Network: disabled.
-- Public service: trusted access or higher.
+- Public service: available anonymously, still offline-only.
 - Best for: bounded simulation jobs, not notebooks or hardware backends.
 
 ## Offload tools
@@ -151,7 +151,7 @@ squire media --script square.py --input image.png --download-artifacts ./out --j
 
 Behavior:
 
-- the CLI makes the authenticated artifact requests for you
+- the CLI makes the artifact requests for you
 - top-level artifact commands download into the exact directory you provide
 - `build` uses target-specific subdirectories under that directory
 - large binary outputs should be downloaded as artifacts, not relayed through stdout
