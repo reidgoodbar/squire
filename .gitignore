@@ -1,0 +1,4 @@
+.squire/
+*.test
+coverage.out
+.DS_Store
