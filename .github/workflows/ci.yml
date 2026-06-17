@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare writable Go cache
+        run: mkdir -p "$GOCACHE"
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Repo metadata benchmark
+        run: go run ./cmd/squire boost bench repo-metadata
+

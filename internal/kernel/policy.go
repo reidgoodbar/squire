@@ -17,11 +17,21 @@ func (p PolicyEngine) Decide(ctx context.Context, op Operation, ws WorldState, l
 	if !ws.OracleAvailable && (op.OperatorFamily == FamilyLocalRepoMetadata || op.OperatorFamily == FamilyRepoState) {
 		return PolicyDecision{Mode: ModeNative, Reason: "repo oracle unavailable"}
 	}
-	if IsShadowCandidate(op.Argv) {
-		if ledger != nil && ledger.HasShadowMismatch(operationKey(op, ws)) {
-			return PolicyDecision{Mode: ModeNative, Reason: "shadow mismatch history"}
+	if IsProofGatedReplayCandidate(op.Argv) {
+		if ledger == nil {
+			return PolicyDecision{Mode: ModeNative, Reason: "validity ledger unavailable"}
 		}
-		return PolicyDecision{Mode: ModeShadow, Reason: "shadow candidate"}
+		if !proofGatedCandidateUsable(op, ws) {
+			return PolicyDecision{Mode: ModeNative, Reason: "proof-gated candidate lacks stable local proof inputs"}
+		}
+		key := operationKey(op, ws)
+		fps := inputFingerprints(op, ws)
+		epoch := invalidationEpoch(op, ws)
+		entry, valid := ledger.FindValid(key, fps, epoch)
+		if valid && entry.Observation.OutputRef != "" && entry.WarmObservationCount > 0 {
+			return PolicyDecision{Mode: ModeReplay, Reason: "proof-gated exact observation available"}
+		}
+		return PolicyDecision{Mode: ModeNative, Reason: "no prepared exact observation"}
 	}
 	if IsFastPathAllowed(op.Argv) {
 		if ledger == nil {
@@ -43,15 +53,23 @@ func EnabledFastPaths() []string {
 		"git rev-parse HEAD",
 		"git rev-parse --git-dir",
 		"git rev-parse --abbrev-ref HEAD",
+		"git rev-parse --show-toplevel",
+		"git rev-parse --is-inside-work-tree",
 	}
 }
 
-func ShadowCandidates() []string {
+func ProofGatedReplayCandidates() []string {
 	return []string{
 		"git status --short",
 		"git status --porcelain",
 		"git ls-files",
-		"rg --files",
+		"git diff / git diff --stat / git diff -- <path>",
+		"cat <bounded workspace source/config file>",
+		"sed -n <bounded-range>p <bounded workspace source/config file>",
+		"<tool> --version / <tool> version",
+		"pip/pip3 --version",
+		"which <common-tool>",
+		"command -v <common-tool> (external PATH executable only)",
 	}
 }
 

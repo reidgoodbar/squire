@@ -4,9 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+const scopedKernelClaim = "Scoped kernel proof for repeated local Git metadata plus hot-prepared read-only discovery operations."
+
+type LatestBenchmarkStatus struct {
+	Name                         string     `json:"name"`
+	Claim                        string     `json:"claim"`
+	RanAt                        time.Time  `json:"ran_at"`
+	Exactness                    bool       `json:"exactness"`
+	Mismatches                   int        `json:"mismatches"`
+	MutationBoundaryInvalidation bool       `json:"mutation_boundary_invalidation,omitempty"`
+	MetadataFastPathP95US        int64      `json:"metadata_fast_path_p95_us,omitempty"`
+	ProofGatedReplayP95US        int64      `json:"proof_gated_replay_p95_us,omitempty"`
+	NativeFallbackOverheadP95US  int64      `json:"native_fallback_overhead_p95_us,omitempty"`
+	ShadowBookkeepingP95US       int64      `json:"shadow_bookkeeping_p95_us,omitempty"`
+	SafetyGates                  GateReport `json:"safety_gates,omitempty"`
+	PerformanceGates             GateReport `json:"performance_gates,omitempty"`
+	StaleReplayObserved          bool       `json:"stale_replay_observed"`
+	ValidationReplays            int        `json:"validation_replays"`
+}
 
 func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	k := New(storeRoot)
@@ -28,25 +49,169 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	k := New(storeRoot)
 	_ = k.Store.Init()
 	ws := k.Oracle.Snapshot(ctx, cwd)
+	latest, latestOK := k.Store.LoadLatestBenchmarkStatus()
+	ledger, ledgerErr := k.Store.Load()
+	ledgerOK := ledgerErr == nil
 	js, _ := json.MarshalIndent(ws, "", "  ")
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire Kernel status")
+	fmt.Fprintln(&b, "claim:", scopedKernelClaim)
 	fmt.Fprintln(&b, "repo_oracle:", availability(ws.OracleAvailable))
-	fmt.Fprintln(&b, "world_state:")
+	fmt.Fprintln(&b, "current_repo_oracle_state:")
 	fmt.Fprintln(&b, indent(string(js)))
+	fmt.Fprintln(&b, "invalidation_epoch:")
+	fmt.Fprintf(&b, "  head: %s\n", emptyAsNA(ws.HeadEpoch))
+	fmt.Fprintf(&b, "  config: %s\n", emptyAsNA(ws.ConfigEpoch))
+	fmt.Fprintf(&b, "  index: %s\n", emptyAsNA(ws.IndexEpoch))
+	fmt.Fprintf(&b, "  file_tree: %s\n", emptyAsNA(ws.FileTreeEpoch))
+	fmt.Fprintf(&b, "  file_content: %s\n", emptyAsNA(ws.FileContentEpoch))
+	fmt.Fprintf(&b, "  workspace: %s\n", emptyAsNA(ws.WorkspaceEpoch))
 	fmt.Fprintln(&b, "enabled_fast_paths:")
 	for _, item := range EnabledFastPaths() {
 		fmt.Fprintln(&b, "  -", item)
 	}
-	fmt.Fprintln(&b, "shadow_candidates:")
-	for _, item := range ShadowCandidates() {
+	fmt.Fprintln(&b, "proof_gated_replay_candidates:")
+	for _, item := range ProofGatedReplayCandidates() {
 		fmt.Fprintln(&b, "  -", item)
 	}
-	fmt.Fprintln(&b, "never_replay_policy:")
+	fmt.Fprintln(&b, "native_only_discovery:")
+	fmt.Fprintln(&b, "  - git remote -v")
+	fmt.Fprintln(&b, "  - git remote get-url origin")
+	fmt.Fprintln(&b, "  - rg --files")
+	fmt.Fprintln(&b, "  - rg <literal> <workspace paths...>")
+	fmt.Fprintln(&b, "never_replay_boundaries:")
 	for _, item := range NeverReplayPolicy() {
 		fmt.Fprintln(&b, "  -", item)
 	}
+	fmt.Fprintln(&b, "p95_fast_path_overhead:")
+	if latestOK && latest.MetadataFastPathP95US > 0 {
+		fmt.Fprintf(&b, "  latest_metadata_fast_path_p95_us: %d\n", latest.MetadataFastPathP95US)
+	} else {
+		fmt.Fprintln(&b, "  latest_metadata_fast_path_p95_us: n/a")
+	}
+	if latestOK && latest.ProofGatedReplayP95US > 0 {
+		fmt.Fprintf(&b, "  latest_proof_gated_replay_p95_us: %d\n", latest.ProofGatedReplayP95US)
+	} else {
+		fmt.Fprintln(&b, "  latest_proof_gated_replay_p95_us: n/a")
+	}
+	fmt.Fprintln(&b, "prepared_world:")
+	if ledgerOK {
+		fast, proofGated, warmFiles, indexes, metadata, pathIndex, ecosystem, dependency, sourceSymbols := preparedCounts(ledger.Prepared)
+		fmt.Fprintf(&b, "  prepared_entries: %d\n", len(ledger.Prepared))
+		fmt.Fprintf(&b, "  fast_path_outputs: %d\n", fast)
+		fmt.Fprintf(&b, "  proof_gated_outputs: %d\n", proofGated)
+		fmt.Fprintf(&b, "  warm_files: %d\n", warmFiles)
+		fmt.Fprintf(&b, "  file_tree_indexes: %d\n", indexes)
+		fmt.Fprintf(&b, "  project_metadata_fingerprints: %d\n", metadata)
+		fmt.Fprintf(&b, "  command_path_indexes: %d\n", pathIndex)
+		fmt.Fprintf(&b, "  ecosystem_metadata_fingerprints: %d\n", ecosystem)
+		fmt.Fprintf(&b, "  dependency_metadata_fingerprints: %d\n", dependency)
+		fmt.Fprintf(&b, "  source_symbol_indexes: %d\n", sourceSymbols)
+	} else {
+		fmt.Fprintln(&b, "  prepared_entries: n/a")
+	}
+	snapshot := HotSnapshotStatsForStore(storeRoot)
+	fmt.Fprintln(&b, "virtual_workspace_snapshot:")
+	fmt.Fprintf(&b, "  available: %t\n", snapshot.Available)
+	if snapshot.Path != "" {
+		fmt.Fprintf(&b, "  path: %s\n", snapshot.Path)
+	}
+	if snapshot.Available {
+		fmt.Fprintf(&b, "  shared_memory_mode: %s\n", snapshot.SharedMemoryMode)
+		fmt.Fprintf(&b, "  version: %d\n", snapshot.Version)
+		fmt.Fprintf(&b, "  size_bytes: %d\n", snapshot.SizeBytes)
+		fmt.Fprintf(&b, "  descriptor_entries: %d\n", snapshot.Entries)
+		fmt.Fprintf(&b, "  exact_command_entries: %d\n", snapshot.ExactEntries)
+		fmt.Fprintf(&b, "  workspace_image_files: %d\n", snapshot.WarmFileEntries)
+		fmt.Fprintf(&b, "  payload_bytes: %d\n", snapshot.PayloadBytes)
+	} else if snapshot.Diagnostic != "" {
+		fmt.Fprintf(&b, "  diagnostic: %s\n", snapshot.Diagnostic)
+	}
+	background, backgroundErr := LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
+	fmt.Fprintln(&b, "background_maintainer:")
+	if backgroundErr != nil {
+		fmt.Fprintln(&b, "  status: unavailable")
+		fmt.Fprintln(&b, "  diagnostic:", backgroundErr)
+	} else {
+		fmt.Fprintf(&b, "  mode: %s\n", background.Mode)
+		fmt.Fprintf(&b, "  running: %t\n", background.Running)
+		if background.PID > 0 {
+			fmt.Fprintf(&b, "  pid: %d\n", background.PID)
+		} else {
+			fmt.Fprintln(&b, "  pid: n/a")
+		}
+		if background.HotCacheSocket != "" {
+			fmt.Fprintf(&b, "  hot_cache_socket: %s\n", background.HotCacheSocket)
+		}
+		if !background.StartedAt.IsZero() {
+			fmt.Fprintf(&b, "  started_at: %s\n", background.StartedAt.Format(time.RFC3339))
+		}
+		fmt.Fprintf(&b, "  native_fallback_available: %t\n", background.NativeFallbackAvailable)
+		fmt.Fprintf(&b, "  agent_visible_suggestions: %t\n", background.AgentVisibleSuggestions)
+		if background.LogPath != "" {
+			fmt.Fprintf(&b, "  log_path: %s\n", background.LogPath)
+		}
+		fmt.Fprintf(&b, "  status_path: %s\n", background.StatusPath)
+		for _, diag := range background.Diagnostics {
+			fmt.Fprintln(&b, "  diagnostic:", diag)
+		}
+	}
+	processGuard := ProcessGuardStatus()
+	fmt.Fprintln(&b, "process_guard:")
+	fmt.Fprintf(&b, "  mode: %s\n", processGuard.Mode)
+	fmt.Fprintf(&b, "  current_pid: %d\n", processGuard.CurrentPID)
+	fmt.Fprintf(&b, "  parent_pid: %d\n", processGuard.ParentPID)
+	if processGuard.CurrentFDCount >= 0 {
+		fmt.Fprintf(&b, "  current_fd_count: %d\n", processGuard.CurrentFDCount)
+	} else {
+		fmt.Fprintln(&b, "  current_fd_count: n/a")
+	}
+	fmt.Fprintf(&b, "  cleanup_actions: %d\n", processGuard.CleanupActions)
+	for _, diag := range processGuard.Diagnostics {
+		fmt.Fprintln(&b, "  diagnostic:", diag)
+	}
+	fmt.Fprintln(&b, "latest_benchmark_status:")
+	if latestOK {
+		fmt.Fprintf(&b, "  name: %s\n", latest.Name)
+		fmt.Fprintf(&b, "  claim: %s\n", latest.Claim)
+		fmt.Fprintf(&b, "  ran_at: %s\n", latest.RanAt.Format(time.RFC3339))
+		fmt.Fprintf(&b, "  exactness: %t\n", latest.Exactness)
+		fmt.Fprintf(&b, "  mismatches: %d\n", latest.Mismatches)
+		fmt.Fprintf(&b, "  mutation_boundary_invalidation: %t\n", latest.MutationBoundaryInvalidation)
+		fmt.Fprintf(&b, "  safety_gates: %s\n", gateStatus(latest.SafetyGates))
+		fmt.Fprintf(&b, "  performance_gates: %s\n", gateStatus(latest.PerformanceGates))
+		fmt.Fprintf(&b, "  stale_replay_observed: %t\n", latest.StaleReplayObserved)
+		fmt.Fprintf(&b, "  validation_replays: %d\n", latest.ValidationReplays)
+	} else {
+		fmt.Fprintln(&b, "  none")
+	}
 	return b.String(), nil
+}
+
+func preparedCounts(entries []PreparedEntry) (fastPathOutputs, proofGatedOutputs, warmFiles, fileTreeIndexes, projectMetadata, commandPath, ecosystem, dependency, sourceSymbols int) {
+	for _, entry := range entries {
+		switch entry.Kind {
+		case PreparedKindFastPathOutput:
+			fastPathOutputs++
+		case PreparedKindProofGatedOutput:
+			proofGatedOutputs++
+		case PreparedKindWarmFile:
+			warmFiles++
+		case PreparedKindFileTreeIndex:
+			fileTreeIndexes++
+		case PreparedKindProjectMetadata:
+			projectMetadata++
+		case PreparedKindCommandPath:
+			commandPath++
+		case PreparedKindEcosystem:
+			ecosystem++
+		case PreparedKindDependencyMetadata:
+			dependency++
+		case PreparedKindSourceSymbolIndex:
+			sourceSymbols++
+		}
+	}
+	return fastPathOutputs, proofGatedOutputs, warmFiles, fileTreeIndexes, projectMetadata, commandPath, ecosystem, dependency, sourceSymbols
 }
 
 func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
@@ -58,12 +223,15 @@ func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var replacements, fallbacks, mismatches int
+	var replacements, fallbacks, mismatches, shadowSkips int
+	categories := map[string]int{}
 	var roi []int64
 	for _, e := range ledger.Entries {
 		replacements += e.ReplacementCount
 		fallbacks += e.FallbackCount
 		mismatches += e.ShadowMismatchCount
+		shadowSkips += e.ShadowSkipCount
+		categories = mergeIntMaps(categories, e.ShadowMismatchCategories)
 		roi = append(roi, e.NetROIHistoryMS...)
 	}
 	var b strings.Builder
@@ -72,52 +240,81 @@ func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	for _, item := range EnabledFastPaths() {
 		fmt.Fprintln(&b, "  -", item)
 	}
+	fmt.Fprintln(&b, "proof_gated_replay_candidates:")
+	for _, item := range ProofGatedReplayCandidates() {
+		fmt.Fprintln(&b, "  -", item)
+	}
 	fmt.Fprintf(&b, "replacements: %d\n", replacements)
 	fmt.Fprintf(&b, "fallbacks: %d\n", fallbacks)
 	fmt.Fprintf(&b, "mismatches: %d\n", mismatches)
+	fmt.Fprintf(&b, "mismatch_categories: %v\n", categories)
+	fmt.Fprintf(&b, "legacy_shadow_sample_skips: %d\n", shadowSkips)
 	fmt.Fprintf(&b, "invalidations: derived from epoch mismatch\n")
 	fmt.Fprintf(&b, "roi_history_ms: %v\n", roi)
 	return b.String(), nil
 }
 
-func ShadowStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
-	k := New(storeRoot)
-	_ = k.Store.Init()
-	ws := k.Oracle.Snapshot(ctx, cwd)
-	ledger, err := k.Store.Load()
+func (s *LedgerStore) SaveLatestBenchmarkStatus(status LatestBenchmarkStatus) error {
+	if err := s.Init(); err != nil {
+		return err
+	}
+	status.Claim = scopedKernelClaim
+	if status.RanAt.IsZero() {
+		status.RanAt = time.Now()
+	}
+	b, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
-		return "", err
+		return err
 	}
-	var matches, mismatches int
-	var examples []string
-	for _, e := range ledger.Entries {
-		matches += e.ShadowMatchCount
-		mismatches += e.ShadowMismatchCount
-		examples = append(examples, e.MismatchExamples...)
+	return os.WriteFile(filepath.Join(s.Root, "latest_benchmark_status.json"), append(b, '\n'), 0o600)
+}
+
+func (s *LedgerStore) LoadLatestBenchmarkStatus() (LatestBenchmarkStatus, bool) {
+	b, err := os.ReadFile(filepath.Join(s.Root, "latest_benchmark_status.json"))
+	if err != nil {
+		return LatestBenchmarkStatus{}, false
 	}
-	total := matches + mismatches
-	rate := "n/a"
-	if total > 0 {
-		rate = fmt.Sprintf("%.2f", float64(matches)/float64(total))
+	var status LatestBenchmarkStatus
+	if err := json.Unmarshal(b, &status); err != nil {
+		return LatestBenchmarkStatus{}, false
 	}
-	var b strings.Builder
-	fmt.Fprintln(&b, "Squire shadow status")
-	fmt.Fprintln(&b, "shadow_candidates:")
-	for _, item := range ShadowCandidates() {
-		fmt.Fprintln(&b, "  -", item)
+	return status, true
+}
+
+func LatestBenchmarkFromRepoMetadata(report BenchReport) LatestBenchmarkStatus {
+	return LatestBenchmarkStatus{
+		Name:                         "repo-metadata",
+		Claim:                        scopedKernelClaim,
+		RanAt:                        time.Now(),
+		Exactness:                    report.Exactness,
+		Mismatches:                   report.Mismatches,
+		MutationBoundaryInvalidation: report.MutationBoundaryInvalidation,
+		SafetyGates: GateReport{
+			Required: true,
+			Passed:   report.Exactness && report.Mismatches == 0 && report.MutationBoundaryInvalidation,
+			Status:   passFail(report.Exactness && report.Mismatches == 0 && report.MutationBoundaryInvalidation),
+		},
+		PerformanceGates: GateReport{Required: false, Passed: true, Status: "not_measured"},
 	}
-	fmt.Fprintf(&b, "exactness_rate: %s\n", rate)
-	fmt.Fprintf(&b, "matches: %d\n", matches)
-	fmt.Fprintf(&b, "mismatches: %d\n", mismatches)
-	fmt.Fprintln(&b, "mismatch_examples:")
-	for _, ex := range examples {
-		fmt.Fprintln(&b, "  -", ex)
+}
+
+func LatestBenchmarkFromDeepLocal(report DeepBenchReport) LatestBenchmarkStatus {
+	return LatestBenchmarkStatus{
+		Name:                         "deep-local",
+		Claim:                        scopedKernelClaim,
+		RanAt:                        time.Now(),
+		Exactness:                    report.EnabledFastPathExactness,
+		Mismatches:                   report.EnabledFastPathMismatches,
+		MutationBoundaryInvalidation: !report.StaleReplayObserved,
+		MetadataFastPathP95US:        report.Performance.MetadataFastPathP95US,
+		ProofGatedReplayP95US:        report.Performance.ProofGatedReplayP95US,
+		NativeFallbackOverheadP95US:  report.Performance.NativeFallbackOverheadP95US,
+		ShadowBookkeepingP95US:       report.Performance.ShadowBookkeepingP95US,
+		SafetyGates:                  report.SafetyGates,
+		PerformanceGates:             report.PerformanceGates,
+		StaleReplayObserved:          report.StaleReplayObserved,
+		ValidationReplays:            report.NeverReplayDiagnostics.ValidationReplays,
 	}
-	if !ws.OracleAvailable {
-		fmt.Fprintln(&b, "disabled_reasons:")
-		fmt.Fprintln(&b, "  - repo oracle unavailable")
-	}
-	return b.String(), nil
 }
 
 func availability(ok bool) string {
@@ -133,6 +330,33 @@ func indent(s string) string {
 		lines[i] = "  " + lines[i]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func emptyAsNA(s string) string {
+	if s == "" {
+		return "n/a"
+	}
+	return s
+}
+
+func gateStatus(gate GateReport) string {
+	if gate.Status != "" {
+		return gate.Status
+	}
+	if gate.Passed {
+		return "pass"
+	}
+	if gate.Required {
+		return "fail"
+	}
+	return "n/a"
+}
+
+func passFail(ok bool) string {
+	if ok {
+		return "pass"
+	}
+	return "fail"
 }
 
 type BenchReport struct {
@@ -160,14 +384,11 @@ func BenchRepoMetadata(ctx context.Context) (BenchReport, error) {
 		{"git", "rev-parse", "--abbrev-ref", "HEAD"},
 	}
 	report := BenchReport{Runs: 5, Exactness: true, NoBroadCodexSpeedupClaim: true}
+	if _, err := k.Warm(ctx, dir); err != nil {
+		return report, err
+	}
 	for _, argv := range cmds {
 		report.Commands = append(report.Commands, displayCommand(argv))
-		first := k.Run(ctx, "bench", dir, argv)
-		if first.ExitCode != 0 {
-			report.Exactness = false
-			report.Mismatches++
-			continue
-		}
 		for i := 0; i < report.Runs; i++ {
 			nativeStart := time.Now()
 			native := runNative(ctx, dir, argv)
@@ -176,7 +397,7 @@ func BenchRepoMetadata(ctx context.Context) (BenchReport, error) {
 			replay := k.Run(ctx, "bench", dir, argv)
 			replayWall := time.Since(replayStart)
 			report.WorkloadOnlyWallDeltaMS += nativeWall.Milliseconds() - replayWall.Milliseconds()
-			report.NetROIMS += int64(first.NativeWall.Milliseconds()) - replayWall.Milliseconds()
+			report.NetROIMS += nativeWall.Milliseconds() - replayWall.Milliseconds()
 			if replay.Mode != ModeReplay || replay.ExitCode != native.ExitCode || string(replay.Stdout) != string(native.Stdout) || string(replay.Stderr) != string(native.Stderr) {
 				report.Exactness = false
 				report.Mismatches++

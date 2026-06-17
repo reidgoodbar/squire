@@ -13,12 +13,13 @@ import (
 )
 
 type RepoOracle struct {
-	mu    sync.Mutex
-	cache map[string]WorldState
+	mu            sync.Mutex
+	cache         map[string]WorldState
+	shadowSignals map[string]string
 }
 
 func NewRepoOracle() *RepoOracle {
-	return &RepoOracle{cache: map[string]WorldState{}}
+	return &RepoOracle{cache: map[string]WorldState{}, shadowSignals: map[string]string{}}
 }
 
 func (o *RepoOracle) Snapshot(ctx context.Context, cwd string) WorldState {
@@ -33,7 +34,7 @@ func (o *RepoOracle) FastSnapshot(ctx context.Context, cwd string) WorldState {
 	cached, ok := o.cache[abs]
 	o.mu.Unlock()
 	if ok {
-		if refreshed, refreshedOK := refreshFastWorld(cached); refreshedOK {
+		if refreshed, refreshedOK := refreshFastMetadataWorld(cached); refreshedOK {
 			o.storeCached(cwd, refreshed)
 			return refreshed
 		}
@@ -41,10 +42,59 @@ func (o *RepoOracle) FastSnapshot(ctx context.Context, cwd string) WorldState {
 	return o.Snapshot(ctx, cwd)
 }
 
+func (o *RepoOracle) ShadowSnapshot(ctx context.Context, cwd string) WorldState {
+	abs := absPath(cwd)
+	o.mu.Lock()
+	cached, ok := o.cache[abs]
+	previousSignal := o.shadowSignals[abs]
+	o.mu.Unlock()
+	if !ok {
+		return o.Snapshot(ctx, cwd)
+	}
+	refreshed, refreshedOK := refreshFastMetadataWorld(cached)
+	if !refreshedOK {
+		return o.Snapshot(ctx, cwd)
+	}
+	if fp, ok := hashFile(filepath.Join(refreshed.GitDirAbs, "config")); ok {
+		refreshed.ConfigFingerprint = fp
+		refreshed.ConfigEpoch = fp
+	}
+	if fp, ok := hashFile(filepath.Join(refreshed.GitDirAbs, "index")); ok {
+		refreshed.IndexFingerprint = fp
+		refreshed.IndexEpoch = fp
+	}
+	refreshed.IgnoreRuleFingerprint = ignoreRuleFingerprint(refreshed.RepoRoot, refreshed.GitDirAbs)
+	currentSignal := cheapWorkspaceSignal(refreshed.RepoRoot, refreshed.GitDirAbs)
+	if previousSignal != "" && currentSignal != previousSignal {
+		refreshed.FileTreeEpoch = "cheap:" + hashString(currentSignal)
+		refreshed.FileContentEpoch = ""
+		refreshed.DirtyState = "unknown"
+		refreshed.UntrackedSummary = ""
+		refreshed.EvidenceQuality = EvidencePartial
+		refreshed.WorkspaceEpoch = hashString(strings.Join([]string{
+			refreshed.HeadEpoch,
+			refreshed.ConfigEpoch,
+			refreshed.IndexEpoch,
+			refreshed.IgnoreRuleFingerprint,
+			refreshed.FileTreeEpoch,
+			refreshed.FileContentEpoch,
+			refreshed.DirtyState,
+			refreshed.UntrackedSummary,
+		}, "|"))
+	}
+	refreshed.CollectedAtUnixNano = time.Now().UnixNano()
+	o.storeCached(cwd, refreshed)
+	return refreshed
+}
+
 func (o *RepoOracle) storeCached(cwd string, ws WorldState) {
+	abs := absPath(cwd)
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.cache[absPath(cwd)] = ws
+	o.cache[abs] = ws
+	if ws.OracleAvailable && ws.RepoRoot != "" && ws.GitDirAbs != "" {
+		o.shadowSignals[abs] = cheapWorkspaceSignal(ws.RepoRoot, ws.GitDirAbs)
+	}
 }
 
 func (o *RepoOracle) fullSnapshot(ctx context.Context, cwd string) WorldState {
@@ -133,7 +183,7 @@ func (o *RepoOracle) fullSnapshot(ctx context.Context, cwd string) WorldState {
 	return ws
 }
 
-func refreshFastWorld(ws WorldState) (WorldState, bool) {
+func refreshFastMetadataWorld(ws WorldState) (WorldState, bool) {
 	if !ws.OracleAvailable || ws.GitDirAbs == "" || ws.RepoRoot == "" {
 		return ws, false
 	}
@@ -145,15 +195,6 @@ func refreshFastWorld(ws WorldState) (WorldState, bool) {
 	refreshed.Head = head
 	refreshed.Branch = branch
 	refreshed.HeadEpoch = hashString(head)
-	if fp, ok := hashFile(filepath.Join(ws.GitDirAbs, "config")); ok {
-		refreshed.ConfigFingerprint = fp
-		refreshed.ConfigEpoch = fp
-	}
-	if fp, ok := hashFile(filepath.Join(ws.GitDirAbs, "index")); ok {
-		refreshed.IndexFingerprint = fp
-		refreshed.IndexEpoch = fp
-	}
-	refreshed.IgnoreRuleFingerprint = ignoreRuleFingerprint(ws.RepoRoot, ws.GitDirAbs)
 	refreshed.WorkspaceEpoch = hashString(strings.Join([]string{
 		refreshed.HeadEpoch,
 		refreshed.ConfigEpoch,
@@ -305,8 +346,29 @@ func workspaceEpochs(root string) (string, string) {
 	return hashString(strings.Join(treeParts, "\n")), hashString(strings.Join(contentParts, "\n"))
 }
 
+func cheapWorkspaceSignal(repoRoot, gitDirAbs string) string {
+	var parts []string
+	for _, path := range []string{
+		repoRoot,
+		filepath.Join(gitDirAbs, "HEAD"),
+		filepath.Join(gitDirAbs, "config"),
+		filepath.Join(repoRoot, ".gitignore"),
+		filepath.Join(gitDirAbs, "info", "exclude"),
+	} {
+		if info, err := os.Stat(path); err == nil {
+			parts = append(parts, fmt.Sprintf("%s\x00%d\x00%d\x00%s", path, info.Size(), info.ModTime().UnixNano(), info.Mode().String()))
+		} else {
+			parts = append(parts, path+"\x00missing")
+		}
+	}
+	return hashString(strings.Join(parts, "\n"))
+}
+
 func absPath(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(abs); resolveErr == nil {
+			return resolved
+		}
 		return abs
 	}
 	return path

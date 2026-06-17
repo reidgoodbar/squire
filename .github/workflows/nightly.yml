@@ -1,0 +1,71 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  kernel-baseline:
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare writable Go cache
+        run: mkdir -p "$GOCACHE" artifacts
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Repo metadata benchmark
+        run: go run ./cmd/squire boost bench repo-metadata | tee artifacts/repo-metadata.json
+
+      - name: Deep local baseline
+        run: go run ./cmd/squire boost bench deep-local | tee artifacts/deep-local.json
+
+      - name: Assert deep-local gates
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("artifacts/deep-local.json").read_text())
+          failures = []
+
+          if not report.get("enabled_fast_path_exactness"):
+              failures.append("enabled fast path exactness failed")
+          if report.get("enabled_fast_path_mismatches") != 0:
+              failures.append("enabled fast path mismatches observed")
+          if report.get("incremental", {}).get("stale_head_replays") != 0:
+              failures.append("stale HEAD replay observed")
+          if report.get("incremental", {}).get("stale_branch_replays") != 0:
+              failures.append("stale branch replay observed")
+          if report.get("never_replay_diagnostics", {}).get("validation_replays") != 0:
+              failures.append("validation replay observed")
+          if not report.get("safety_gates", {}).get("passed"):
+              failures.append("safety gates failed")
+          if not report.get("performance_gates", {}).get("passed"):
+              print("performance_gates_status:", report.get("performance_gates", {}).get("status"))
+              print("performance_gates_violations:", report.get("performance_gates", {}).get("violations", []))
+
+          print("shadow_candidate_exactness:", report.get("shadow_candidate_exactness"))
+          print("shadow_candidate_mismatches:", report.get("shadow_candidate_mismatches"))
+          print("shadow_mismatch_categories:", report.get("shadow", {}).get("shadow_mismatch_categories", {}))
+          print("performance:", report.get("performance", {}))
+
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: squire-kernel-nightly
+          path: artifacts

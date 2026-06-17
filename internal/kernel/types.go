@@ -19,6 +19,7 @@ const (
 	FamilyRepoState         OperatorFamily = "repo_state"
 	FamilySearchList        OperatorFamily = "search_list"
 	FamilyFileInspection    OperatorFamily = "file_inspection"
+	FamilyEnvironment       OperatorFamily = "environment_discovery"
 	FamilyValidation        OperatorFamily = "validation_build_test"
 	FamilyEditOrMutation    OperatorFamily = "edit_or_mutation"
 	FamilyPackageSetup      OperatorFamily = "package_setup"
@@ -29,7 +30,6 @@ type Mode string
 
 const (
 	ModeNative Mode = "native"
-	ModeShadow Mode = "shadow"
 	ModeReplay Mode = "replay"
 	ModeNever  Mode = "never"
 )
@@ -84,21 +84,44 @@ type Observation struct {
 	OutputRef    string    `json:"output_ref,omitempty"`
 }
 
+type PreparedEntry struct {
+	PreparedID           string            `json:"prepared_id"`
+	Kind                 string            `json:"kind"`
+	OperatorFamily       OperatorFamily    `json:"operator_family"`
+	NormalizedCommand    string            `json:"normalized_command,omitempty"`
+	InputFingerprints    map[string]string `json:"input_fingerprints,omitempty"`
+	HotFingerprints      map[string]string `json:"hot_fingerprints,omitempty"`
+	OutputFingerprints   map[string]string `json:"output_fingerprints,omitempty"`
+	InvalidationEpoch    string            `json:"invalidation_epoch,omitempty"`
+	HotInvalidationEpoch string            `json:"hot_invalidation_epoch,omitempty"`
+	EvidenceQuality      EvidenceQuality   `json:"evidence_quality"`
+	ReplayEligible       bool              `json:"replay_eligible"`
+	OutputRef            string            `json:"output_ref,omitempty"`
+	Privacy              string            `json:"privacy"`
+	PreparedAt           time.Time         `json:"prepared_at"`
+	Notes                []string          `json:"notes,omitempty"`
+}
+
 type LedgerEntry struct {
-	OperationKey        string            `json:"operation_key"`
-	OperatorFamily      OperatorFamily    `json:"operator_family"`
-	InputFingerprints   map[string]string `json:"input_fingerprints"`
-	OutputFingerprints  map[string]string `json:"output_fingerprints"`
-	InvalidationEpoch   string            `json:"invalidation_epoch"`
-	ShadowMatchCount    int               `json:"shadow_match_count"`
-	ShadowMismatchCount int               `json:"shadow_mismatch_count"`
-	ReplacementCount    int               `json:"replacement_count"`
-	FallbackCount       int               `json:"fallback_count"`
-	NetROIHistoryMS     []int64           `json:"net_roi_history_ms,omitempty"`
-	LastDecision        Mode              `json:"last_decision"`
-	LastValidatedAt     time.Time         `json:"last_validated_at"`
-	Observation         Observation       `json:"observation"`
-	MismatchExamples    []string          `json:"mismatch_examples,omitempty"`
+	OperationKey             string            `json:"operation_key"`
+	OperatorFamily           OperatorFamily    `json:"operator_family"`
+	InputFingerprints        map[string]string `json:"input_fingerprints"`
+	OutputFingerprints       map[string]string `json:"output_fingerprints"`
+	InvalidationEpoch        string            `json:"invalidation_epoch"`
+	ShadowMatchCount         int               `json:"shadow_match_count"`
+	ShadowMismatchCount      int               `json:"shadow_mismatch_count"`
+	ShadowSkipCount          int               `json:"shadow_skip_count"`
+	ShadowMismatchCategories map[string]int    `json:"shadow_mismatch_categories,omitempty"`
+	WarmObservationCount     int               `json:"warm_observation_count,omitempty"`
+	ReplacementCount         int               `json:"replacement_count"`
+	FallbackCount            int               `json:"fallback_count"`
+	NetROIHistoryMS          []int64           `json:"net_roi_history_ms,omitempty"`
+	LastDecision             Mode              `json:"last_decision"`
+	LastValidatedAt          time.Time         `json:"last_validated_at"`
+	Observation              Observation       `json:"observation"`
+	MismatchExamples         []string          `json:"mismatch_examples,omitempty"`
+	StdoutBytes              []byte            `json:"-"`
+	StderrBytes              []byte            `json:"-"`
 }
 
 type ProofRecord struct {
@@ -122,6 +145,36 @@ type NativeResult struct {
 	Err      error
 }
 
+type PhaseTimings struct {
+	ClassifyMS          float64 `json:"classify_ms"`
+	RepoRootLookupMS    float64 `json:"repo_root_lookup_ms"`
+	WorldStateLookupMS  float64 `json:"world_state_lookup_ms"`
+	EpochCheckMS        float64 `json:"epoch_check_ms"`
+	LedgerLookupMS      float64 `json:"ledger_lookup_ms"`
+	OutputMaterializeMS float64 `json:"output_materialize_ms"`
+	EventAppendMS       float64 `json:"event_append_ms"`
+	DBOrFileWriteMS     float64 `json:"db_or_file_write_ms"`
+	LockWaitMS          float64 `json:"lock_wait_ms"`
+	ShadowBookkeepingMS float64 `json:"shadow_bookkeeping_ms"`
+	FallbackDecisionMS  float64 `json:"fallback_decision_ms"`
+	NativeExecWaitMS    float64 `json:"native_exec_wait_ms"`
+}
+
+func (p PhaseTimings) TotalMS() float64 {
+	return p.ClassifyMS +
+		p.RepoRootLookupMS +
+		p.WorldStateLookupMS +
+		p.EpochCheckMS +
+		p.LedgerLookupMS +
+		p.OutputMaterializeMS +
+		p.EventAppendMS +
+		p.DBOrFileWriteMS +
+		p.LockWaitMS +
+		p.ShadowBookkeepingMS +
+		p.FallbackDecisionMS +
+		p.NativeExecWaitMS
+}
+
 type RunResult struct {
 	Stdout      []byte
 	Stderr      []byte
@@ -132,4 +185,5 @@ type RunResult struct {
 	Proof       *ProofRecord
 	Diagnostics []string
 	NativeWall  time.Duration
+	Phases      PhaseTimings
 }
