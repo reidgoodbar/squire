@@ -56,6 +56,52 @@ func TestHelpTextDoesNotInterceptCommandHelpAfterDelimiter(t *testing.T) {
 	}
 }
 
+func TestKernelUsageError(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing subcommand", args: nil, want: "missing kernel subcommand"},
+		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown kernel subcommand "stats"`},
+		{name: "bad status option", args: []string{"status", "--json"}, want: `unknown kernel status option "--json"`},
+		{name: "missing run delimiter", args: []string{"run"}, want: "requires -- before the command"},
+		{name: "bad warm option", args: []string{"warm", "--short"}, want: `does not accept option "--short"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := kernelUsageError(tt.args)
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("kernelUsageError(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBoostUsageError(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing subcommand", args: nil, want: "missing boost subcommand"},
+		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown boost subcommand "stats"`},
+		{name: "bad status option", args: []string{"status", "--json"}, want: `does not accept option "--json"`},
+		{name: "missing bench target", args: []string{"bench"}, want: "missing boost bench target"},
+		{name: "bad bench target", args: []string{"bench", "all"}, want: `unknown boost bench target "all"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := boostUsageError(tt.args)
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("boostUsageError(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommandAfterDelimiter(t *testing.T) {
 	argv, err := commandAfterDelimiter("squire kernel run", []string{"--", "git", "status", "--short"})
 	if err != nil {

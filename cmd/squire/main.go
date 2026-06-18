@@ -86,6 +86,12 @@ func main() {
 		if err == nil {
 			out = deepLocalBenchOut(report, format)
 		}
+	case args[0] == "kernel":
+		fatalUsage(kernelUsageError(args[1:]))
+		os.Exit(2)
+	case args[0] == "boost":
+		fatalUsage(boostUsageError(args[1:]))
+		os.Exit(2)
 	default:
 		fatalUsage(fmt.Sprintf("unknown command %q", args[0]))
 		os.Exit(2)
@@ -104,6 +110,51 @@ func usage() {
 func fatalUsage(message string) {
 	fmt.Fprintf(os.Stderr, "error: %s\n\n", message)
 	usage()
+}
+
+func kernelUsageError(args []string) string {
+	if len(args) == 0 {
+		return `missing kernel subcommand (try "squire help kernel")`
+	}
+	switch args[0] {
+	case "status":
+		if len(args) > 1 {
+			return fmt.Sprintf("unknown kernel status option %q (valid: --short)", args[1])
+		}
+	case "run":
+		return "squire kernel run requires -- before the command"
+	case "warm":
+		if len(args) > 1 {
+			return fmt.Sprintf("squire kernel warm does not accept option %q", args[1])
+		}
+	case "maintain":
+		return `invalid kernel maintain usage (try "squire help kernel maintain")`
+	case "prewarm-adjacent":
+		return "squire kernel prewarm-adjacent requires -- before the command"
+	default:
+		return fmt.Sprintf(`unknown kernel subcommand %q (try "squire help kernel")`, args[0])
+	}
+	return `invalid kernel command (try "squire help kernel")`
+}
+
+func boostUsageError(args []string) string {
+	if len(args) == 0 {
+		return `missing boost subcommand (try "squire help boost")`
+	}
+	switch args[0] {
+	case "status":
+		if len(args) > 1 {
+			return fmt.Sprintf("squire boost status does not accept option %q", args[1])
+		}
+	case "bench":
+		if len(args) == 1 {
+			return "missing boost bench target (valid: repo-metadata, deep-local)"
+		}
+		return fmt.Sprintf("unknown boost bench target %q (valid: repo-metadata, deep-local)", args[1])
+	default:
+		return fmt.Sprintf(`unknown boost subcommand %q (try "squire help boost")`, args[0])
+	}
+	return `invalid boost command (try "squire help boost")`
 }
 
 func usageText() string {
