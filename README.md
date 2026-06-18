@@ -21,11 +21,11 @@ hot-prepared deterministic read-only discovery operations."
 ## Quickstart (first-use)
 
 1. Initialize local state: `squire setup`
-2. Start the resident maintainer: `squire kernel maintain --background`
-3. Prime the current repo once: `squire kernel warm`
+2. Start the resident maintainer: `squire kernel maintain --background --short`
+3. Prime the current repo once: `squire kernel warm --short`
 4. Run an agent-chosen command through the kernel:
    - `squire kernel run -- git rev-parse HEAD`
-5. Check status and enabled fast paths: `squire kernel status`
+5. Check readiness and enabled fast paths: `squire kernel status --short`
 
 ## Scope
 
@@ -82,7 +82,7 @@ Level 2, Transparent Fast Path:
 - Prints privacy mode.
 - Does not install global command shims by default.
 
-`squire kernel status`
+`squire kernel status [--short]`
 
 - Shows repo oracle status.
 - Shows world state and invalidation epochs.
@@ -92,6 +92,7 @@ Level 2, Transparent Fast Path:
 - Shows the mmap virtual workspace snapshot descriptor counts and payload size.
 - Shows background maintainer process status when started.
 - Shows observe-only process guard diagnostics.
+- Use `--short` for a one-screen readiness view.
 
 `squire kernel run -- <command> [args...]`
 
@@ -108,7 +109,7 @@ Level 2, Transparent Fast Path:
   future file-inspection commands replayable unless exact local proof and output
   bytes are available.
 
-`squire kernel warm`
+`squire kernel warm [--short|--json]`
 
 - Prepares local world state for likely future operations.
 - Precomputes exact outputs only for the existing enabled metadata fast paths.
@@ -126,6 +127,8 @@ Level 2, Transparent Fast Path:
 - Records hash-only ecosystem metadata groups around manifests and lockfiles.
 - Does not add replay operators, suggest commands, alter prompts, or expose
   agent-visible guidance.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable summary.
 
 `squire kernel warm` is deterministic environment optimization. It uses idle
 local time to prepare proofs and indexes that may be useful if the agent later
@@ -136,15 +139,17 @@ Process guard telemetry is observe-only. Squire may report local process/FD
 diagnostics in status surfaces, but it never kills processes, closes file
 descriptors, or mutates the process tree.
 
-`squire kernel maintain --once`
+`squire kernel maintain --once [--short|--json]`
 
 - Runs one bounded resident-maintainer cycle.
 - Refreshes repo/world state.
 - Invalidates by changed world/proof signals.
 - Prewarms enabled fast paths and proof-gated read-only discovery outputs.
 - Does not expose suggestions to the agent.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable summary.
 
-`squire kernel maintain --duration <duration>`
+`squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]`
 
 - Runs the same maintainer loop until the duration expires.
 - Polls with a bounded interval.
@@ -152,7 +157,7 @@ descriptors, or mutates the process tree.
 - Rewarms when HEAD, config, index, workspace, manifest, PATH, environment, or
   executable identity signals change.
 
-`squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]`
+`squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]`
 
 - Starts the same maintainer loop in a separate local process.
 - Writes PID/status/log metadata into the local store.
@@ -162,36 +167,47 @@ descriptors, or mutates the process tree.
   window instead of adding command-path latency.
 - A second start detects the already-running maintainer and does not spawn a
   duplicate process.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable start/status summary.
 
-`squire kernel maintain --background-status`
+`squire kernel maintain --background-status [--short|--json]`
 
 - Shows whether the separate maintainer process is running.
 - Shows PID, store path, hot-cache socket path, status path, and log path when
   available.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable status.
 
-`squire kernel maintain --stop`
+`squire kernel maintain --stop [--short|--json]`
 
 - Requests termination of the separate maintainer process.
 - Does not kill unrelated processes.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable stop result.
 
-`squire boost status`
+`squire boost status [--short|--json]`
 
 - Shows enabled accelerators, replacements, fallbacks, mismatches,
   invalidations, and ROI history when available.
+- Human-readable output is the default. Use `--json` for automation.
 
-`squire boost bench repo-metadata`
+`squire boost bench repo-metadata [--short|--json]`
 
 - Runs a local scoped benchmark for enabled repo metadata fast paths.
 - Reports exactness, mutation-boundary invalidation, workload-only wall delta,
   and net ROI.
 - Makes no broad Codex speedup claim.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable summary.
 
-`squire boost bench deep-local`
+`squire boost bench deep-local [--short|--json]`
 
 - Runs a deeper local benchmark with synthetic repo updates and branch changes.
 - Reports metadata, proof-gated replay, native-only discovery, and validation
   metrics separately.
 - Reports performance budget checks and makes no broad Codex speedup claim.
+- JSON is the default output for automation. Use `--short` for a compact
+  human-readable summary.
 
 ## CI And Nightly
 

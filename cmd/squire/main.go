@@ -195,10 +195,10 @@ principles:
 
 first use:
   squire setup
-  squire kernel maintain --background
-  squire kernel warm
+  squire kernel maintain --background --short
+  squire kernel warm --short
   squire kernel run -- git rev-parse HEAD
-  squire kernel status
+  squire kernel status --short
 
 help:
   squire help kernel run

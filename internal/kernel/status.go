@@ -58,7 +58,7 @@ func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	fmt.Fprintf(&b, "repo_oracle: %s\n", availability(ws.OracleAvailable))
 	fmt.Fprintf(&b, "repo_root: %s\n", ws.RepoRoot)
 	fmt.Fprintln(&b, "global_shims: not installed")
-	fmt.Fprintln(&b, "next: squire kernel maintain --background")
+	fmt.Fprintln(&b, "next: squire kernel maintain --background --short")
 	fmt.Fprintln(&b, "try: squire kernel run -- git rev-parse HEAD")
 	return b.String(), nil
 }
@@ -81,7 +81,7 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	fmt.Fprintln(&b, "  native_fallback: available")
 	fmt.Fprintln(&b, "  runtime_decisions: replay_or_native")
 	fmt.Fprintln(&b, "  agent_visible_suggestions: false")
-	fmt.Fprintln(&b, "  background_hint: squire kernel maintain --background")
+	fmt.Fprintln(&b, "  background_hint: squire kernel maintain --background --short")
 	fmt.Fprintln(&b, "repo_oracle:", availability(ws.OracleAvailable))
 	fmt.Fprintln(&b, "current_repo_oracle_state:")
 	fmt.Fprintln(&b, indent(string(js)))
@@ -244,7 +244,7 @@ func KernelStatusSummary(ctx context.Context, cwd, storeRoot string) (string, er
 		fmt.Fprintln(&b, "latest_benchmark: none")
 	}
 	if readiness != "hot" {
-		fmt.Fprintln(&b, "next: squire kernel maintain --background")
+		fmt.Fprintln(&b, "next: squire kernel maintain --background --short")
 	}
 	return b.String(), nil
 }
