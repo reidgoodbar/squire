@@ -1,0 +1,203 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v0.1.0-beta.1"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      INPUT_VERSION: ${{ github.event.inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare writable Go cache
+        run: mkdir -p "$GOCACHE" artifacts .tmp
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Build release candidate binary
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [ -z "$version" ]; then
+            echo "release version is required" >&2
+            exit 2
+          fi
+          date_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          commit="$(git rev-parse --short HEAD)"
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -X main.buildVersion=$version -X main.buildCommit=$commit -X main.buildDate=$date_utc" \
+            -o .tmp/squire \
+            ./cmd/squire
+          .tmp/squire version
+          .tmp/squire version --json
+
+      - name: Repo metadata benchmark
+        run: .tmp/squire boost bench repo-metadata | tee artifacts/repo-metadata.json
+
+      - name: Deep local benchmark
+        run: .tmp/squire boost bench deep-local | tee artifacts/deep-local.json
+
+      - name: Release smoke
+        run: scripts/release_smoke.sh .tmp/squire
+
+      - name: Edge stress
+        run: scripts/edge_stress.py .tmp/squire | tee artifacts/edge-stress.txt
+
+      - name: Assert release safety gates
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          repo = json.loads(Path("artifacts/repo-metadata.json").read_text())
+          deep = json.loads(Path("artifacts/deep-local.json").read_text())
+          failures = []
+
+          if not repo.get("exactness"):
+              failures.append("repo metadata exactness failed")
+          if not repo.get("mutation_boundary_invalidation"):
+              failures.append("repo metadata mutation-boundary invalidation not observed")
+          if repo.get("mismatches") not in (0, None):
+              failures.append("repo metadata mismatches observed")
+
+          if not deep.get("enabled_fast_path_exactness"):
+              failures.append("enabled fast path exactness failed")
+          if deep.get("enabled_fast_path_mismatches") != 0:
+              failures.append("enabled fast path mismatches observed")
+          if deep.get("incremental", {}).get("stale_head_replays") != 0:
+              failures.append("stale HEAD replay observed")
+          if deep.get("incremental", {}).get("stale_branch_replays") != 0:
+              failures.append("stale branch replay observed")
+          if deep.get("never_replay_diagnostics", {}).get("validation_replays") != 0:
+              failures.append("validation replay observed")
+          if not deep.get("safety_gates", {}).get("passed"):
+              failures.append("deep-local safety gates failed")
+
+          performance = deep.get("performance_gates", {})
+          print("performance_gates_status:", performance.get("status"))
+          print("performance_gates_violations:", performance.get("violations", []))
+
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-gate-reports
+          path: artifacts
+
+  build-artifacts:
+    needs: release-gate
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      INPUT_VERSION: ${{ github.event.inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p "$GOCACHE"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [ -z "$version" ]; then
+            echo "release version is required" >&2
+            exit 2
+          fi
+          export VERSION="$version"
+          COMMIT="$(git rev-parse --short HEAD)" \
+          DATE_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          scripts/build_release_artifacts.sh .tmp/release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: squire-kernel-release-artifacts
+          path: .tmp/release
+
+  publish:
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      INPUT_VERSION: ${{ github.event.inputs.version }}
+      INPUT_PRERELEASE: ${{ github.event.inputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: squire-kernel-release-artifacts
+          path: release
+
+      - name: Publish GitHub release
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [ -z "$version" ]; then
+            echo "release version is required" >&2
+            exit 2
+          fi
+          prerelease=false
+          case "$version" in
+            v0.*|*-alpha*|*-beta*|*-rc*)
+              prerelease=true
+              ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_PRERELEASE" = "true" ]; then
+            prerelease=true
+          fi
+          flags=""
+          if [ "$prerelease" = "true" ]; then
+            flags="--prerelease"
+          fi
+          if gh release view "$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$version" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$version" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Squire Kernel $version" \
+              --notes-file release/RELEASE_MANIFEST.txt \
+              $flags
+          fi

@@ -1,13 +1,90 @@
 # Squire Kernel v1
 
-Squire Kernel v1 is an active, transparent local kernel for agent-chosen
-operations. It preserves agent intent: models (for example, Codex or Claude)
-still decide what to do; Squire only serves exact, provable local outputs and
-falls back to native execution when proof is missing.
+Squire Kernel is a local performance layer for AI coding agents. The agent
+still chooses every command. Squire watches and warms the local workspace, then
+serves exact cached results for a small set of deterministic read-only
+operations only when it can prove the result is still valid. If proof is
+missing, stale, too expensive, or unsafe, the command runs natively.
 
-The core principle is:
+The project is built around one rule:
 
 > Agent chooses. Squire serves.
+
+In practice, Squire is useful because agents repeatedly ask the local machine
+the same questions while working: Git metadata, repo status, small source file
+reads, manifest reads, tool versions, and command-path probes. Squire keeps the
+local world warm so those repeated reads can return faster without changing
+stdout, stderr, exit codes, prompts, model routing, or final decisions.
+
+## What It Does
+
+- Maintains a live local model of the repository and workspace.
+- Prewarms safe read-only metadata and bounded file-inspection results.
+- Publishes a local mmap hot snapshot for exact foreground replays.
+- Replays only exact stdout, stderr, and exit code when the proof still matches.
+- Falls back to native execution whenever any proof or policy check fails.
+- Reports scoped benchmark and edge-stress evidence without broad speedup
+  claims.
+
+## What It Does Not Do
+
+- It does not add agent tools, inject MCP servers, change prompts, or route
+  models.
+- It does not suggest commands to the agent.
+- It does not replay validation, build, test, edit, package install, or
+  mutating commands.
+- It does not approximate command output semantically.
+- It does not make the mmap snapshot a literal kernel bypass; native filesystem
+  state remains authoritative.
+- It does not require OpenTelemetry. OTel is optional session metadata only.
+
+## Try It
+
+```sh
+squire setup
+squire kernel maintain --background --short
+squire kernel warm --short
+squire kernel run -- git rev-parse HEAD
+squire kernel status --short
+```
+
+For release checks:
+
+```sh
+go test ./...
+squire boost bench repo-metadata
+scripts/release_smoke.sh ./squire
+scripts/edge_stress.py ./squire
+```
+
+## GitHub Releases
+
+The repository includes GitHub Actions for release-quality testing and package
+publishing:
+
+- `ci.yml` runs fast tests, the repo metadata benchmark, and smoke checks on
+  pushes and pull requests.
+- `nightly.yml` runs the deeper baseline plus process-level edge stress.
+- `release.yml` runs the release gate, builds cross-platform archives, generates
+  `SHA256SUMS`, and creates or updates a GitHub Release.
+
+Create a release by pushing a `v*` tag or by running the `release` workflow
+manually:
+
+```sh
+git tag v0.1.0-beta.1
+git push origin v0.1.0-beta.1
+```
+
+Current releases should use the `v0.x.y-beta.N` shape and are published as
+GitHub prereleases. The workflow also marks any `v0.*`, `*-alpha*`, `*-beta*`,
+or `*-rc*` version as a prerelease.
+
+Local artifact builds use the same script as CI:
+
+```sh
+VERSION=v0.1.0-beta.1 scripts/build_release_artifacts.sh .tmp/release
+```
 
 This repository is the fresh kernel implementation. Deprecated report-first,
 wrapped-first, and trace-dashboard experiments have been removed from this
@@ -20,15 +97,6 @@ hot-prepared deterministic read-only discovery operations."
 
 Release readiness checks live in
 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
-
-## Quickstart (first-use)
-
-1. Initialize local state: `squire setup`
-2. Start the resident maintainer: `squire kernel maintain --background --short`
-3. Prime the current repo once: `squire kernel warm --short`
-4. Run an agent-chosen command through the kernel:
-   - `squire kernel run -- git rev-parse HEAD`
-5. Check readiness and enabled fast paths: `squire kernel status --short`
 
 ## Scope
 
@@ -249,6 +317,69 @@ diagnostics separately from enabled metadata fast-path exactness. Performance
 gates are reported with violations, but a current `needs_optimization` result
 does not fail nightly unless it also violates safety, invalidation, or
 never-replay boundaries.
+
+## Advanced
+
+This section is for implementers and operators who want to understand how the
+kernel stays transparent while still improving local command latency.
+
+### World State And Proofs
+
+Squire keeps a local world state model: repo root, HEAD, branch, Git directory,
+config/index fingerprints, workspace epochs, file content epochs, PATH/tool
+identity, and privacy-safe prepared metadata. Every replay candidate is keyed by
+the exact command, cwd, relevant environment/tool identity, and the proof inputs
+that can affect stdout, stderr, or exit code.
+
+A replay is allowed only when all proof elements match:
+
+- the operation key matches;
+- input fingerprints match;
+- the invalidation epoch is unchanged;
+- the operator is allowlisted or proof-gated;
+- exact output bytes are available locally;
+- stdout, stderr, and exit code are exact;
+- native fallback is available.
+
+### Hot Replay Path
+
+The foreground CLI first checks a daemon-published mmap hot snapshot before it
+constructs the full kernel object, hydrates the ledger, or opens the socket hot
+cache. Snapshot descriptors are fixed-size records for exact command outputs and
+bounded workspace files. On a hit, Squire writes exact cached stdout/stderr and
+exits with the cached exit code. On any miss, stale proof, corrupt descriptor,
+permission error, or size violation, Squire runs the original command natively.
+
+The mmap snapshot is a local user-space optimization. It still uses ordinary OS
+memory mapping and still requires local invalidation proof; it is not a literal
+kernel bypass.
+
+### Background Maintainer
+
+`squire kernel maintain --background` runs the prewarm loop in a separate local
+process. That keeps repo scanning, proof construction, and eligible native
+prewarm commands off the foreground hot path. The maintainer publishes hot
+snapshots and status metadata, refreshes on changed proof signals, and avoids
+agent-visible suggestions.
+
+### Proof-Gated Replay
+
+Proof-gated replay is broader than the tiny Git metadata fast path but still
+conservative. It can cover hot-prepared read-only operations such as repo state,
+bounded `cat`, bounded `sed -n`, manifest reads, tool version probes, and
+command-path lookups. It does not cover validation, edits, mutating commands,
+package setup, sensitive file reads, shell aliases/functions, broad search, or
+network-dependent operations.
+
+### Edge-Stress Testing
+
+`scripts/edge_stress.py` runs process-level stress in fresh temp repos. It
+checks concurrent hot reads, mid-warm invalidation, interrupted clients,
+dynamic `.gitignore`, environment-key separation, multi-CWD proof separation,
+symlink boundaries, SIGPIPE/early exit, ANSI/control-byte fidelity, mtime skew,
+store write failures, EMFILE pressure, signal floods, oversized native fallback,
+and scoped child-process cleanup. These tests are intentionally local and
+fault-open: failures must not corrupt the cache or remove native fallback.
 
 ## Current Operator Sets
 

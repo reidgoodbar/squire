@@ -19,7 +19,7 @@ jobs:
           cache: true
 
       - name: Prepare writable Go cache
-        run: mkdir -p "$GOCACHE" artifacts
+        run: mkdir -p "$GOCACHE" artifacts .tmp
 
       - name: Unit tests
         run: go test ./...
@@ -29,6 +29,12 @@ jobs:
 
       - name: Deep local baseline
         run: go run ./cmd/squire boost bench deep-local | tee artifacts/deep-local.json
+
+      - name: Build nightly smoke binary
+        run: go build -o .tmp/squire ./cmd/squire
+
+      - name: Edge stress
+        run: scripts/edge_stress.py .tmp/squire | tee artifacts/edge-stress.txt
 
       - name: Assert deep-local gates
         run: |

@@ -39,6 +39,8 @@ Normal release checks:
 go test ./...
 go run ./cmd/squire boost bench repo-metadata
 go run ./cmd/squire boost bench deep-local
+scripts/release_smoke.sh ./squire
+scripts/edge_stress.py ./squire
 ```
 
 Required gates:
@@ -53,6 +55,64 @@ Required gates:
 
 Performance gates must be reported. A performance gate failure blocks a release
 only when the release claim depends on that budget.
+
+## GitHub Release Flow
+
+GitHub Actions provides three release surfaces:
+
+- `.github/workflows/ci.yml` runs fast tests, the repo metadata benchmark, and
+  release smoke on pushes and pull requests.
+- `.github/workflows/nightly.yml` runs the deeper baseline plus edge stress on
+  a schedule and manually.
+- `.github/workflows/release.yml` runs the release gate, builds artifacts, and
+  publishes a GitHub Release from either a `v*` tag or manual dispatch.
+
+To publish from a tag:
+
+```sh
+git tag v0.1.0-beta.1
+git push origin v0.1.0-beta.1
+```
+
+To publish manually, run the `release` workflow in GitHub Actions and provide
+the desired version, for example `v0.1.0-beta.1`.
+
+Current releases should use the `v0.x.y-beta.N` shape. The release workflow
+publishes `v0.*`, `*-alpha*`, `*-beta*`, and `*-rc*` versions as GitHub
+prereleases.
+
+The release workflow must pass before artifacts are published. It runs:
+
+- `go test ./...`
+- release-candidate build with version ldflags
+- `squire boost bench repo-metadata`
+- `squire boost bench deep-local`
+- `scripts/release_smoke.sh`
+- `scripts/edge_stress.py`
+- release safety-gate assertions
+
+The workflow then builds:
+
+- `linux/amd64`
+- `linux/arm64`
+- `darwin/amd64`
+- `darwin/arm64`
+- `windows/amd64`
+
+Each release includes `.tar.gz` archives, `SHA256SUMS`, and
+`RELEASE_MANIFEST.txt`. Verify downloaded artifacts with:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+# or, on Linux:
+sha256sum -c SHA256SUMS
+```
+
+Local artifact builds use the same script as GitHub:
+
+```sh
+VERSION=v0.1.0-beta.1 scripts/build_release_artifacts.sh .tmp/release
+```
 
 ## Dogfood Smoke
 
