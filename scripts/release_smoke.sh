@@ -18,13 +18,23 @@ case "$squire_bin" in
     squire_abs_dir=$(cd "$squire_dir" && pwd -P)
     squire_bin="$squire_abs_dir/$squire_base"
     ;;
+  *)
+    resolved_squire_bin=$(command -v "$squire_bin" || true)
+    if [ -z "$resolved_squire_bin" ]; then
+      echo "release smoke failed: squire binary not found on PATH: $squire_bin" >&2
+      exit 2
+    fi
+    squire_bin="$resolved_squire_bin"
+    ;;
 esac
 if [ ! -x "$squire_bin" ]; then
   echo "release smoke failed: squire binary is not executable: $squire_bin" >&2
   exit 2
 fi
 
-tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/squire-release-smoke.XXXXXX")
+tmp_parent=${TMPDIR:-/tmp}
+tmp_parent=${tmp_parent%/}
+tmpdir=$(mktemp -d "$tmp_parent/squire-release-smoke.XXXXXX")
 stopped=0
 
 cleanup() {
