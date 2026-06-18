@@ -56,6 +56,12 @@ only when the release claim depends on that budget.
 
 ## Dogfood Smoke
 
+Use the scripted smoke when possible:
+
+```sh
+scripts/release_smoke.sh ./squire
+```
+
 Run the release binary through a fresh local repo:
 
 ```sh
