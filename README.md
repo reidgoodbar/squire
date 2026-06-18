@@ -235,11 +235,14 @@ Normal CI stays fast:
 - `squire boost bench repo-metadata`
 - `scripts/release_smoke.sh .tmp/squire`
 
-The nightly/manual workflow runs the default `deep-local` profile and asserts:
+The nightly/manual workflow runs the default `deep-local` profile plus
+process-level edge stress when hot replay, prewarming, invalidation, or
+maintainer lifecycle code changes:
 
 - safety gates
 - invalidation gates
 - native-only discovery boundary reporting
+- `scripts/edge_stress.py .tmp/squire`
 
 Nightly reports repo-summary proof-gated diagnostics and native-only discovery
 diagnostics separately from enabled metadata fast-path exactness. Performance

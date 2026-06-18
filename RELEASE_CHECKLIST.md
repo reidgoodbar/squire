@@ -62,6 +62,23 @@ Use the scripted smoke when possible:
 scripts/release_smoke.sh ./squire
 ```
 
+Run the process-level edge stress suite before release candidates that touch
+hot replay, prewarming, invalidation, or maintainer lifecycle code:
+
+```sh
+scripts/edge_stress.py ./squire
+```
+
+Expected behavior:
+
+- Concurrent identical hot requests preserve exact output and report hot replay
+  p50/p95/max timing.
+- Mid-warm workspace mutations never replay stale file bytes.
+- Interrupted foreground clients leave the resident maintainer healthy, with
+  file-descriptor counts flat when the platform exposes them.
+- Dynamic `.gitignore` changes invalidate stale status output.
+- Environment-sensitive path discovery keeps distinct PATH footprints separate.
+
 Run the release binary through a fresh local repo:
 
 ```sh
