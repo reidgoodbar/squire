@@ -60,8 +60,17 @@ func main() {
 		}
 	case len(args) >= 2 && args[0] == "kernel" && args[1] == "maintain":
 		out, err = runMaintain(ctx, cwd, storeRoot, args[2:])
-	case len(args) == 2 && args[0] == "boost" && args[1] == "status":
-		out, err = kernel.BoostStatus(ctx, cwd, storeRoot)
+	case len(args) >= 2 && args[0] == "boost" && args[1] == "status":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[2:], outputShort)
+		if err != nil {
+			break
+		}
+		var report kernel.BoostStatusReport
+		report, err = kernel.BoostStatusReportForStore(ctx, cwd, storeRoot)
+		if err == nil {
+			out = boostStatusOut(report, format)
+		}
 	case len(args) >= 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "repo-metadata":
 		var format outputFormat
 		format, err = outputFormatFromTrailingArgs(args[3:])
@@ -174,7 +183,7 @@ usage:
   squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
   squire kernel maintain --background-status [--short|--json]
   squire kernel maintain --stop [--short|--json]
-  squire boost status
+  squire boost status [--short|--json]
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
 
@@ -265,13 +274,14 @@ human-readable status.
 `
 	case "boost":
 		return `usage:
-  squire boost status
+  squire boost status [--short|--json]
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
 
 Shows local acceleration counters and runs scoped benchmarks. Benchmarks make
-no broad Codex speedup claim. JSON is the default output for automation; use
---short for a compact human-readable summary.
+no broad Codex speedup claim. Benchmark JSON is the default output for
+automation; use --short for a compact human-readable summary. Boost status is
+human-readable by default; use --json for automation.
 `
 	default:
 		return usageText()
@@ -462,6 +472,13 @@ func splitOutputFormatFlag(args []string) ([]string, outputFormat, error) {
 }
 
 func outputFormatFromTrailingArgs(args []string) (outputFormat, error) {
+	return outputFormatFromTrailingArgsDefault(args, outputJSON)
+}
+
+func outputFormatFromTrailingArgsDefault(args []string, def outputFormat) (outputFormat, error) {
+	if len(args) == 0 {
+		return def, nil
+	}
 	remaining, format, err := splitOutputFormatFlag(args)
 	if err != nil {
 		return outputJSON, err
@@ -583,6 +600,13 @@ func warmReportOut(report kernel.WarmReport, format outputFormat) string {
 		fmt.Fprintf(&b, "note: %s\n", note)
 	}
 	return b.String()
+}
+
+func boostStatusOut(report kernel.BoostStatusReport, format outputFormat) string {
+	if format == outputJSON {
+		return jsonOut(report)
+	}
+	return kernel.FormatBoostStatusReport(report)
 }
 
 func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string {

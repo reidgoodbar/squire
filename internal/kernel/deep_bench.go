@@ -324,6 +324,9 @@ func runBenchCommand(ctx context.Context, k *Kernel, repo string, argv []string,
 		}
 		if cmp == compareExact && (native.ExitCode != squire.ExitCode || string(native.Stdout) != string(squire.Stdout) || string(native.Stderr) != string(squire.Stderr)) {
 			metrics.ExactMismatches++
+			metrics.ShadowMismatchCategories = mergeIntMaps(metrics.ShadowMismatchCategories, map[string]int{
+				benchMismatchCategory(argv, native, squire): 1,
+			})
 		}
 		switch squire.Mode {
 		case ModeReplay:
@@ -344,6 +347,31 @@ func runBenchCommand(ctx context.Context, k *Kernel, repo string, argv []string,
 	}
 	metrics.WorkloadDeltaUS = metrics.NativeWallUS - metrics.SquireWallUS
 	return metrics
+}
+
+func benchMismatchCategory(argv []string, native NativeResult, squire RunResult) string {
+	if native.ExitCode != squire.ExitCode {
+		return "exit_code"
+	}
+	if string(native.Stderr) != string(squire.Stderr) {
+		return "stderr"
+	}
+	if len(argv) >= 2 && argv[0] == "rg" && argv[1] == "--files" {
+		return "rg_files_semantics"
+	}
+	if len(argv) >= 1 && argv[0] == "rg" {
+		return "rg_semantics"
+	}
+	if len(argv) >= 2 && argv[0] == "git" && argv[1] == "status" {
+		return "git_status_semantics"
+	}
+	if len(argv) >= 2 && argv[0] == "git" && argv[1] == "ls-files" {
+		return "git_ls_files_semantics"
+	}
+	if len(argv) >= 2 && argv[0] == "git" && argv[1] == "diff" {
+		return "git_diff_semantics"
+	}
+	return "stdout"
 }
 
 func runDeepIncremental(ctx context.Context, k *Kernel, repo string, opts DeepBenchOptions, metadataCommands, validationCommands [][]string, samples *benchSamples) IncrementalBenchMetrics {

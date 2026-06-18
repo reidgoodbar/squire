@@ -30,6 +30,21 @@ type LatestBenchmarkStatus struct {
 	ValidationReplays            int        `json:"validation_replays"`
 }
 
+type BoostStatusReport struct {
+	Claim                        string         `json:"claim"`
+	EnabledFastPaths             []string       `json:"enabled_fast_paths"`
+	ProofGatedReplayCandidates   []string       `json:"proof_gated_replay_candidates"`
+	Replays                      int            `json:"replays"`
+	NativeFallbacks              int            `json:"native_fallbacks"`
+	DiagnosticMismatches         int            `json:"diagnostic_mismatches"`
+	DiagnosticMismatchCategories map[string]int `json:"diagnostic_mismatch_categories,omitempty"`
+	DiagnosticSampleSkips        int            `json:"diagnostic_sample_skips"`
+	Invalidations                string         `json:"invalidations"`
+	ROIHistoryMS                 []int64        `json:"roi_history_ms,omitempty"`
+	NativeFallbackAvailable      bool           `json:"native_fallback_available"`
+	RuntimeDecisions             string         `json:"runtime_decisions"`
+}
+
 func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	k := New(storeRoot)
 	if err := k.Store.Init(); err != nil {
@@ -311,43 +326,62 @@ func preparedCounts(entries []PreparedEntry) (fastPathOutputs, proofGatedOutputs
 }
 
 func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
+	report, err := BoostStatusReportForStore(ctx, cwd, storeRoot)
+	if err != nil {
+		return "", err
+	}
+	return FormatBoostStatusReport(report), nil
+}
+
+func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (BoostStatusReport, error) {
 	_ = ctx
 	_ = cwd
 	store := NewLedgerStore(storeRoot)
 	_ = store.Init()
 	ledger, err := store.Load()
 	if err != nil {
-		return "", err
+		return BoostStatusReport{}, err
 	}
-	var replays, fallbacks, mismatches, diagnosticSkips int
-	categories := map[string]int{}
-	var roi []int64
+	report := BoostStatusReport{
+		Claim:                      scopedKernelClaim,
+		EnabledFastPaths:           EnabledFastPaths(),
+		ProofGatedReplayCandidates: ProofGatedReplayCandidates(),
+		Invalidations:              "derived from epoch mismatch",
+		NativeFallbackAvailable:    true,
+		RuntimeDecisions:           "replay_or_native",
+	}
 	for _, e := range ledger.Entries {
-		replays += e.ReplacementCount
-		fallbacks += e.FallbackCount
-		mismatches += e.ShadowMismatchCount
-		diagnosticSkips += e.ShadowSkipCount
-		categories = mergeIntMaps(categories, e.ShadowMismatchCategories)
-		roi = append(roi, e.NetROIHistoryMS...)
+		report.Replays += e.ReplacementCount
+		report.NativeFallbacks += e.FallbackCount
+		report.DiagnosticMismatches += e.ShadowMismatchCount
+		report.DiagnosticSampleSkips += e.ShadowSkipCount
+		report.DiagnosticMismatchCategories = mergeIntMaps(report.DiagnosticMismatchCategories, e.ShadowMismatchCategories)
+		report.ROIHistoryMS = append(report.ROIHistoryMS, e.NetROIHistoryMS...)
 	}
+	return report, nil
+}
+
+func FormatBoostStatusReport(report BoostStatusReport) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire Kernel acceleration status")
 	fmt.Fprintln(&b, "enabled_fast_paths:")
-	for _, item := range EnabledFastPaths() {
+	for _, item := range report.EnabledFastPaths {
 		fmt.Fprintln(&b, "  -", item)
 	}
 	fmt.Fprintln(&b, "proof_gated_replay_candidates:")
-	for _, item := range ProofGatedReplayCandidates() {
+	for _, item := range report.ProofGatedReplayCandidates {
 		fmt.Fprintln(&b, "  -", item)
 	}
-	fmt.Fprintf(&b, "replays: %d\n", replays)
-	fmt.Fprintf(&b, "native_fallbacks: %d\n", fallbacks)
-	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", mismatches)
-	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", categories)
-	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", diagnosticSkips)
-	fmt.Fprintf(&b, "invalidations: derived from epoch mismatch\n")
-	fmt.Fprintf(&b, "roi_history_ms: %v\n", roi)
-	return b.String(), nil
+	fmt.Fprintf(&b, "replays: %d\n", report.Replays)
+	fmt.Fprintf(&b, "native_fallbacks: %d\n", report.NativeFallbacks)
+	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", report.DiagnosticMismatches)
+	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", report.DiagnosticMismatchCategories)
+	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", report.DiagnosticSampleSkips)
+	fmt.Fprintf(&b, "invalidations: %s\n", report.Invalidations)
+	fmt.Fprintf(&b, "native_fallback_available: %t\n", report.NativeFallbackAvailable)
+	fmt.Fprintf(&b, "runtime_decisions: %s\n", report.RuntimeDecisions)
+	fmt.Fprintf(&b, "roi_history_ms: %v\n", report.ROIHistoryMS)
+	return b.String()
 }
 
 func (s *LedgerStore) SaveLatestBenchmarkStatus(status LatestBenchmarkStatus) error {

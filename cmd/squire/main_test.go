@@ -87,7 +87,7 @@ func TestBoostUsageError(t *testing.T) {
 	}{
 		{name: "missing subcommand", args: nil, want: "missing boost subcommand"},
 		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown boost subcommand "stats"`},
-		{name: "bad status option", args: []string{"status", "--json"}, want: `does not accept option "--json"`},
+		{name: "bad status option", args: []string{"status", "--bogus"}, want: `does not accept option "--bogus"`},
 		{name: "missing bench target", args: []string{"bench"}, want: "missing boost bench target"},
 		{name: "bad bench target", args: []string{"bench", "all"}, want: `unknown boost bench target "all"`},
 	}
@@ -160,6 +160,55 @@ func TestOutputFormatFromTrailingArgs(t *testing.T) {
 	}
 	if _, err := outputFormatFromTrailingArgs([]string{"--bogus"}); err == nil {
 		t.Fatalf("outputFormatFromTrailingArgs accepted unknown option")
+	}
+
+	format, err = outputFormatFromTrailingArgsDefault(nil, outputShort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != outputShort {
+		t.Fatalf("default format = %v, want outputShort", format)
+	}
+}
+
+func TestBoostStatusOutputFormats(t *testing.T) {
+	report := kernel.BoostStatusReport{
+		Claim:                        "scoped",
+		EnabledFastPaths:             []string{"git rev-parse HEAD"},
+		ProofGatedReplayCandidates:   []string{"cat <bounded workspace source/config file>"},
+		Replays:                      3,
+		NativeFallbacks:              2,
+		DiagnosticMismatches:         1,
+		DiagnosticMismatchCategories: map[string]int{"ordering": 1},
+		DiagnosticSampleSkips:        4,
+		Invalidations:                "derived from epoch mismatch",
+		ROIHistoryMS:                 []int64{5, 6},
+		NativeFallbackAvailable:      true,
+		RuntimeDecisions:             "replay_or_native",
+	}
+	text := boostStatusOut(report, outputShort)
+	for _, want := range []string{
+		"Squire Kernel acceleration status",
+		"git rev-parse HEAD",
+		"replays: 3",
+		"native_fallbacks: 2",
+		"native_fallback_available: true",
+		"runtime_decisions: replay_or_native",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("boost short output missing %q:\n%s", want, text)
+		}
+	}
+	json := boostStatusOut(report, outputJSON)
+	for _, want := range []string{
+		`"claim": "scoped"`,
+		`"replays": 3`,
+		`"native_fallback_available": true`,
+		`"runtime_decisions": "replay_or_native"`,
+	} {
+		if !strings.Contains(json, want) {
+			t.Fatalf("boost json output missing %q:\n%s", want, json)
+		}
 	}
 }
 
