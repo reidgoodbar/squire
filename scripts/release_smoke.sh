@@ -4,12 +4,24 @@ set -eu
 squire_bin="${1:-${SQUIRE_BIN:-}}"
 if [ -z "$squire_bin" ]; then
   if command -v squire >/dev/null 2>&1; then
-    squire_bin="squire"
+    squire_bin=$(command -v squire)
   else
     echo "usage: scripts/release_smoke.sh /path/to/squire" >&2
     echo "or set SQUIRE_BIN=/path/to/squire" >&2
     exit 2
   fi
+fi
+case "$squire_bin" in
+  */*)
+    squire_dir=$(dirname "$squire_bin")
+    squire_base=$(basename "$squire_bin")
+    squire_abs_dir=$(cd "$squire_dir" && pwd -P)
+    squire_bin="$squire_abs_dir/$squire_base"
+    ;;
+esac
+if [ ! -x "$squire_bin" ]; then
+  echo "release smoke failed: squire binary is not executable: $squire_bin" >&2
+  exit 2
 fi
 
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/squire-release-smoke.XXXXXX")

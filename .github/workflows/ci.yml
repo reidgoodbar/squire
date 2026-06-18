@@ -28,3 +28,8 @@ jobs:
       - name: Repo metadata benchmark
         run: go run ./cmd/squire boost bench repo-metadata
 
+      - name: Release smoke
+        run: |
+          mkdir -p .tmp
+          go build -o .tmp/squire ./cmd/squire
+          scripts/release_smoke.sh .tmp/squire
