@@ -46,6 +46,7 @@ func main() {
 	var out string
 	switch {
 	case len(args) == 1 && args[0] == "setup":
+		enableSquireOwnedGitReads()
 		out, err = kernel.Setup(ctx, cwd, storeRoot)
 	case len(args) >= 1 && args[0] == "version":
 		var format outputFormat
@@ -55,6 +56,7 @@ func main() {
 		}
 		out = versionOut(format)
 	case len(args) >= 3 && args[0] == "kernel" && args[1] == "prewarm-adjacent":
+		enableSquireOwnedGitReads()
 		err = runAdjacentPrewarm(ctx, cwd, storeRoot, args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -65,10 +67,13 @@ func main() {
 		runKernelCommand(ctx, cwd, storeRoot, args[2:])
 		return
 	case len(args) == 2 && args[0] == "kernel" && args[1] == "status":
+		enableSquireOwnedGitReads()
 		out, err = kernel.KernelStatus(ctx, cwd, storeRoot)
 	case len(args) == 3 && args[0] == "kernel" && args[1] == "status" && args[2] == "--short":
+		enableSquireOwnedGitReads()
 		out, err = kernel.KernelStatusSummary(ctx, cwd, storeRoot)
 	case len(args) >= 2 && args[0] == "kernel" && args[1] == "warm":
+		enableSquireOwnedGitReads()
 		var format outputFormat
 		format, err = outputFormatFromTrailingArgs(args[2:])
 		if err != nil {
@@ -80,6 +85,7 @@ func main() {
 			out = warmReportOut(report, format)
 		}
 	case len(args) >= 2 && args[0] == "kernel" && args[1] == "maintain":
+		enableSquireOwnedGitReads()
 		out, err = runMaintain(ctx, cwd, storeRoot, args[2:])
 	case len(args) >= 2 && args[0] == "boost" && args[1] == "status":
 		var format outputFormat
@@ -93,6 +99,7 @@ func main() {
 			out = boostStatusOut(report, format)
 		}
 	case len(args) >= 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "repo-metadata":
+		enableSquireOwnedGitReads()
 		var format outputFormat
 		format, err = outputFormatFromTrailingArgs(args[3:])
 		if err != nil {
@@ -107,6 +114,7 @@ func main() {
 			out = repoMetadataBenchOut(report, format)
 		}
 	case len(args) >= 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "deep-local":
+		enableSquireOwnedGitReads()
 		var format outputFormat
 		format, err = outputFormatFromTrailingArgs(args[3:])
 		if err != nil {
@@ -139,6 +147,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, usageText())
+}
+
+func enableSquireOwnedGitReads() {
+	_ = os.Setenv("GIT_OPTIONAL_LOCKS", "0")
 }
 
 func fatalUsage(message string) {
@@ -419,7 +431,7 @@ func startAdjacentPrewarmProcess(cwd, storeRoot, sessionID string, argv []string
 	args := append([]string{"kernel", "prewarm-adjacent", "--"}, argv...)
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_KERNEL_SESSION_ID="+sessionID)
+	cmd.Env = append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_KERNEL_SESSION_ID="+sessionID, "GIT_OPTIONAL_LOCKS=0")
 	if err := cmd.Start(); err != nil {
 		return
 	}

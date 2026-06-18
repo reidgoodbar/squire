@@ -390,6 +390,28 @@ func TestBackgroundMaintainerProcessLifecycle(t *testing.T) {
 	}
 }
 
+func TestDefaultBackgroundMaintainerDisablesOptionalGitLocks(t *testing.T) {
+	logFile, err := os.CreateTemp(t.TempDir(), "maintainer.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd, err := defaultBackgroundMaintainerCommand("/repo", "/store", BackgroundMaintainerOptions{Duration: time.Minute, PollInterval: time.Second}, logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range cmd.Env {
+		if item == "GIT_OPTIONAL_LOCKS=0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("background maintainer env missing GIT_OPTIONAL_LOCKS=0: %v", cmd.Env)
+	}
+}
+
 func TestBackgroundMaintainerHelperProcess(t *testing.T) {
 	if os.Getenv("SQUIRE_TEST_BACKGROUND_MAINTAINER") != "1" {
 		return

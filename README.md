@@ -144,6 +144,11 @@ local time to prepare proofs and indexes that may be useful if the agent later
 chooses matching operations. It does not predict commands in a way visible to
 the agent and does not change command execution.
 
+Squire-owned setup, status, warm, maintain, benchmark, and adjacent-prewarm Git
+reads run with `GIT_OPTIONAL_LOCKS=0` to avoid contending with planner commits
+in multi-agent workflows. `squire kernel run -- <command>` preserves the
+agent-chosen command environment for native fallback.
+
 Process guard telemetry is observe-only. Squire may report local process/FD
 diagnostics in status surfaces, but it never kills processes, closes file
 descriptors, or mutates the process tree.

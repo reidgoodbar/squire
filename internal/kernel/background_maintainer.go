@@ -214,7 +214,7 @@ func defaultBackgroundMaintainerCommand(cwd, storeRoot string, opts BackgroundMa
 	cmd.Stdout = log
 	cmd.Stderr = log
 	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, "SQUIRE_KERNEL_STORE_ROOT="+storeRoot)
+	cmd.Env = append(cmd.Env, "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "GIT_OPTIONAL_LOCKS=0")
 	return cmd, nil
 }
 
