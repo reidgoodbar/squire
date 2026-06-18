@@ -189,6 +189,45 @@ func TestRepoMetadataBenchShortOutput(t *testing.T) {
 	}
 }
 
+func TestWarmReportShortOutput(t *testing.T) {
+	report := kernel.WarmReport{
+		RepoRoot:                "/repo",
+		OracleAvailable:         true,
+		FastPathPrepared:        5,
+		ProofGatedPrewarmed:     7,
+		WarmFilesPrepared:       11,
+		FileTreeIndexesPrepared: 1,
+		ProjectMetadataPrepared: 2,
+		CommandPathPrepared:     1,
+		EcosystemPrepared:       3,
+		DependencyPrepared:      4,
+		SourceSymbolPrepared:    6,
+		Prepared:                []kernel.WarmPreparedReport{{Kind: "fast_path_output"}},
+		PrivacyMode:             "standard",
+		ReplaySetUnchanged:      true,
+		AgentVisibleSuggestions: false,
+		Notes:                   []string{"no prompt changes"},
+	}
+	text := warmReportOut(report, outputShort)
+	for _, want := range []string{
+		"Squire Kernel warm",
+		"repo_oracle: available",
+		"repo_root: /repo",
+		"fast_path_prepared: 5",
+		"proof_gated_prewarmed: 7",
+		"warm_files_prepared: 11",
+		"prepared_entries: 1",
+		"privacy_mode: standard",
+		"replay_set_unchanged: true",
+		"agent_visible_suggestions: false",
+		"note: no prompt changes",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("warm short output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestDeepLocalBenchShortOutput(t *testing.T) {
 	report := kernel.DeepBenchReport{
 		EnabledFastPathExactness:      true,

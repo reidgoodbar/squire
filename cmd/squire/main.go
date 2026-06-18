@@ -47,12 +47,16 @@ func main() {
 		out, err = kernel.KernelStatus(ctx, cwd, storeRoot)
 	case len(args) == 3 && args[0] == "kernel" && args[1] == "status" && args[2] == "--short":
 		out, err = kernel.KernelStatusSummary(ctx, cwd, storeRoot)
-	case len(args) == 2 && args[0] == "kernel" && args[1] == "warm":
+	case len(args) >= 2 && args[0] == "kernel" && args[1] == "warm":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgs(args[2:])
+		if err != nil {
+			break
+		}
 		var report kernel.WarmReport
 		report, err = kernel.Warm(ctx, cwd, storeRoot)
 		if err == nil {
-			b, _ := json.MarshalIndent(report, "", "  ")
-			out = string(b) + "\n"
+			out = warmReportOut(report, format)
 		}
 	case len(args) >= 2 && args[0] == "kernel" && args[1] == "maintain":
 		out, err = runMaintain(ctx, cwd, storeRoot, args[2:])
@@ -164,7 +168,7 @@ usage:
   squire setup
   squire kernel status [--short]
   squire kernel run -- <command> [args...]
-  squire kernel warm
+  squire kernel warm [--short|--json]
   squire kernel maintain --once [--short|--json]
   squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
   squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
@@ -239,11 +243,12 @@ it runs the original command natively.
 `
 	case "kernel warm":
 		return `usage:
-  squire kernel warm
+  squire kernel warm [--short|--json]
 
 Prepares local read-only proofs and hot outputs for later agent-chosen
 commands. It does not suggest commands, change prompts, mutate files, or skip
-native fallback.
+native fallback. JSON is the default output for automation; use --short for a
+compact human-readable summary.
 `
 	case "kernel maintain":
 		return `usage:
@@ -549,6 +554,35 @@ func parseBackgroundOptions(args []string) (kernel.BackgroundMaintainerOptions, 
 func jsonOut(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b) + "\n"
+}
+
+func warmReportOut(report kernel.WarmReport, format outputFormat) string {
+	if format != outputShort {
+		return jsonOut(report)
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel warm")
+	fmt.Fprintf(&b, "repo_oracle: %s\n", boolAvailability(report.OracleAvailable))
+	if report.RepoRoot != "" {
+		fmt.Fprintf(&b, "repo_root: %s\n", report.RepoRoot)
+	}
+	fmt.Fprintf(&b, "fast_path_prepared: %d\n", report.FastPathPrepared)
+	fmt.Fprintf(&b, "proof_gated_prewarmed: %d\n", report.ProofGatedPrewarmed)
+	fmt.Fprintf(&b, "warm_files_prepared: %d\n", report.WarmFilesPrepared)
+	fmt.Fprintf(&b, "file_tree_indexes_prepared: %d\n", report.FileTreeIndexesPrepared)
+	fmt.Fprintf(&b, "project_metadata_prepared: %d\n", report.ProjectMetadataPrepared)
+	fmt.Fprintf(&b, "command_path_prepared: %d\n", report.CommandPathPrepared)
+	fmt.Fprintf(&b, "ecosystem_prepared: %d\n", report.EcosystemPrepared)
+	fmt.Fprintf(&b, "dependency_metadata_prepared: %d\n", report.DependencyPrepared)
+	fmt.Fprintf(&b, "source_symbol_indexes_prepared: %d\n", report.SourceSymbolPrepared)
+	fmt.Fprintf(&b, "prepared_entries: %d\n", len(report.Prepared))
+	fmt.Fprintf(&b, "privacy_mode: %s\n", report.PrivacyMode)
+	fmt.Fprintf(&b, "replay_set_unchanged: %t\n", report.ReplaySetUnchanged)
+	fmt.Fprintf(&b, "agent_visible_suggestions: %t\n", report.AgentVisibleSuggestions)
+	for _, note := range report.Notes {
+		fmt.Fprintf(&b, "note: %s\n", note)
+	}
+	return b.String()
 }
 
 func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string {
