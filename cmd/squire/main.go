@@ -106,11 +106,11 @@ usage:
   squire kernel status [--short]
   squire kernel run -- <command> [args...]
   squire kernel warm
-  squire kernel maintain --once
-  squire kernel maintain --duration <duration>
-  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]
-  squire kernel maintain --background-status
-  squire kernel maintain --stop
+  squire kernel maintain --once [--short|--json]
+  squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
+  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
+  squire kernel maintain --background-status [--short|--json]
+  squire kernel maintain --stop [--short|--json]
   squire boost status
   squire boost bench repo-metadata
   squire boost bench deep-local
@@ -188,15 +188,16 @@ native fallback.
 `
 	case "kernel maintain":
 		return `usage:
-  squire kernel maintain --once
-  squire kernel maintain --duration <duration>
-  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]
-  squire kernel maintain --background-status
-  squire kernel maintain --stop
+  squire kernel maintain --once [--short|--json]
+  squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
+  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
+  squire kernel maintain --background-status [--short|--json]
+  squire kernel maintain --stop [--short|--json]
 
 Runs or manages the resident maintainer. The background mode keeps warm state
 fresh outside the foreground command-serving path. It is local, bounded, and
-fault-open.
+fault-open. JSON is the default output for automation; use --short for a compact
+human-readable status.
 `
 	case "boost":
 		return `usage:
@@ -324,6 +325,10 @@ func storeRootFor(cwd string) string {
 }
 
 func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (string, error) {
+	args, format, err := splitOutputFormatFlag(args)
+	if err != nil {
+		return "", err
+	}
 	switch {
 	case len(args) > 0 && args[0] == "--background":
 		opts, err := parseBackgroundOptions(args[1:])
@@ -334,19 +339,19 @@ func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (str
 		if err != nil {
 			return "", err
 		}
-		return jsonOut(status), nil
+		return backgroundStatusOut(status, format), nil
 	case len(args) == 1 && args[0] == "--background-status":
 		status, err := kernel.LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 		if err != nil {
 			return "", err
 		}
-		return jsonOut(status), nil
+		return backgroundStatusOut(status, format), nil
 	case len(args) == 1 && args[0] == "--stop":
 		status, err := kernel.StopBackgroundMaintainer(ctx, cwd, storeRoot)
 		if err != nil {
 			return "", err
 		}
-		return jsonOut(status), nil
+		return backgroundStatusOut(status, format), nil
 	default:
 		opts, err := parseForegroundOptions(args)
 		if err != nil {
@@ -356,8 +361,39 @@ func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (str
 		if err != nil {
 			return "", err
 		}
-		return jsonOut(report), nil
+		return maintainerReportOut(report, format), nil
 	}
+}
+
+type outputFormat int
+
+const (
+	outputJSON outputFormat = iota
+	outputShort
+)
+
+func splitOutputFormatFlag(args []string) ([]string, outputFormat, error) {
+	format := outputJSON
+	seenFormat := false
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "--short":
+			if seenFormat {
+				return nil, outputJSON, fmt.Errorf("only one output format may be specified")
+			}
+			seenFormat = true
+			format = outputShort
+		case "--json":
+			if seenFormat {
+				return nil, outputJSON, fmt.Errorf("only one output format may be specified")
+			}
+			seenFormat = true
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out, format, nil
 }
 
 func parseForegroundOptions(args []string) (kernel.MaintainerOptions, error) {
@@ -442,4 +478,94 @@ func parseBackgroundOptions(args []string) (kernel.BackgroundMaintainerOptions, 
 func jsonOut(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b) + "\n"
+}
+
+func backgroundStatusOut(status kernel.BackgroundMaintainerStatus, format outputFormat) string {
+	if format == outputShort {
+		return formatBackgroundStatusShort(status)
+	}
+	return jsonOut(status)
+}
+
+func maintainerReportOut(report kernel.MaintainerReport, format outputFormat) string {
+	if format == outputShort {
+		return formatMaintainerReportShort(report)
+	}
+	return jsonOut(report)
+}
+
+func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) string {
+	state := "stopped"
+	switch {
+	case status.AlreadyRunning:
+		state = "already_running"
+	case status.Started:
+		state = "started"
+	case status.Running:
+		state = "running"
+	case status.StopRequested && !status.Running:
+		state = "stopped"
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel maintainer")
+	fmt.Fprintf(&b, "status: %s\n", state)
+	fmt.Fprintf(&b, "running: %t\n", status.Running)
+	if status.PID > 0 {
+		fmt.Fprintf(&b, "pid: %d\n", status.PID)
+	}
+	if status.RepoRoot != "" {
+		fmt.Fprintf(&b, "repo_root: %s\n", status.RepoRoot)
+	}
+	fmt.Fprintf(&b, "store: %s\n", status.StoreRoot)
+	if status.Duration != "" {
+		fmt.Fprintf(&b, "duration: %s\n", status.Duration)
+	}
+	if status.PollInterval != "" {
+		fmt.Fprintf(&b, "poll_interval: %s\n", status.PollInterval)
+	}
+	fmt.Fprintf(&b, "native_fallback: %t\n", status.NativeFallbackAvailable)
+	fmt.Fprintf(&b, "agent_visible_suggestions: %t\n", status.AgentVisibleSuggestions)
+	if status.HotCacheSocket != "" {
+		fmt.Fprintf(&b, "hot_cache_socket: %s\n", status.HotCacheSocket)
+	}
+	if status.LogPath != "" {
+		fmt.Fprintf(&b, "log_path: %s\n", status.LogPath)
+	}
+	fmt.Fprintf(&b, "status_path: %s\n", status.StatusPath)
+	for _, diagnostic := range status.Diagnostics {
+		fmt.Fprintf(&b, "diagnostic: %s\n", diagnostic)
+	}
+	return b.String()
+}
+
+func formatMaintainerReportShort(report kernel.MaintainerReport) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel maintainer")
+	fmt.Fprintf(&b, "mode: %s\n", report.Mode)
+	fmt.Fprintf(&b, "repo_oracle: %s\n", boolAvailability(report.OracleAvailable))
+	if report.RepoRoot != "" {
+		fmt.Fprintf(&b, "repo_root: %s\n", report.RepoRoot)
+	}
+	fmt.Fprintf(&b, "poll_cycles: %d\n", report.PollCycles)
+	fmt.Fprintf(&b, "warm_cycles: %d\n", report.WarmCycles)
+	fmt.Fprintf(&b, "invalidations_observed: %d\n", report.InvalidationsObserved)
+	fmt.Fprintf(&b, "fast_path_prepared: %d\n", report.FastPathPrepared)
+	fmt.Fprintf(&b, "proof_gated_prewarmed: %d\n", report.ProofGatedPrewarmed)
+	fmt.Fprintf(&b, "prepared_entries_observed: %d\n", report.PreparedEntriesObserved)
+	fmt.Fprintf(&b, "native_fallback: %t\n", report.NativeFallbackAvailable)
+	fmt.Fprintf(&b, "agent_visible_suggestions: %t\n", report.AgentVisibleSuggestions)
+	if report.HotCacheSocket != "" {
+		fmt.Fprintf(&b, "hot_cache_socket: %s\n", report.HotCacheSocket)
+	}
+	for _, diagnostic := range report.Diagnostics {
+		fmt.Fprintf(&b, "diagnostic: %s\n", diagnostic)
+	}
+	return b.String()
+}
+
+func boolAvailability(ok bool) string {
+	if ok {
+		return "available"
+	}
+	return "unavailable"
 }

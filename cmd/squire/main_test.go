@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"squire.run/kernel/internal/kernel"
 )
 
 func TestUsageTextDocumentsKernelContract(t *testing.T) {
@@ -69,6 +72,101 @@ func TestCommandAfterDelimiter(t *testing.T) {
 	} {
 		if _, err := commandAfterDelimiter("squire kernel run", args); err == nil {
 			t.Fatalf("commandAfterDelimiter(%v) returned nil error", args)
+		}
+	}
+}
+
+func TestSplitOutputFormatFlag(t *testing.T) {
+	args, format, err := splitOutputFormatFlag([]string{"--background-status", "--short"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != outputShort {
+		t.Fatalf("format = %v, want outputShort", format)
+	}
+	if strings.Join(args, " ") != "--background-status" {
+		t.Fatalf("args = %q", strings.Join(args, " "))
+	}
+
+	args, format, err = splitOutputFormatFlag([]string{"--once", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != outputJSON {
+		t.Fatalf("format = %v, want outputJSON", format)
+	}
+	if strings.Join(args, " ") != "--once" {
+		t.Fatalf("args = %q", strings.Join(args, " "))
+	}
+
+	if _, _, err := splitOutputFormatFlag([]string{"--json", "--short"}); err == nil {
+		t.Fatalf("splitOutputFormatFlag accepted conflicting output flags")
+	}
+}
+
+func TestBackgroundStatusShortOutput(t *testing.T) {
+	status := kernel.BackgroundMaintainerStatus{
+		Mode:                    "background_process",
+		RepoRoot:                "/repo",
+		StoreRoot:               "/store",
+		HotCacheSocket:          "/store/hot.sock",
+		PID:                     123,
+		Running:                 true,
+		AlreadyRunning:          true,
+		Duration:                "30m0s",
+		PollInterval:            "2s",
+		LogPath:                 "/store/maintainer.log",
+		StatusPath:              "/store/maintainer_status.json",
+		AgentVisibleSuggestions: false,
+		NativeFallbackAvailable: true,
+		Diagnostics:             []string{"ready"},
+	}
+	text := formatBackgroundStatusShort(status)
+	for _, want := range []string{
+		"Squire Kernel maintainer",
+		"status: already_running",
+		"running: true",
+		"pid: 123",
+		"repo_root: /repo",
+		"native_fallback: true",
+		"agent_visible_suggestions: false",
+		"diagnostic: ready",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("short background status missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestMaintainerReportShortOutput(t *testing.T) {
+	report := kernel.MaintainerReport{
+		Mode:                    "resident_bounded",
+		RepoRoot:                "/repo",
+		OracleAvailable:         true,
+		PollCycles:              2,
+		WarmCycles:              1,
+		InvalidationsObserved:   1,
+		FastPathPrepared:        5,
+		ProofGatedPrewarmed:     7,
+		PreparedEntriesObserved: 12,
+		LastMaintainedAt:        time.Now(),
+		AgentVisibleSuggestions: false,
+		NativeFallbackAvailable: true,
+	}
+	text := formatMaintainerReportShort(report)
+	for _, want := range []string{
+		"Squire Kernel maintainer",
+		"mode: resident_bounded",
+		"repo_oracle: available",
+		"poll_cycles: 2",
+		"warm_cycles: 1",
+		"fast_path_prepared: 5",
+		"proof_gated_prewarmed: 7",
+		"native_fallback: true",
+		"agent_visible_suggestions: false",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("short maintainer report missing %q:\n%s", want, text)
 		}
 	}
 }
