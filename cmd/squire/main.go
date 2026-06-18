@@ -744,12 +744,14 @@ func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) strin
 	switch {
 	case status.AlreadyRunning:
 		state = "already_running"
+	case status.StopRequested && status.Running:
+		state = "stop_failed"
+	case status.StopRequested && !status.Running:
+		state = "stopped"
 	case status.Started:
 		state = "started"
 	case status.Running:
 		state = "running"
-	case status.StopRequested && !status.Running:
-		state = "stopped"
 	}
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire Kernel maintainer")

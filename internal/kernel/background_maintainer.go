@@ -148,6 +148,8 @@ func LoadBackgroundMaintainerStatus(ctx context.Context, cwd, storeRoot string) 
 	}
 	status.CheckedAt = time.Now()
 	status.StatusPath = statusPath
+	status.Started = false
+	status.AlreadyRunning = false
 	status.Running = status.PID > 0 && processAlive(status.PID)
 	if status.HotCacheSocket == "" {
 		status.HotCacheSocket = hotCacheSocketPath(storeRoot)

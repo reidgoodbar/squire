@@ -375,6 +375,19 @@ func TestBackgroundMaintainerProcessLifecycle(t *testing.T) {
 			t.Fatalf("kernel status missing %q:\n%s", want, text)
 		}
 	}
+	stopped, err := StopBackgroundMaintainer(ctx, repo, storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Started || stopped.AlreadyRunning || !stopped.StopRequested {
+		t.Fatalf("stop status retained transient start state: %+v", stopped)
+	}
+	if stopped.Running && len(stopped.Diagnostics) == 0 {
+		t.Fatalf("running stop status did not explain stop failure: %+v", stopped)
+	}
+	if !stopped.Running && stopped.StoppedAt.IsZero() {
+		t.Fatalf("stopped status did not record stop time: %+v", stopped)
+	}
 }
 
 func TestBackgroundMaintainerHelperProcess(t *testing.T) {

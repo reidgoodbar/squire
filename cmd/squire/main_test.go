@@ -385,6 +385,29 @@ func TestBackgroundStatusShortOutput(t *testing.T) {
 	}
 }
 
+func TestBackgroundStatusShortPrefersStopState(t *testing.T) {
+	status := kernel.BackgroundMaintainerStatus{
+		StoreRoot:               "/store",
+		StatusPath:              "/store/maintainer_status.json",
+		PID:                     123,
+		Started:                 true,
+		StopRequested:           true,
+		Running:                 false,
+		AgentVisibleSuggestions: false,
+		NativeFallbackAvailable: true,
+	}
+	text := formatBackgroundStatusShort(status)
+	if !strings.Contains(text, "status: stopped") {
+		t.Fatalf("stopped status hidden by stale started flag:\n%s", text)
+	}
+
+	status.Running = true
+	text = formatBackgroundStatusShort(status)
+	if !strings.Contains(text, "status: stop_failed") {
+		t.Fatalf("stop failure status hidden by stale started flag:\n%s", text)
+	}
+}
+
 func TestMaintainerReportShortOutput(t *testing.T) {
 	report := kernel.MaintainerReport{
 		Mode:                    "resident_bounded",
