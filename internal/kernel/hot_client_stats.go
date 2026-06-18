@@ -5,17 +5,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 const hotClientStatsMaxBytes = 1024 * 1024
 
 type HotClientStats struct {
-	Replays         int `json:"replays"`
-	NativeFallbacks int `json:"native_fallbacks"`
+	Replays                int   `json:"replays"`
+	NativeFallbacks        int   `json:"native_fallbacks"`
+	NativeWallAvoidedMS    int64 `json:"native_wall_avoided_ms"`
+	ReplayWallUS           int64 `json:"replay_wall_us"`
+	ReplayWallMeasured     int   `json:"replay_wall_measured"`
+	NetWallSavedMeasuredMS int64 `json:"net_wall_saved_measured_ms"`
 }
 
-func RecordHotClientResult(storeRoot string, res RunResult) {
+func RecordHotClientResult(storeRoot string, res RunResult, replayWall time.Duration) {
 	if storeRoot == "" || res.Mode != ModeReplay || res.Proof == nil || res.Proof.OperationKey != "cli-mmap-hot-snapshot" {
 		return
 	}
@@ -31,7 +36,7 @@ func RecordHotClientResult(storeRoot string, res RunResult) {
 		return
 	}
 	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%d replay %s %d\n", time.Now().UnixNano(), res.Family, res.Observation.NativeWallMS)
+	_, _ = fmt.Fprintf(f, "%d replay %s %d %d\n", time.Now().UnixNano(), res.Family, res.Observation.NativeWallMS, replayWall.Microseconds())
 }
 
 func LoadHotClientStats(storeRoot string) HotClientStats {
@@ -43,6 +48,7 @@ func LoadHotClientStats(storeRoot string) HotClientStats {
 	if err != nil {
 		return stats
 	}
+	var measuredNativeWallMS int64
 	for _, line := range bytes.Split(b, []byte{'\n'}) {
 		fields := bytes.Fields(line)
 		if len(fields) < 2 {
@@ -51,10 +57,25 @@ func LoadHotClientStats(storeRoot string) HotClientStats {
 		switch string(fields[1]) {
 		case "replay":
 			stats.Replays++
+			var nativeMS int64
+			if len(fields) >= 4 {
+				if parsed, err := strconv.ParseInt(string(fields[3]), 10, 64); err == nil {
+					nativeMS = parsed
+					stats.NativeWallAvoidedMS += nativeMS
+				}
+			}
+			if len(fields) >= 5 {
+				if replayUS, err := strconv.ParseInt(string(fields[4]), 10, 64); err == nil && replayUS > 0 {
+					stats.ReplayWallUS += replayUS
+					stats.ReplayWallMeasured++
+					measuredNativeWallMS += nativeMS
+				}
+			}
 		case "native":
 			stats.NativeFallbacks++
 		}
 	}
+	stats.NetWallSavedMeasuredMS = measuredNativeWallMS - stats.ReplayWallUS/1000
 	return stats
 }
 

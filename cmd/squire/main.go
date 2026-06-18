@@ -342,18 +342,23 @@ func runKernelCommand(ctx context.Context, cwd, storeRoot string, args []string)
 	if sessionID == "" {
 		sessionID = "cli"
 	}
+	serveStart := time.Now()
 	if res, ok := kernel.FastHotClientReplay(ctx, sessionID, cwd, storeRoot, argv); ok {
-		finishKernelCommand(cwd, storeRoot, sessionID, argv, *res)
+		finishKernelCommand(cwd, storeRoot, sessionID, argv, *res, serveStart)
 	}
 	k := kernel.New(storeRoot)
 	res := k.Run(ctx, sessionID, cwd, argv)
-	finishKernelCommand(cwd, storeRoot, sessionID, argv, res)
+	finishKernelCommand(cwd, storeRoot, sessionID, argv, res, time.Time{})
 }
 
-func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res kernel.RunResult) {
+func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res kernel.RunResult, replayStart time.Time) {
 	_, _ = os.Stdout.Write(res.Stdout)
 	_, _ = os.Stderr.Write(res.Stderr)
-	kernel.RecordHotClientResult(storeRoot, res)
+	var replayWall time.Duration
+	if !replayStart.IsZero() {
+		replayWall = time.Since(replayStart)
+	}
+	kernel.RecordHotClientResult(storeRoot, res, replayWall)
 	if os.Getenv("SQUIRE_KERNEL_DEBUG_RESULT") == "1" {
 		debug := struct {
 			Mode         kernel.Mode           `json:"mode"`

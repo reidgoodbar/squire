@@ -200,6 +200,8 @@ descriptors, or mutates the process tree.
   invalidations, and ROI history when available.
 - Includes aggregate foreground mmap hot-client replay counters without storing
   argv, cwd, stdout, stderr, or source bytes.
+- Reports aggregate native wall time avoided, measured replay wall time, average
+  replay wall time, and measured net wall saved for hot-client replays.
 - Human-readable output is the default. Use `--json` for automation.
 
 `squire boost bench repo-metadata [--short|--json]`

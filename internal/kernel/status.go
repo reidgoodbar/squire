@@ -38,6 +38,11 @@ type BoostStatusReport struct {
 	NativeFallbacks              int            `json:"native_fallbacks"`
 	HotClientReplays             int            `json:"hot_client_replays"`
 	HotClientNativeFallbacks     int            `json:"hot_client_native_fallbacks"`
+	HotClientNativeAvoidedMS     int64          `json:"hot_client_native_avoided_ms"`
+	HotClientReplayWallUS        int64          `json:"hot_client_replay_wall_us"`
+	HotClientReplayWallMeasured  int            `json:"hot_client_replay_wall_measured"`
+	HotClientReplayWallAvgUS     int64          `json:"hot_client_replay_wall_avg_us"`
+	HotClientNetSavedMeasuredMS  int64          `json:"hot_client_net_saved_measured_ms"`
 	DiagnosticMismatches         int            `json:"diagnostic_mismatches"`
 	DiagnosticMismatchCategories map[string]int `json:"diagnostic_mismatch_categories,omitempty"`
 	DiagnosticSampleSkips        int            `json:"diagnostic_sample_skips"`
@@ -346,16 +351,21 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 	}
 	hotStats := LoadHotClientStats(storeRoot)
 	report := BoostStatusReport{
-		Claim:                      scopedKernelClaim,
-		EnabledFastPaths:           EnabledFastPaths(),
-		ProofGatedReplayCandidates: ProofGatedReplayCandidates(),
-		Replays:                    hotStats.Replays,
-		NativeFallbacks:            hotStats.NativeFallbacks,
-		HotClientReplays:           hotStats.Replays,
-		HotClientNativeFallbacks:   hotStats.NativeFallbacks,
-		Invalidations:              "derived from epoch mismatch",
-		NativeFallbackAvailable:    true,
-		RuntimeDecisions:           "replay_or_native",
+		Claim:                       scopedKernelClaim,
+		EnabledFastPaths:            EnabledFastPaths(),
+		ProofGatedReplayCandidates:  ProofGatedReplayCandidates(),
+		Replays:                     hotStats.Replays,
+		NativeFallbacks:             hotStats.NativeFallbacks,
+		HotClientReplays:            hotStats.Replays,
+		HotClientNativeFallbacks:    hotStats.NativeFallbacks,
+		HotClientNativeAvoidedMS:    hotStats.NativeWallAvoidedMS,
+		HotClientReplayWallUS:       hotStats.ReplayWallUS,
+		HotClientReplayWallMeasured: hotStats.ReplayWallMeasured,
+		HotClientReplayWallAvgUS:    averageInt64(hotStats.ReplayWallUS, hotStats.ReplayWallMeasured),
+		HotClientNetSavedMeasuredMS: hotStats.NetWallSavedMeasuredMS,
+		Invalidations:               "derived from epoch mismatch",
+		NativeFallbackAvailable:     true,
+		RuntimeDecisions:            "replay_or_native",
 	}
 	for _, e := range ledger.Entries {
 		report.Replays += e.ReplacementCount
@@ -383,6 +393,11 @@ func FormatBoostStatusReport(report BoostStatusReport) string {
 	fmt.Fprintf(&b, "native_fallbacks: %d\n", report.NativeFallbacks)
 	fmt.Fprintf(&b, "hot_client_replays: %d\n", report.HotClientReplays)
 	fmt.Fprintf(&b, "hot_client_native_fallbacks: %d\n", report.HotClientNativeFallbacks)
+	fmt.Fprintf(&b, "hot_client_native_avoided_ms: %d\n", report.HotClientNativeAvoidedMS)
+	fmt.Fprintf(&b, "hot_client_replay_wall_us: %d\n", report.HotClientReplayWallUS)
+	fmt.Fprintf(&b, "hot_client_replay_wall_measured: %d\n", report.HotClientReplayWallMeasured)
+	fmt.Fprintf(&b, "hot_client_replay_wall_avg_us: %d\n", report.HotClientReplayWallAvgUS)
+	fmt.Fprintf(&b, "hot_client_net_saved_measured_ms: %d\n", report.HotClientNetSavedMeasuredMS)
 	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", report.DiagnosticMismatches)
 	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", report.DiagnosticMismatchCategories)
 	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", report.DiagnosticSampleSkips)
@@ -391,6 +406,13 @@ func FormatBoostStatusReport(report BoostStatusReport) string {
 	fmt.Fprintf(&b, "runtime_decisions: %s\n", report.RuntimeDecisions)
 	fmt.Fprintf(&b, "roi_history_ms: %v\n", report.ROIHistoryMS)
 	return b.String()
+}
+
+func averageInt64(total int64, count int) int64 {
+	if count <= 0 {
+		return 0
+	}
+	return total / int64(count)
 }
 
 func (s *LedgerStore) SaveLatestBenchmarkStatus(status LatestBenchmarkStatus) error {
