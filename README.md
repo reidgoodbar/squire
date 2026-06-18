@@ -18,6 +18,9 @@ The top-level contract for this baseline is
 stay scoped: "Scoped kernel proof for repeated local Git metadata plus
 hot-prepared deterministic read-only discovery operations."
 
+Release readiness checks live in
+[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+
 ## Quickstart (first-use)
 
 1. Initialize local state: `squire setup`
