@@ -226,6 +226,7 @@ Normal CI stays fast:
 
 - `go test ./...`
 - `squire boost bench repo-metadata`
+- `scripts/release_smoke.sh .tmp/squire`
 
 The nightly/manual workflow runs the default `deep-local` profile and asserts:
 
