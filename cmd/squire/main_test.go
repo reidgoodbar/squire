@@ -215,6 +215,8 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		ProofGatedReplayCandidates:   []string{"cat <bounded workspace source/config file>"},
 		Replays:                      3,
 		NativeFallbacks:              2,
+		HotClientReplays:             1,
+		HotClientNativeFallbacks:     0,
 		DiagnosticMismatches:         1,
 		DiagnosticMismatchCategories: map[string]int{"ordering": 1},
 		DiagnosticSampleSkips:        4,
@@ -229,6 +231,7 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		"git rev-parse HEAD",
 		"replays: 3",
 		"native_fallbacks: 2",
+		"hot_client_replays: 1",
 		"native_fallback_available: true",
 		"runtime_decisions: replay_or_native",
 	} {

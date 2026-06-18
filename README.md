@@ -198,6 +198,8 @@ descriptors, or mutates the process tree.
 
 - Shows enabled accelerators, replacements, fallbacks, mismatches,
   invalidations, and ROI history when available.
+- Includes aggregate foreground mmap hot-client replay counters without storing
+  argv, cwd, stdout, stderr, or source bytes.
 - Human-readable output is the default. Use `--json` for automation.
 
 `squire boost bench repo-metadata [--short|--json]`

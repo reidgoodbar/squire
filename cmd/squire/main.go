@@ -353,6 +353,7 @@ func runKernelCommand(ctx context.Context, cwd, storeRoot string, args []string)
 func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res kernel.RunResult) {
 	_, _ = os.Stdout.Write(res.Stdout)
 	_, _ = os.Stderr.Write(res.Stderr)
+	kernel.RecordHotClientResult(storeRoot, res)
 	if os.Getenv("SQUIRE_KERNEL_DEBUG_RESULT") == "1" {
 		debug := struct {
 			Mode         kernel.Mode           `json:"mode"`

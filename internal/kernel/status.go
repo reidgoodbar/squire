@@ -36,6 +36,8 @@ type BoostStatusReport struct {
 	ProofGatedReplayCandidates   []string       `json:"proof_gated_replay_candidates"`
 	Replays                      int            `json:"replays"`
 	NativeFallbacks              int            `json:"native_fallbacks"`
+	HotClientReplays             int            `json:"hot_client_replays"`
+	HotClientNativeFallbacks     int            `json:"hot_client_native_fallbacks"`
 	DiagnosticMismatches         int            `json:"diagnostic_mismatches"`
 	DiagnosticMismatchCategories map[string]int `json:"diagnostic_mismatch_categories,omitempty"`
 	DiagnosticSampleSkips        int            `json:"diagnostic_sample_skips"`
@@ -342,10 +344,15 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 	if err != nil {
 		return BoostStatusReport{}, err
 	}
+	hotStats := LoadHotClientStats(storeRoot)
 	report := BoostStatusReport{
 		Claim:                      scopedKernelClaim,
 		EnabledFastPaths:           EnabledFastPaths(),
 		ProofGatedReplayCandidates: ProofGatedReplayCandidates(),
+		Replays:                    hotStats.Replays,
+		NativeFallbacks:            hotStats.NativeFallbacks,
+		HotClientReplays:           hotStats.Replays,
+		HotClientNativeFallbacks:   hotStats.NativeFallbacks,
 		Invalidations:              "derived from epoch mismatch",
 		NativeFallbackAvailable:    true,
 		RuntimeDecisions:           "replay_or_native",
@@ -374,6 +381,8 @@ func FormatBoostStatusReport(report BoostStatusReport) string {
 	}
 	fmt.Fprintf(&b, "replays: %d\n", report.Replays)
 	fmt.Fprintf(&b, "native_fallbacks: %d\n", report.NativeFallbacks)
+	fmt.Fprintf(&b, "hot_client_replays: %d\n", report.HotClientReplays)
+	fmt.Fprintf(&b, "hot_client_native_fallbacks: %d\n", report.HotClientNativeFallbacks)
 	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", report.DiagnosticMismatches)
 	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", report.DiagnosticMismatchCategories)
 	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", report.DiagnosticSampleSkips)
