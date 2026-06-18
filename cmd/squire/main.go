@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"squire.run/kernel/internal/kernel"
@@ -20,8 +21,12 @@ func main() {
 	}
 	storeRoot := storeRootFor(cwd)
 	args := os.Args[1:]
+	if text, ok := helpTextForArgs(args); ok {
+		fmt.Print(text)
+		return
+	}
 	if len(args) == 0 {
-		usage()
+		fatalUsage("missing command")
 		os.Exit(2)
 	}
 	var out string
@@ -72,7 +77,7 @@ func main() {
 			out = string(b) + "\n"
 		}
 	default:
-		usage()
+		fatalUsage(fmt.Sprintf("unknown command %q", args[0]))
 		os.Exit(2)
 	}
 	if err != nil {
@@ -83,36 +88,156 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  squire setup")
-	fmt.Fprintln(os.Stderr, "  squire kernel status")
-	fmt.Fprintln(os.Stderr, "  squire kernel run -- <command> [args...]")
-	fmt.Fprintln(os.Stderr, "  squire kernel warm")
-	fmt.Fprintln(os.Stderr, "  squire kernel maintain --once")
-	fmt.Fprintln(os.Stderr, "  squire kernel maintain --duration <duration>")
-	fmt.Fprintln(os.Stderr, "  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]")
-	fmt.Fprintln(os.Stderr, "  squire kernel maintain --background-status")
-	fmt.Fprintln(os.Stderr, "  squire kernel maintain --stop")
-	fmt.Fprintln(os.Stderr, "  squire boost status")
-	fmt.Fprintln(os.Stderr, "  squire boost bench repo-metadata")
-	fmt.Fprintln(os.Stderr, "  squire boost bench deep-local")
+	fmt.Fprint(os.Stderr, usageText())
+}
+
+func fatalUsage(message string) {
+	fmt.Fprintf(os.Stderr, "error: %s\n\n", message)
+	usage()
+}
+
+func usageText() string {
+	return `Squire Kernel v1
+
+usage:
+  squire setup
+  squire kernel status
+  squire kernel run -- <command> [args...]
+  squire kernel warm
+  squire kernel maintain --once
+  squire kernel maintain --duration <duration>
+  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]
+  squire kernel maintain --background-status
+  squire kernel maintain --stop
+  squire boost status
+  squire boost bench repo-metadata
+  squire boost bench deep-local
+
+principles:
+  Agent chooses. Squire serves.
+  Native fallback always exists.
+  Runtime decisions are replay or native.
+  Validation, edits, mutations, and package installs are never replayed.
+
+first use:
+  squire setup
+  squire kernel maintain --background
+  squire kernel warm
+  squire kernel run -- git rev-parse HEAD
+  squire kernel status
+
+help:
+  squire help kernel run
+  squire help kernel maintain
+  squire help boost
+`
+}
+
+func helpTextForArgs(args []string) (string, bool) {
+	switch {
+	case len(args) == 1 && isHelpToken(args[0]):
+		return usageText(), true
+	case len(args) >= 1 && args[0] == "help":
+		return helpTopic(args[1:]), true
+	case len(args) >= 2 && !hasDelimiter(args) && isHelpToken(args[len(args)-1]):
+		return helpTopic(args[:len(args)-1]), true
+	default:
+		return "", false
+	}
+}
+
+func helpTopic(topic []string) string {
+	if len(topic) == 0 {
+		return usageText()
+	}
+	switch strings.Join(topic, " ") {
+	case "setup":
+		return `usage:
+  squire setup
+
+Initializes the local Squire Kernel store, prints privacy mode, and does not
+install global command shims.
+`
+	case "kernel", "kernel status":
+		return `usage:
+  squire kernel status
+
+Shows readiness, repo oracle state, invalidation epochs, enabled fast paths,
+proof-gated replay candidates, native-only discovery boundaries, prepared world
+counts, background maintainer status, and latest benchmark status.
+`
+	case "kernel run":
+		return `usage:
+  squire kernel run -- <command> [args...]
+
+Runs an agent-chosen command through Squire Kernel. The "--" delimiter is
+required so Squire options cannot be confused with the command being served.
+On a valid proof, Squire returns exact stdout, stderr, and exit code. Otherwise
+it runs the original command natively.
+`
+	case "kernel warm":
+		return `usage:
+  squire kernel warm
+
+Prepares local read-only proofs and hot outputs for later agent-chosen
+commands. It does not suggest commands, change prompts, mutate files, or skip
+native fallback.
+`
+	case "kernel maintain":
+		return `usage:
+  squire kernel maintain --once
+  squire kernel maintain --duration <duration>
+  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>]
+  squire kernel maintain --background-status
+  squire kernel maintain --stop
+
+Runs or manages the resident maintainer. The background mode keeps warm state
+fresh outside the foreground command-serving path. It is local, bounded, and
+fault-open.
+`
+	case "boost":
+		return `usage:
+  squire boost status
+  squire boost bench repo-metadata
+  squire boost bench deep-local
+
+Shows local acceleration counters and runs scoped benchmarks. Benchmarks make
+no broad Codex speedup claim.
+`
+	default:
+		return usageText()
+	}
+}
+
+func isHelpToken(s string) bool {
+	return s == "--help" || s == "-h"
+}
+
+func hasDelimiter(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return true
+		}
+	}
+	return false
 }
 
 func runKernelCommand(ctx context.Context, cwd, storeRoot string, args []string) {
-	if len(args) < 2 || args[0] != "--" {
-		usage()
+	argv, err := commandAfterDelimiter("squire kernel run", args)
+	if err != nil {
+		fatalUsage(err.Error())
 		os.Exit(2)
 	}
 	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "cli"
 	}
-	if res, ok := kernel.FastHotClientReplay(ctx, sessionID, cwd, storeRoot, args[1:]); ok {
-		finishKernelCommand(cwd, storeRoot, sessionID, args[1:], *res)
+	if res, ok := kernel.FastHotClientReplay(ctx, sessionID, cwd, storeRoot, argv); ok {
+		finishKernelCommand(cwd, storeRoot, sessionID, argv, *res)
 	}
 	k := kernel.New(storeRoot)
-	res := k.Run(ctx, sessionID, cwd, args[1:])
-	finishKernelCommand(cwd, storeRoot, sessionID, args[1:], res)
+	res := k.Run(ctx, sessionID, cwd, argv)
+	finishKernelCommand(cwd, storeRoot, sessionID, argv, res)
 }
 
 func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res kernel.RunResult) {
@@ -143,8 +268,9 @@ func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res ke
 }
 
 func runAdjacentPrewarm(ctx context.Context, cwd, storeRoot string, args []string) error {
-	if len(args) < 2 || args[0] != "--" {
-		return fmt.Errorf("usage: squire kernel prewarm-adjacent -- <command> [args...]")
+	argv, err := commandAfterDelimiter("squire kernel prewarm-adjacent", args)
+	if err != nil {
+		return err
 	}
 	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
@@ -152,8 +278,18 @@ func runAdjacentPrewarm(ctx context.Context, cwd, storeRoot string, args []strin
 	}
 	prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_, err := kernel.New(storeRoot).PrewarmAdjacent(prewarmCtx, cwd, sessionID, args[1:])
+	_, err = kernel.New(storeRoot).PrewarmAdjacent(prewarmCtx, cwd, sessionID, argv)
 	return err
+}
+
+func commandAfterDelimiter(command string, args []string) ([]string, error) {
+	if len(args) == 0 || args[0] != "--" {
+		return nil, fmt.Errorf("%s requires -- before the command", command)
+	}
+	if len(args) == 1 {
+		return nil, fmt.Errorf("%s requires a command after --", command)
+	}
+	return args[1:], nil
 }
 
 func startAdjacentPrewarmProcess(cwd, storeRoot, sessionID string, argv []string) {
