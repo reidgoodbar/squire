@@ -55,9 +55,9 @@ jobs:
               print("performance_gates_status:", report.get("performance_gates", {}).get("status"))
               print("performance_gates_violations:", report.get("performance_gates", {}).get("violations", []))
 
-          print("shadow_candidate_exactness:", report.get("shadow_candidate_exactness"))
-          print("shadow_candidate_mismatches:", report.get("shadow_candidate_mismatches"))
-          print("shadow_mismatch_categories:", report.get("shadow", {}).get("shadow_mismatch_categories", {}))
+          print("native_only_candidate_exactness:", report.get("native_only_candidate_exactness"))
+          print("native_only_candidate_mismatches:", report.get("native_only_candidate_mismatches"))
+          print("native_only_mismatch_categories:", report.get("native_only_discovery", {}).get("shadow_mismatch_categories", {}))
           print("performance:", report.get("performance", {}))
 
           if failures:

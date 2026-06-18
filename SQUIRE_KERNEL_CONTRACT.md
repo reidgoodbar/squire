@@ -21,7 +21,7 @@ This is not a broad Codex speedup claim.
 2. Native fallback always.
 3. Validation never replayed.
 4. Edits/mutations never replayed.
-5. Runtime decisions are replay or native, never shadow.
+5. Runtime decisions are replay or native; there is no "shadow" execution mode.
 6. Exact stdout/stderr/exit-code required.
 7. Every replay needs invalidation proof.
 8. Local world state proves validity.
@@ -98,8 +98,7 @@ Native-only discovery:
 - `rg --files`
 - `rg <literal> <workspace paths...>`
 
-These commands may be observed as native operations, but there is no shadow
-mode and they are not replay targets in this baseline.
+These commands are native-only in this baseline and are not replay targets.
 
 The general rule for future replay candidates is: read-only, deterministic,
 local, bounded, exact-argv keyed, and cheaply provable from local world state.
@@ -160,17 +159,19 @@ or native fallback.
 
 ## Baseline Evidence
 
-The v1 baseline is valid only when:
+The v1 baseline is valid only when basic correctness and measured safety
+checks pass. Minimal evidence includes:
 
 - `go test ./...` passes.
-- `squire boost bench repo-metadata` reports exactness true, zero mismatches,
-  and mutation-boundary invalidation true.
-- `squire boost bench deep-local` reports enabled fast-path exactness true,
-  zero enabled fast-path mismatches, zero stale HEAD replays, zero stale branch
-  replays, zero validation replays, and passing safety gates.
-- Performance gates are reported separately. A performance-gate violation marks
-  the profile `needs_optimization`, but it does not weaken a safety or
-  exactness claim.
+- `squire boost bench repo-metadata` demonstrates exactness (no enabled
+  fast-path mismatches) and verifies mutation-boundary invalidation.
+- `squire boost bench deep-local` demonstrates enabled fast-path exactness,
+  no stale replays, no validation replays, and passing safety gates.
+
+Benchmarks report exactness and mismatch counts explicitly; performance
+measurements are reported separately. A performance gate violation marks the
+profile `needs_optimization` but does not invalidate safety or exactness
+claims.
 
 ## Production-Safe Levels 3-5
 

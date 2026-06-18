@@ -628,7 +628,7 @@ func addPreparedFileTreeIndex(ws WorldState, ledger *ValidityLedger) bool {
 		ReplayEligible:    false,
 		Privacy:           "hashes and counts only; no raw paths or stdout",
 		PreparedAt:        time.Now(),
-		Notes:             []string{"supports future file-list shadow/proof work; not replay eligible"},
+		Notes:             []string{"supports future file-list proof work; not replay eligible"},
 	}
 	ledger.UpsertPrepared(entry)
 	return true
@@ -745,7 +745,7 @@ func addPreparedCommandPathIndex(ws WorldState, ledger *ValidityLedger) bool {
 		ReplayEligible:    false,
 		Privacy:           "PATH, executable names, and directories are hashed; no raw env or paths",
 		PreparedAt:        time.Now(),
-		Notes:             []string{"supports future command-path shadow/proof work; aliases/functions are not replay eligible"},
+		Notes:             []string{"supports future command-path proof work; aliases/functions are not replay eligible"},
 	}
 	ledger.UpsertPrepared(entry)
 	return true

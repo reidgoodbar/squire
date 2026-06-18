@@ -1,9 +1,9 @@
 # Squire Kernel v1
 
-Squire v1 is an active, transparent local kernel for agent-chosen operations.
-Codex and Claude still decide what to do. Squire does not add tools, change
-prompts, route models, suggest commands, skip validation, replay edits, or
-change final decisions.
+Squire Kernel v1 is an active, transparent local kernel for agent-chosen
+operations. It preserves agent intent: models (for example, Codex or Claude)
+still decide what to do; Squire only serves exact, provable local outputs and
+falls back to native execution when proof is missing.
 
 The core principle is:
 
@@ -18,13 +18,21 @@ The top-level contract for this baseline is
 stay scoped: "Scoped kernel proof for repeated local Git metadata plus
 hot-prepared deterministic read-only discovery operations."
 
+## Quickstart (first-use)
+
+1. Initialize local state: `squire setup`
+2. Start the resident maintainer: `squire kernel maintain --background`
+3. Prime the current repo once: `squire kernel warm`
+4. Run an agent-chosen command through the kernel:
+   - `squire kernel run -- git rev-parse HEAD`
+5. Check status and enabled fast paths: `squire kernel status`
+
 ## Scope
 
 Squire improves how the existing local environment serves operations the agent
-already chose to run, and only when behavior preservation is proven.
-
-Squire Kernel must work without OpenTelemetry. OTel can be optional session
-metadata, but it is not required for correctness or operation.
+already chose to run, and only when behavior preservation is proven. It must
+work without OpenTelemetry; OTel is optional session metadata only and is not
+required for correctness or operation.
 
 ## Hard Boundaries
 
@@ -431,7 +439,8 @@ Current dogfood measurements from this repo on 2026-06-18:
 - Runtime decision policy:
   - Squire either serves an exact replay from a maintained proof or runs the
     agent-chosen command natively.
-  - There is no shadow mode in the command-serving path.
+  - Runtime decisions are replay or native; there is no "shadow" execution
+    mode.
 
 - Deep-local CLI command:
   - `squire boost bench deep-local` - runs a deeper local benchmark that
@@ -478,7 +487,7 @@ Deep-local benchmark report surface (scoped claim)
 3. Validation is never replayed.
 4. Edits are never replayed.
 5. Mutating commands are never replayed.
-6. Runtime decisions are replay or native, never shadow.
+6. Runtime decisions are replay or native; there is no "shadow" execution mode.
 7. Exact stdout/stderr/exit-code equality is required for any replacement.
 8. Every replay needs an invalidation proof.
 9. Every derived fact has evidence quality.

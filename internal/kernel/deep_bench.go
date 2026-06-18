@@ -77,16 +77,18 @@ type IncrementalBenchMetrics struct {
 }
 
 type PerformanceBudgetReport struct {
-	MetadataFastPathP95US       int64            `json:"metadata_fast_path_p95_us"`
-	ProofGatedReplayP95US       int64            `json:"proof_gated_replay_p95_us"`
-	NativeFallbackOverheadP95US int64            `json:"native_fallback_overhead_p95_us"`
-	ShadowBookkeepingP95US      int64            `json:"shadow_bookkeeping_p95_us"`
-	MetadataFastPathBudgetUS    int64            `json:"metadata_fast_path_budget_us"`
-	NativeFallbackBudgetUS      int64            `json:"native_fallback_budget_us"`
-	ShadowBookkeepingBudgetUS   int64            `json:"shadow_bookkeeping_budget_us"`
-	Violations                  []string         `json:"violations,omitempty"`
-	PhaseTimings                PhaseTimingStats `json:"phase_timings"`
-	SlowestOperations           []SlowOperation  `json:"slowest_operations,omitempty"`
+	MetadataFastPathP95US         int64            `json:"metadata_fast_path_p95_us"`
+	ProofGatedReplayP95US         int64            `json:"proof_gated_replay_p95_us"`
+	NativeFallbackOverheadP95US   int64            `json:"native_fallback_overhead_p95_us"`
+	NativeOnlyBookkeepingP95US    int64            `json:"native_only_bookkeeping_p95_us"`
+	ShadowBookkeepingP95US        int64            `json:"shadow_bookkeeping_p95_us"`
+	MetadataFastPathBudgetUS      int64            `json:"metadata_fast_path_budget_us"`
+	NativeFallbackBudgetUS        int64            `json:"native_fallback_budget_us"`
+	NativeOnlyBookkeepingBudgetUS int64            `json:"native_only_bookkeeping_budget_us"`
+	ShadowBookkeepingBudgetUS     int64            `json:"shadow_bookkeeping_budget_us"`
+	Violations                    []string         `json:"violations,omitempty"`
+	PhaseTimings                  PhaseTimingStats `json:"phase_timings"`
+	SlowestOperations             []SlowOperation  `json:"slowest_operations,omitempty"`
 }
 
 type PhaseStats struct {
@@ -97,18 +99,19 @@ type PhaseStats struct {
 }
 
 type PhaseTimingStats struct {
-	ClassifyMS          PhaseStats `json:"classify_ms"`
-	RepoRootLookupMS    PhaseStats `json:"repo_root_lookup_ms"`
-	WorldStateLookupMS  PhaseStats `json:"world_state_lookup_ms"`
-	EpochCheckMS        PhaseStats `json:"epoch_check_ms"`
-	LedgerLookupMS      PhaseStats `json:"ledger_lookup_ms"`
-	OutputMaterializeMS PhaseStats `json:"output_materialize_ms"`
-	EventAppendMS       PhaseStats `json:"event_append_ms"`
-	DBOrFileWriteMS     PhaseStats `json:"db_or_file_write_ms"`
-	LockWaitMS          PhaseStats `json:"lock_wait_ms"`
-	ShadowBookkeepingMS PhaseStats `json:"shadow_bookkeeping_ms"`
-	FallbackDecisionMS  PhaseStats `json:"fallback_decision_ms"`
-	NativeExecWaitMS    PhaseStats `json:"native_exec_wait_ms"`
+	ClassifyMS              PhaseStats `json:"classify_ms"`
+	RepoRootLookupMS        PhaseStats `json:"repo_root_lookup_ms"`
+	WorldStateLookupMS      PhaseStats `json:"world_state_lookup_ms"`
+	EpochCheckMS            PhaseStats `json:"epoch_check_ms"`
+	LedgerLookupMS          PhaseStats `json:"ledger_lookup_ms"`
+	OutputMaterializeMS     PhaseStats `json:"output_materialize_ms"`
+	EventAppendMS           PhaseStats `json:"event_append_ms"`
+	DBOrFileWriteMS         PhaseStats `json:"db_or_file_write_ms"`
+	LockWaitMS              PhaseStats `json:"lock_wait_ms"`
+	NativeOnlyBookkeepingMS PhaseStats `json:"native_only_bookkeeping_ms"`
+	ShadowBookkeepingMS     PhaseStats `json:"shadow_bookkeeping_ms"`
+	FallbackDecisionMS      PhaseStats `json:"fallback_decision_ms"`
+	NativeExecWaitMS        PhaseStats `json:"native_exec_wait_ms"`
 }
 
 type SlowOperation struct {
@@ -142,14 +145,17 @@ type DeepBenchReport struct {
 	Branches                      int                     `json:"branches"`
 	ElapsedMS                     int64                   `json:"elapsed_ms"`
 	Metadata                      OperatorFamilyMetrics   `json:"metadata"`
+	NativeOnlyDiscovery           OperatorFamilyMetrics   `json:"native_only_discovery"`
 	Shadow                        OperatorFamilyMetrics   `json:"shadow"`
 	Validation                    OperatorFamilyMetrics   `json:"validation"`
 	Incremental                   IncrementalBenchMetrics `json:"incremental"`
 	Performance                   PerformanceBudgetReport `json:"performance"`
 	MetadataExactness             bool                    `json:"metadata_exactness"`
+	NativeOnlyCandidateExactness  bool                    `json:"native_only_candidate_exactness"`
 	ShadowExactness               bool                    `json:"shadow_exactness"`
 	EnabledFastPathExactness      bool                    `json:"enabled_fast_path_exactness"`
 	EnabledFastPathMismatches     int                     `json:"enabled_fast_path_mismatches"`
+	NativeOnlyCandidateMismatches int                     `json:"native_only_candidate_mismatches"`
 	ShadowCandidateExactness      bool                    `json:"shadow_candidate_exactness"`
 	ShadowCandidateMismatches     int                     `json:"shadow_candidate_mismatches"`
 	NeverReplayDiagnostics        NeverReplayDiagnostics  `json:"never_replay_diagnostics"`
@@ -261,6 +267,9 @@ func BenchDeepLocalWithOptions(ctx context.Context, opts DeepBenchOptions) (Deep
 	report.EnabledFastPathMismatches = report.Metadata.ExactMismatches + report.Metadata.ExitCodeMismatches
 	report.ShadowCandidateExactness = report.ShadowExactness
 	report.ShadowCandidateMismatches = report.Shadow.ExactMismatches + report.Shadow.ExitCodeMismatches
+	report.NativeOnlyDiscovery = report.Shadow
+	report.NativeOnlyCandidateExactness = report.ShadowCandidateExactness
+	report.NativeOnlyCandidateMismatches = report.ShadowCandidateMismatches
 	report.NeverReplayDiagnostics = NeverReplayDiagnostics{
 		ValidationRuns:        report.Validation.Runs,
 		ValidationNeverModes:  report.Validation.NeverModes,
@@ -439,16 +448,19 @@ func mergeFamily(family *OperatorFamilyMetrics, metrics CommandMetrics) {
 }
 
 func buildPerformanceBudgetReport(samples *benchSamples) PerformanceBudgetReport {
+	nativeOnlyBookkeepingP95US := p95(samples.shadowUS)
 	report := PerformanceBudgetReport{
-		MetadataFastPathP95US:       p95(samples.metadataReplayUS),
-		ProofGatedReplayP95US:       p95(samples.proofGatedReplayUS),
-		NativeFallbackOverheadP95US: p95(samples.nativeOverheadUS),
-		ShadowBookkeepingP95US:      p95(samples.shadowUS),
-		MetadataFastPathBudgetUS:    2000,
-		NativeFallbackBudgetUS:      5000,
-		ShadowBookkeepingBudgetUS:   10000,
-		PhaseTimings:                samples.phaseTimingStats(),
-		SlowestOperations:           samples.topSlowestOperations(),
+		MetadataFastPathP95US:         p95(samples.metadataReplayUS),
+		ProofGatedReplayP95US:         p95(samples.proofGatedReplayUS),
+		NativeFallbackOverheadP95US:   p95(samples.nativeOverheadUS),
+		NativeOnlyBookkeepingP95US:    nativeOnlyBookkeepingP95US,
+		ShadowBookkeepingP95US:        nativeOnlyBookkeepingP95US,
+		MetadataFastPathBudgetUS:      2000,
+		NativeFallbackBudgetUS:        5000,
+		NativeOnlyBookkeepingBudgetUS: 10000,
+		ShadowBookkeepingBudgetUS:     10000,
+		PhaseTimings:                  samples.phaseTimingStats(),
+		SlowestOperations:             samples.topSlowestOperations(),
 	}
 	if report.MetadataFastPathP95US > report.MetadataFastPathBudgetUS {
 		report.Violations = append(report.Violations, "metadata fast path p95 over budget")
@@ -456,8 +468,8 @@ func buildPerformanceBudgetReport(samples *benchSamples) PerformanceBudgetReport
 	if report.NativeFallbackOverheadP95US > report.NativeFallbackBudgetUS {
 		report.Violations = append(report.Violations, "native fallback overhead p95 over budget")
 	}
-	if report.ShadowBookkeepingP95US > report.ShadowBookkeepingBudgetUS {
-		report.Violations = append(report.Violations, "shadow bookkeeping p95 over budget")
+	if report.NativeOnlyBookkeepingP95US > report.NativeOnlyBookkeepingBudgetUS {
+		report.Violations = append(report.Violations, "native-only bookkeeping p95 over budget")
 	}
 	return report
 }
@@ -540,18 +552,19 @@ func (s *benchSamples) phaseTimingStats() PhaseTimingStats {
 		return PhaseTimingStats{}
 	}
 	return PhaseTimingStats{
-		ClassifyMS:          phaseStats(s.phaseSamples["classify_ms"]),
-		RepoRootLookupMS:    phaseStats(s.phaseSamples["repo_root_lookup_ms"]),
-		WorldStateLookupMS:  phaseStats(s.phaseSamples["world_state_lookup_ms"]),
-		EpochCheckMS:        phaseStats(s.phaseSamples["epoch_check_ms"]),
-		LedgerLookupMS:      phaseStats(s.phaseSamples["ledger_lookup_ms"]),
-		OutputMaterializeMS: phaseStats(s.phaseSamples["output_materialize_ms"]),
-		EventAppendMS:       phaseStats(s.phaseSamples["event_append_ms"]),
-		DBOrFileWriteMS:     phaseStats(s.phaseSamples["db_or_file_write_ms"]),
-		LockWaitMS:          phaseStats(s.phaseSamples["lock_wait_ms"]),
-		ShadowBookkeepingMS: phaseStats(s.phaseSamples["shadow_bookkeeping_ms"]),
-		FallbackDecisionMS:  phaseStats(s.phaseSamples["fallback_decision_ms"]),
-		NativeExecWaitMS:    phaseStats(s.phaseSamples["native_exec_wait_ms"]),
+		ClassifyMS:              phaseStats(s.phaseSamples["classify_ms"]),
+		RepoRootLookupMS:        phaseStats(s.phaseSamples["repo_root_lookup_ms"]),
+		WorldStateLookupMS:      phaseStats(s.phaseSamples["world_state_lookup_ms"]),
+		EpochCheckMS:            phaseStats(s.phaseSamples["epoch_check_ms"]),
+		LedgerLookupMS:          phaseStats(s.phaseSamples["ledger_lookup_ms"]),
+		OutputMaterializeMS:     phaseStats(s.phaseSamples["output_materialize_ms"]),
+		EventAppendMS:           phaseStats(s.phaseSamples["event_append_ms"]),
+		DBOrFileWriteMS:         phaseStats(s.phaseSamples["db_or_file_write_ms"]),
+		LockWaitMS:              phaseStats(s.phaseSamples["lock_wait_ms"]),
+		NativeOnlyBookkeepingMS: phaseStats(s.phaseSamples["shadow_bookkeeping_ms"]),
+		ShadowBookkeepingMS:     phaseStats(s.phaseSamples["shadow_bookkeeping_ms"]),
+		FallbackDecisionMS:      phaseStats(s.phaseSamples["fallback_decision_ms"]),
+		NativeExecWaitMS:        phaseStats(s.phaseSamples["native_exec_wait_ms"]),
 	}
 }
 

@@ -22,6 +22,7 @@ type LatestBenchmarkStatus struct {
 	MetadataFastPathP95US        int64      `json:"metadata_fast_path_p95_us,omitempty"`
 	ProofGatedReplayP95US        int64      `json:"proof_gated_replay_p95_us,omitempty"`
 	NativeFallbackOverheadP95US  int64      `json:"native_fallback_overhead_p95_us,omitempty"`
+	NativeOnlyBookkeepingP95US   int64      `json:"native_only_bookkeeping_p95_us,omitempty"`
 	ShadowBookkeepingP95US       int64      `json:"shadow_bookkeeping_p95_us,omitempty"`
 	SafetyGates                  GateReport `json:"safety_gates,omitempty"`
 	PerformanceGates             GateReport `json:"performance_gates,omitempty"`
@@ -42,6 +43,8 @@ func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	fmt.Fprintf(&b, "repo_oracle: %s\n", availability(ws.OracleAvailable))
 	fmt.Fprintf(&b, "repo_root: %s\n", ws.RepoRoot)
 	fmt.Fprintln(&b, "global_shims: not installed")
+	fmt.Fprintln(&b, "next: squire kernel maintain --background")
+	fmt.Fprintln(&b, "try: squire kernel run -- git rev-parse HEAD")
 	return b.String(), nil
 }
 
@@ -52,10 +55,18 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	latest, latestOK := k.Store.LoadLatestBenchmarkStatus()
 	ledger, ledgerErr := k.Store.Load()
 	ledgerOK := ledgerErr == nil
+	snapshot := HotSnapshotStatsForStore(storeRoot)
+	background, backgroundErr := LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 	js, _ := json.MarshalIndent(ws, "", "  ")
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire Kernel status")
 	fmt.Fprintln(&b, "claim:", scopedKernelClaim)
+	fmt.Fprintln(&b, "readiness:")
+	fmt.Fprintf(&b, "  status: %s\n", readinessStatus(ws, snapshot, background, backgroundErr))
+	fmt.Fprintln(&b, "  native_fallback: available")
+	fmt.Fprintln(&b, "  runtime_decisions: replay_or_native")
+	fmt.Fprintln(&b, "  agent_visible_suggestions: false")
+	fmt.Fprintln(&b, "  background_hint: squire kernel maintain --background")
 	fmt.Fprintln(&b, "repo_oracle:", availability(ws.OracleAvailable))
 	fmt.Fprintln(&b, "current_repo_oracle_state:")
 	fmt.Fprintln(&b, indent(string(js)))
@@ -110,7 +121,6 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	} else {
 		fmt.Fprintln(&b, "  prepared_entries: n/a")
 	}
-	snapshot := HotSnapshotStatsForStore(storeRoot)
 	fmt.Fprintln(&b, "virtual_workspace_snapshot:")
 	fmt.Fprintf(&b, "  available: %t\n", snapshot.Available)
 	if snapshot.Path != "" {
@@ -127,7 +137,6 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	} else if snapshot.Diagnostic != "" {
 		fmt.Fprintf(&b, "  diagnostic: %s\n", snapshot.Diagnostic)
 	}
-	background, backgroundErr := LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 	fmt.Fprintln(&b, "background_maintainer:")
 	if backgroundErr != nil {
 		fmt.Fprintln(&b, "  status: unavailable")
@@ -188,6 +197,19 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	return b.String(), nil
 }
 
+func readinessStatus(ws WorldState, snapshot HotSnapshotStats, background BackgroundMaintainerStatus, backgroundErr error) string {
+	if !ws.OracleAvailable {
+		return "native_fallback"
+	}
+	if backgroundErr == nil && background.Running && snapshot.Available {
+		return "hot"
+	}
+	if snapshot.Available {
+		return "warm"
+	}
+	return "needs_warm_or_maintainer"
+}
+
 func preparedCounts(entries []PreparedEntry) (fastPathOutputs, proofGatedOutputs, warmFiles, fileTreeIndexes, projectMetadata, commandPath, ecosystem, dependency, sourceSymbols int) {
 	for _, entry := range entries {
 		switch entry.Kind {
@@ -223,20 +245,20 @@ func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var replacements, fallbacks, mismatches, shadowSkips int
+	var replays, fallbacks, mismatches, diagnosticSkips int
 	categories := map[string]int{}
 	var roi []int64
 	for _, e := range ledger.Entries {
-		replacements += e.ReplacementCount
+		replays += e.ReplacementCount
 		fallbacks += e.FallbackCount
 		mismatches += e.ShadowMismatchCount
-		shadowSkips += e.ShadowSkipCount
+		diagnosticSkips += e.ShadowSkipCount
 		categories = mergeIntMaps(categories, e.ShadowMismatchCategories)
 		roi = append(roi, e.NetROIHistoryMS...)
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire boost status")
-	fmt.Fprintln(&b, "enabled_accelerators:")
+	fmt.Fprintln(&b, "Squire Kernel acceleration status")
+	fmt.Fprintln(&b, "enabled_fast_paths:")
 	for _, item := range EnabledFastPaths() {
 		fmt.Fprintln(&b, "  -", item)
 	}
@@ -244,11 +266,11 @@ func BoostStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	for _, item := range ProofGatedReplayCandidates() {
 		fmt.Fprintln(&b, "  -", item)
 	}
-	fmt.Fprintf(&b, "replacements: %d\n", replacements)
-	fmt.Fprintf(&b, "fallbacks: %d\n", fallbacks)
-	fmt.Fprintf(&b, "mismatches: %d\n", mismatches)
-	fmt.Fprintf(&b, "mismatch_categories: %v\n", categories)
-	fmt.Fprintf(&b, "legacy_shadow_sample_skips: %d\n", shadowSkips)
+	fmt.Fprintf(&b, "replays: %d\n", replays)
+	fmt.Fprintf(&b, "native_fallbacks: %d\n", fallbacks)
+	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", mismatches)
+	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", categories)
+	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", diagnosticSkips)
 	fmt.Fprintf(&b, "invalidations: derived from epoch mismatch\n")
 	fmt.Fprintf(&b, "roi_history_ms: %v\n", roi)
 	return b.String(), nil
@@ -309,6 +331,7 @@ func LatestBenchmarkFromDeepLocal(report DeepBenchReport) LatestBenchmarkStatus 
 		MetadataFastPathP95US:        report.Performance.MetadataFastPathP95US,
 		ProofGatedReplayP95US:        report.Performance.ProofGatedReplayP95US,
 		NativeFallbackOverheadP95US:  report.Performance.NativeFallbackOverheadP95US,
+		NativeOnlyBookkeepingP95US:   report.Performance.NativeOnlyBookkeepingP95US,
 		ShadowBookkeepingP95US:       report.Performance.ShadowBookkeepingP95US,
 		SafetyGates:                  report.SafetyGates,
 		PerformanceGates:             report.PerformanceGates,
