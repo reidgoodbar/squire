@@ -108,7 +108,8 @@ fi
 boost_out=$("$squire_bin" boost status --short)
 require_contains "$boost_out" "native_fallback_available: true" "boost status"
 require_contains "$boost_out" "runtime_decisions: replay_or_native" "boost status"
-require_contains "$boost_out" "hot_client_replays:" "boost status"
+require_contains "$boost_out" "replays: 2" "boost status"
+require_contains "$boost_out" "hot_client_replays: 2" "boost status"
 
 stop_out=$("$squire_bin" kernel maintain --stop --short)
 stopped=1
