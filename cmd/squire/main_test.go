@@ -104,6 +104,79 @@ func TestSplitOutputFormatFlag(t *testing.T) {
 	}
 }
 
+func TestOutputFormatFromTrailingArgs(t *testing.T) {
+	format, err := outputFormatFromTrailingArgs([]string{"--short"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != outputShort {
+		t.Fatalf("format = %v, want outputShort", format)
+	}
+	if _, err := outputFormatFromTrailingArgs([]string{"--bogus"}); err == nil {
+		t.Fatalf("outputFormatFromTrailingArgs accepted unknown option")
+	}
+}
+
+func TestRepoMetadataBenchShortOutput(t *testing.T) {
+	report := kernel.BenchReport{
+		Exactness:                    true,
+		Mismatches:                   0,
+		MutationBoundaryInvalidation: true,
+		WorkloadOnlyWallDeltaMS:      12,
+		NetROIMS:                     10,
+		NoBroadCodexSpeedupClaim:     true,
+		Commands:                     []string{"git rev-parse HEAD"},
+	}
+	text := repoMetadataBenchOut(report, outputShort)
+	for _, want := range []string{
+		"Squire Kernel repo-metadata benchmark",
+		"exactness: true",
+		"mismatches: 0",
+		"mutation_boundary_invalidation: true",
+		"workload_only_wall_delta_ms: 12",
+		"no_broad_codex_speedup_claim: true",
+		"  - git rev-parse HEAD",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("repo metadata short output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDeepLocalBenchShortOutput(t *testing.T) {
+	report := kernel.DeepBenchReport{
+		EnabledFastPathExactness:      true,
+		EnabledFastPathMismatches:     0,
+		NativeOnlyCandidateExactness:  true,
+		NativeOnlyCandidateMismatches: 0,
+		NoBroadCodexSpeedupClaim:      true,
+		SafetyGates:                   kernel.GateReport{Status: "pass", Passed: true, Required: true},
+		PerformanceGates:              kernel.GateReport{Status: "needs_optimization", Violations: []string{"native fallback overhead p95 over budget"}},
+		NeverReplayDiagnostics:        kernel.NeverReplayDiagnostics{ValidationReplays: 0},
+		Performance: kernel.PerformanceBudgetReport{
+			MetadataFastPathP95US:       95,
+			ProofGatedReplayP95US:       120,
+			NativeFallbackOverheadP95US: 4000,
+			NativeOnlyBookkeepingP95US:  9000,
+		},
+	}
+	text := deepLocalBenchOut(report, outputShort)
+	for _, want := range []string{
+		"Squire Kernel deep-local benchmark",
+		"safety_gates: pass",
+		"performance_gates: needs_optimization",
+		"enabled_fast_path_exactness: true",
+		"validation_replays: 0",
+		"metadata_fast_path_p95_us: 95",
+		"native_only_bookkeeping_p95_us: 9000",
+		"performance_violation: native fallback overhead p95 over budget",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("deep-local short output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestBackgroundStatusShortOutput(t *testing.T) {
 	status := kernel.BackgroundMaintainerStatus{
 		Mode:                    "background_process",

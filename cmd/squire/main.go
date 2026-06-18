@@ -58,25 +58,33 @@ func main() {
 		out, err = runMaintain(ctx, cwd, storeRoot, args[2:])
 	case len(args) == 2 && args[0] == "boost" && args[1] == "status":
 		out, err = kernel.BoostStatus(ctx, cwd, storeRoot)
-	case len(args) == 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "repo-metadata":
+	case len(args) >= 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "repo-metadata":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgs(args[3:])
+		if err != nil {
+			break
+		}
 		var report kernel.BenchReport
 		report, err = kernel.BenchRepoMetadata(ctx)
 		if err == nil {
 			err = kernel.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(kernel.LatestBenchmarkFromRepoMetadata(report))
 		}
 		if err == nil {
-			b, _ := json.MarshalIndent(report, "", "  ")
-			out = string(b) + "\n"
+			out = repoMetadataBenchOut(report, format)
 		}
-	case len(args) == 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "deep-local":
+	case len(args) >= 3 && args[0] == "boost" && args[1] == "bench" && args[2] == "deep-local":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgs(args[3:])
+		if err != nil {
+			break
+		}
 		var report kernel.DeepBenchReport
 		report, err = kernel.BenchDeepLocal(ctx)
 		if err == nil {
 			err = kernel.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(kernel.LatestBenchmarkFromDeepLocal(report))
 		}
 		if err == nil {
-			b, _ := json.MarshalIndent(report, "", "  ")
-			out = string(b) + "\n"
+			out = deepLocalBenchOut(report, format)
 		}
 	default:
 		fatalUsage(fmt.Sprintf("unknown command %q", args[0]))
@@ -112,8 +120,8 @@ usage:
   squire kernel maintain --background-status [--short|--json]
   squire kernel maintain --stop [--short|--json]
   squire boost status
-  squire boost bench repo-metadata
-  squire boost bench deep-local
+  squire boost bench repo-metadata [--short|--json]
+  squire boost bench deep-local [--short|--json]
 
 principles:
   Agent chooses. Squire serves.
@@ -202,11 +210,12 @@ human-readable status.
 	case "boost":
 		return `usage:
   squire boost status
-  squire boost bench repo-metadata
-  squire boost bench deep-local
+  squire boost bench repo-metadata [--short|--json]
+  squire boost bench deep-local [--short|--json]
 
 Shows local acceleration counters and runs scoped benchmarks. Benchmarks make
-no broad Codex speedup claim.
+no broad Codex speedup claim. JSON is the default output for automation; use
+--short for a compact human-readable summary.
 `
 	default:
 		return usageText()
@@ -396,6 +405,17 @@ func splitOutputFormatFlag(args []string) ([]string, outputFormat, error) {
 	return out, format, nil
 }
 
+func outputFormatFromTrailingArgs(args []string) (outputFormat, error) {
+	remaining, format, err := splitOutputFormatFlag(args)
+	if err != nil {
+		return outputJSON, err
+	}
+	if len(remaining) > 0 {
+		return outputJSON, fmt.Errorf("unknown output option %q", remaining[0])
+	}
+	return format, nil
+}
+
 func parseForegroundOptions(args []string) (kernel.MaintainerOptions, error) {
 	opts := kernel.DefaultMaintainerOptions()
 	if len(args) == 0 {
@@ -478,6 +498,67 @@ func parseBackgroundOptions(args []string) (kernel.BackgroundMaintainerOptions, 
 func jsonOut(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b) + "\n"
+}
+
+func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string {
+	if format != outputShort {
+		return jsonOut(report)
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel repo-metadata benchmark")
+	fmt.Fprintf(&b, "exactness: %t\n", report.Exactness)
+	fmt.Fprintf(&b, "mismatches: %d\n", report.Mismatches)
+	fmt.Fprintf(&b, "mutation_boundary_invalidation: %t\n", report.MutationBoundaryInvalidation)
+	fmt.Fprintf(&b, "workload_only_wall_delta_ms: %d\n", report.WorkloadOnlyWallDeltaMS)
+	fmt.Fprintf(&b, "net_roi_ms: %d\n", report.NetROIMS)
+	fmt.Fprintf(&b, "quarantined_runs: %d\n", report.QuarantinedRuns)
+	fmt.Fprintf(&b, "no_broad_codex_speedup_claim: %t\n", report.NoBroadCodexSpeedupClaim)
+	fmt.Fprintln(&b, "commands:")
+	for _, command := range report.Commands {
+		fmt.Fprintf(&b, "  - %s\n", command)
+	}
+	return b.String()
+}
+
+func deepLocalBenchOut(report kernel.DeepBenchReport, format outputFormat) string {
+	if format != outputShort {
+		return jsonOut(report)
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel deep-local benchmark")
+	fmt.Fprintf(&b, "safety_gates: %s\n", gateStatusForCLI(report.SafetyGates))
+	fmt.Fprintf(&b, "performance_gates: %s\n", gateStatusForCLI(report.PerformanceGates))
+	fmt.Fprintf(&b, "enabled_fast_path_exactness: %t\n", report.EnabledFastPathExactness)
+	fmt.Fprintf(&b, "enabled_fast_path_mismatches: %d\n", report.EnabledFastPathMismatches)
+	fmt.Fprintf(&b, "native_only_candidate_exactness: %t\n", report.NativeOnlyCandidateExactness)
+	fmt.Fprintf(&b, "native_only_candidate_mismatches: %d\n", report.NativeOnlyCandidateMismatches)
+	fmt.Fprintf(&b, "stale_replay_observed: %t\n", report.StaleReplayObserved)
+	fmt.Fprintf(&b, "validation_replays: %d\n", report.NeverReplayDiagnostics.ValidationReplays)
+	fmt.Fprintf(&b, "metadata_fast_path_p95_us: %d\n", report.Performance.MetadataFastPathP95US)
+	fmt.Fprintf(&b, "proof_gated_replay_p95_us: %d\n", report.Performance.ProofGatedReplayP95US)
+	fmt.Fprintf(&b, "native_fallback_overhead_p95_us: %d\n", report.Performance.NativeFallbackOverheadP95US)
+	fmt.Fprintf(&b, "native_only_bookkeeping_p95_us: %d\n", report.Performance.NativeOnlyBookkeepingP95US)
+	fmt.Fprintf(&b, "no_broad_codex_speedup_claim: %t\n", report.NoBroadCodexSpeedupClaim)
+	for _, violation := range report.SafetyGates.Violations {
+		fmt.Fprintf(&b, "safety_violation: %s\n", violation)
+	}
+	for _, violation := range report.PerformanceGates.Violations {
+		fmt.Fprintf(&b, "performance_violation: %s\n", violation)
+	}
+	return b.String()
+}
+
+func gateStatusForCLI(gate kernel.GateReport) string {
+	if gate.Status != "" {
+		return gate.Status
+	}
+	if gate.Passed {
+		return "pass"
+	}
+	if gate.Required {
+		return "fail"
+	}
+	return "n/a"
 }
 
 func backgroundStatusOut(status kernel.BackgroundMaintainerStatus, format outputFormat) string {
