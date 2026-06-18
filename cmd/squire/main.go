@@ -12,6 +12,20 @@ import (
 	"squire.run/kernel/internal/kernel"
 )
 
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
+	buildDate    = "unknown"
+)
+
+type versionReport struct {
+	Product        string `json:"product"`
+	KernelContract string `json:"kernel_contract"`
+	Version        string `json:"version"`
+	Commit         string `json:"commit"`
+	Date           string `json:"date"`
+}
+
 func main() {
 	ctx := context.Background()
 	cwd, err := os.Getwd()
@@ -33,6 +47,13 @@ func main() {
 	switch {
 	case len(args) == 1 && args[0] == "setup":
 		out, err = kernel.Setup(ctx, cwd, storeRoot)
+	case len(args) >= 1 && args[0] == "version":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[1:], outputShort)
+		if err != nil {
+			break
+		}
+		out = versionOut(format)
 	case len(args) >= 3 && args[0] == "kernel" && args[1] == "prewarm-adjacent":
 		err = runAdjacentPrewarm(ctx, cwd, storeRoot, args[2:])
 		if err != nil {
@@ -175,6 +196,7 @@ func usageText() string {
 
 usage:
   squire setup
+  squire version [--short|--json]
   squire kernel status [--short]
   squire kernel run -- <command> [args...]
   squire kernel warm [--short|--json]
@@ -201,6 +223,7 @@ first use:
   squire kernel status --short
 
 help:
+  squire help version
   squire help kernel run
   squire help kernel maintain
   squire help boost
@@ -231,6 +254,14 @@ func helpTopic(topic []string) string {
 
 Initializes the local Squire Kernel store, prints privacy mode, and does not
 install global command shims.
+`
+	case "version":
+		return `usage:
+  squire version [--short|--json]
+
+Prints Squire Kernel build identity. Release builds can set version, commit,
+and date with Go linker flags. Human-readable output is the default; use
+--json for automation.
 `
 	case "kernel", "kernel status":
 		return `usage:
@@ -571,6 +602,29 @@ func parseBackgroundOptions(args []string) (kernel.BackgroundMaintainerOptions, 
 func jsonOut(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b) + "\n"
+}
+
+func currentVersionReport() versionReport {
+	return versionReport{
+		Product:        "Squire Kernel",
+		KernelContract: "v1",
+		Version:        buildVersion,
+		Commit:         buildCommit,
+		Date:           buildDate,
+	}
+}
+
+func versionOut(format outputFormat) string {
+	report := currentVersionReport()
+	if format == outputJSON {
+		return jsonOut(report)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s\n", report.Product, report.KernelContract)
+	fmt.Fprintf(&b, "version: %s\n", report.Version)
+	fmt.Fprintf(&b, "commit: %s\n", report.Commit)
+	fmt.Fprintf(&b, "date: %s\n", report.Date)
+	return b.String()
 }
 
 func warmReportOut(report kernel.WarmReport, format outputFormat) string {

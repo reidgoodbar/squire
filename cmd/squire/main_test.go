@@ -12,6 +12,7 @@ func TestUsageTextDocumentsKernelContract(t *testing.T) {
 	text := usageText()
 	for _, want := range []string{
 		"Squire Kernel v1",
+		"squire version",
 		"Agent chooses. Squire serves.",
 		"Native fallback always exists.",
 		"Runtime decisions are replay or native.",
@@ -32,6 +33,7 @@ func TestHelpTextForArgs(t *testing.T) {
 	}{
 		{name: "global long help", args: []string{"--help"}, want: "usage:"},
 		{name: "global help topic", args: []string{"help"}, want: "usage:"},
+		{name: "version topic", args: []string{"help", "version"}, want: "build identity"},
 		{name: "kernel run topic", args: []string{"kernel", "run", "--help"}, want: "The \"--\" delimiter is"},
 		{name: "kernel maintain topic", args: []string{"help", "kernel", "maintain"}, want: "resident maintainer"},
 		{name: "boost topic", args: []string{"boost", "-h"}, want: "no broad Codex speedup claim"},
@@ -47,6 +49,41 @@ func TestHelpTextForArgs(t *testing.T) {
 				t.Fatalf("help text missing %q:\n%s", tt.want, text)
 			}
 		})
+	}
+}
+
+func TestVersionOutput(t *testing.T) {
+	oldVersion, oldCommit, oldDate := buildVersion, buildCommit, buildDate
+	t.Cleanup(func() {
+		buildVersion, buildCommit, buildDate = oldVersion, oldCommit, oldDate
+	})
+	buildVersion = "1.2.3"
+	buildCommit = "abc123"
+	buildDate = "2026-06-18"
+
+	text := versionOut(outputShort)
+	for _, want := range []string{
+		"Squire Kernel v1",
+		"version: 1.2.3",
+		"commit: abc123",
+		"date: 2026-06-18",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("version short output missing %q:\n%s", want, text)
+		}
+	}
+
+	json := versionOut(outputJSON)
+	for _, want := range []string{
+		`"product": "Squire Kernel"`,
+		`"kernel_contract": "v1"`,
+		`"version": "1.2.3"`,
+		`"commit": "abc123"`,
+		`"date": "2026-06-18"`,
+	} {
+		if !strings.Contains(json, want) {
+			t.Fatalf("version json output missing %q:\n%s", want, json)
+		}
 	}
 }
 

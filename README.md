@@ -82,6 +82,12 @@ Level 2, Transparent Fast Path:
 - Prints privacy mode.
 - Does not install global command shims by default.
 
+`squire version [--short|--json]`
+
+- Prints Squire Kernel build identity.
+- Release builds can set version, commit, and date with Go linker flags.
+- Human-readable output is the default. Use `--json` for automation.
+
 `squire kernel status [--short]`
 
 - Shows repo oracle status.
