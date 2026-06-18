@@ -197,6 +197,43 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	return b.String(), nil
 }
 
+func KernelStatusSummary(ctx context.Context, cwd, storeRoot string) (string, error) {
+	k := New(storeRoot)
+	_ = k.Store.Init()
+	ws := k.Oracle.Snapshot(ctx, cwd)
+	latest, latestOK := k.Store.LoadLatestBenchmarkStatus()
+	ledger, ledgerErr := k.Store.Load()
+	ledgerOK := ledgerErr == nil
+	snapshot := HotSnapshotStatsForStore(storeRoot)
+	background, backgroundErr := LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
+	readiness := readinessStatus(ws, snapshot, background, backgroundErr)
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "Squire Kernel status")
+	fmt.Fprintf(&b, "readiness: %s\n", readiness)
+	fmt.Fprintf(&b, "repo_oracle: %s\n", availability(ws.OracleAvailable))
+	fmt.Fprintf(&b, "repo_root: %s\n", emptyAsNA(ws.RepoRoot))
+	fmt.Fprintf(&b, "branch: %s\n", emptyAsNA(ws.Branch))
+	fmt.Fprintf(&b, "head: %s\n", shortSHA(ws.Head))
+	fmt.Fprintln(&b, "native_fallback: available")
+	fmt.Fprintln(&b, "runtime_decisions: replay_or_native")
+	fmt.Fprintf(&b, "enabled_fast_paths: %d\n", len(EnabledFastPaths()))
+	fmt.Fprintf(&b, "proof_gated_replay_candidates: %d\n", len(ProofGatedReplayCandidates()))
+	fmt.Fprintln(&b, "native_only_discovery: 4")
+	fmt.Fprintf(&b, "prepared_entries: %s\n", preparedEntrySummary(ledger, ledgerOK))
+	fmt.Fprintf(&b, "hot_snapshot: %s\n", hotSnapshotSummary(snapshot))
+	fmt.Fprintf(&b, "background_maintainer: %s\n", backgroundSummary(background, backgroundErr))
+	if latestOK {
+		fmt.Fprintf(&b, "latest_benchmark: %s safety=%s performance=%s\n", latest.Name, gateStatus(latest.SafetyGates), gateStatus(latest.PerformanceGates))
+	} else {
+		fmt.Fprintln(&b, "latest_benchmark: none")
+	}
+	if readiness != "hot" {
+		fmt.Fprintln(&b, "next: squire kernel maintain --background")
+	}
+	return b.String(), nil
+}
+
 func readinessStatus(ws WorldState, snapshot HotSnapshotStats, background BackgroundMaintainerStatus, backgroundErr error) string {
 	if !ws.OracleAvailable {
 		return "native_fallback"
@@ -208,6 +245,43 @@ func readinessStatus(ws WorldState, snapshot HotSnapshotStats, background Backgr
 		return "warm"
 	}
 	return "needs_warm_or_maintainer"
+}
+
+func preparedEntrySummary(ledger *ValidityLedger, ok bool) string {
+	if !ok || ledger == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d", len(ledger.Prepared))
+}
+
+func hotSnapshotSummary(snapshot HotSnapshotStats) string {
+	if !snapshot.Available {
+		return "missing"
+	}
+	return fmt.Sprintf("available entries=%d exact_commands=%d workspace_files=%d", snapshot.Entries, snapshot.ExactEntries, snapshot.WarmFileEntries)
+}
+
+func backgroundSummary(background BackgroundMaintainerStatus, err error) string {
+	if err != nil {
+		return "stopped"
+	}
+	if background.Running {
+		if background.PID > 0 {
+			return fmt.Sprintf("running pid=%d", background.PID)
+		}
+		return "running"
+	}
+	return "stopped"
+}
+
+func shortSHA(s string) string {
+	if s == "" {
+		return "n/a"
+	}
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 func preparedCounts(entries []PreparedEntry) (fastPathOutputs, proofGatedOutputs, warmFiles, fileTreeIndexes, projectMetadata, commandPath, ecosystem, dependency, sourceSymbols int) {

@@ -45,6 +45,8 @@ func main() {
 		return
 	case len(args) == 2 && args[0] == "kernel" && args[1] == "status":
 		out, err = kernel.KernelStatus(ctx, cwd, storeRoot)
+	case len(args) == 3 && args[0] == "kernel" && args[1] == "status" && args[2] == "--short":
+		out, err = kernel.KernelStatusSummary(ctx, cwd, storeRoot)
 	case len(args) == 2 && args[0] == "kernel" && args[1] == "warm":
 		var report kernel.WarmReport
 		report, err = kernel.Warm(ctx, cwd, storeRoot)
@@ -101,7 +103,7 @@ func usageText() string {
 
 usage:
   squire setup
-  squire kernel status
+  squire kernel status [--short]
   squire kernel run -- <command> [args...]
   squire kernel warm
   squire kernel maintain --once
@@ -160,11 +162,12 @@ install global command shims.
 `
 	case "kernel", "kernel status":
 		return `usage:
-  squire kernel status
+  squire kernel status [--short]
 
-Shows readiness, repo oracle state, invalidation epochs, enabled fast paths,
-proof-gated replay candidates, native-only discovery boundaries, prepared world
-counts, background maintainer status, and latest benchmark status.
+Shows kernel readiness. The default output includes repo oracle state,
+invalidation epochs, enabled fast paths, proof-gated replay candidates,
+native-only discovery boundaries, prepared world counts, background maintainer
+status, and latest benchmark status. Use --short for a compact readiness view.
 `
 	case "kernel run":
 		return `usage:

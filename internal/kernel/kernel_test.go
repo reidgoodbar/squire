@@ -1479,6 +1479,29 @@ func TestSetupAndStatusSurfaces(t *testing.T) {
 	}
 }
 
+func TestKernelStatusSummaryIsCompact(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	storeRoot := DefaultStoreRoot(repo)
+	if _, err := Warm(ctx, repo, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	status, err := KernelStatusSummary(ctx, repo, storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Squire Kernel status", "readiness:", "repo_oracle:", "repo_root:", "native_fallback: available", "runtime_decisions: replay_or_native", "enabled_fast_paths:", "prepared_entries:", "hot_snapshot:", "background_maintainer:"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("kernel status summary missing %q:\n%s", want, status)
+		}
+	}
+	for _, notWant := range []string{"current_repo_oracle_state", "invalidation_epoch:", "process_guard:"} {
+		if strings.Contains(status, notWant) {
+			t.Fatalf("kernel status summary should not include detailed section %q:\n%s", notWant, status)
+		}
+	}
+}
+
 func TestKernelStatusShowsLatestBenchmark(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)
