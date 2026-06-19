@@ -21,7 +21,7 @@ type HotClientStats struct {
 }
 
 func RecordHotClientResult(storeRoot string, res RunResult, replayWall time.Duration) {
-	if storeRoot == "" || res.Mode != ModeReplay || res.Proof == nil || res.Proof.OperationKey != "cli-mmap-hot-snapshot" {
+	if storeRoot == "" || res.Mode != ModeReplay || res.Proof == nil || !isHotClientProof(res.Proof.OperationKey) {
 		return
 	}
 	if err := os.MkdirAll(storeRoot, 0o700); err != nil {
@@ -37,6 +37,10 @@ func RecordHotClientResult(storeRoot string, res RunResult, replayWall time.Dura
 	}
 	defer f.Close()
 	_, _ = fmt.Fprintf(f, "%d replay %s %d %d\n", time.Now().UnixNano(), res.Family, res.Observation.NativeWallMS, replayWall.Microseconds())
+}
+
+func isHotClientProof(proof string) bool {
+	return proof == "cli-mmap-hot-snapshot" || proof == "mmap-hot-snapshot"
 }
 
 func LoadHotClientStats(storeRoot string) HotClientStats {

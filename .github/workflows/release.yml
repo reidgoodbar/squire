@@ -70,8 +70,20 @@ jobs:
       - name: Release smoke
         run: scripts/release_smoke.sh .tmp/squire
 
+      - name: Adapter path benchmark
+        run: scripts/adapter_path_bench.py .tmp/squire --json | tee artifacts/adapter-path-bench.json
+
+      - name: Strict replay budget
+        run: scripts/edge_stress.py .tmp/squire --scenario echo --normal-ux --strict-performance --json | tee artifacts/strict-replay-budget.json
+
+      - name: Multi-agent adapter benchmark
+        run: scripts/multi_agent_bench.py .tmp/squire --agents 1,2 --rounds 3 --json | tee artifacts/multi-agent-bench.json
+
       - name: Edge stress
         run: scripts/edge_stress.py .tmp/squire | tee artifacts/edge-stress.txt
+
+      - name: Normal UX edge stress
+        run: scripts/edge_stress.py .tmp/squire --normal-ux | tee artifacts/edge-stress-normal-ux.txt
 
       - name: Assert release safety gates
         run: |

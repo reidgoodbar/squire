@@ -48,12 +48,64 @@ squire kernel run -- git rev-parse HEAD
 squire kernel status --short
 ```
 
+## Normal Product UX
+
+The normal product path is not "teach the model to call Squire." The model or
+agent runtime continues to choose ordinary commands such as `git status
+--short`, `cat package.json`, or `python --version`.
+
+Squire belongs below that layer:
+
+- a resident background maintainer keeps local world state warm;
+- a terminal adapter forwards already-chosen commands to Squire over a local
+  protocol;
+- Squire either returns exact proven bytes or runs the command natively.
+
+`squire kernel run -- <command>` is a diagnostic/manual surface. A production
+agent integration should use `squire kernel adapter --stdio --ensure-maintainer`
+as a long-lived host process, not as a model-visible command.
+
+The current invisible UX proof is `scripts/adapter_path_bench.py`. It creates a
+fresh temp Git repo, starts the long-lived adapter as the hidden backend, and
+measures ordinary visible commands. The measured command stream contains no
+`squire kernel run -- ...` command. A 1000-round `/private/tmp` run served 3000
+commands with zero violations:
+
+- replay hit p95: `0.487ms`
+- invalid/miss overhead p95: `-0.274ms`
+- never-direct overhead p95: `0.127ms`
+- first post-mutation invalid request: `native`
+
+The replay SLA is intentionally strict: replay hits should stay below `1ms`
+p95 wall time. Invalid/missing-cache and never-replay paths are native
+executions, so their performance budget is Squire overhead above native, not
+total command wall time.
+
+The normal-UX many-agent proof is `scripts/multi_agent_bench.py`. It starts one
+resident maintainer plus one long-lived adapter client per simulated agent, then
+A/B compares ordinary command argv against native subprocess execution in a
+fresh temp repo. The workload intentionally mixes replayable local discovery
+with a never-replay native command, and every measured result is byte-compared
+against native stdout, stderr, and exit code. A `/private/tmp` run with 1, 2, 4,
+8, and 16 concurrent agents over 10 rounds reported zero mismatches and a
+Squire-free measured command stream:
+
+- 1 agent, 80 commands: `4.780x`, `650.765ms` wall delta
+- 2 agents, 160 commands: `4.559x`, `528.408ms` wall delta
+- 4 agents, 320 commands: `4.730x`, `753.041ms` wall delta
+- 8 agents, 640 commands: `5.533x`, `1301.093ms` wall delta
+- 16 agents, 1280 commands: `5.793x`, `2247.894ms` wall delta
+
 For release checks:
 
 ```sh
 go test ./...
 squire boost bench repo-metadata
 scripts/release_smoke.sh ./squire
+scripts/adapter_path_bench.py ./squire
+scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
+scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
+scripts/edge_stress.py ./squire --normal-ux
 scripts/edge_stress.py ./squire
 ```
 
@@ -64,7 +116,8 @@ publishing:
 
 - `ci.yml` runs fast tests, the repo metadata benchmark, and smoke checks on
   pushes and pull requests.
-- `nightly.yml` runs the deeper baseline plus process-level edge stress.
+- `nightly.yml` runs the deeper baseline, adapter benchmarks, multi-agent A/B,
+  and edge stress.
 - `release.yml` runs the release gate, builds cross-platform archives, generates
   `SHA256SUMS`, and creates or updates a GitHub Release.
 
@@ -174,6 +227,8 @@ Level 2, Transparent Fast Path:
 `squire kernel run -- <command> [args...]`
 
 - Runs the agent-chosen command through Squire Kernel.
+- This is a diagnostic/manual CLI surface; normal product integrations should
+  prefer the long-lived terminal adapter so the model never has to call Squire.
 - First tries the foreground CLI mmap hot-client path before constructing the
   full kernel object, loading ledgers, or touching the daemon/socket path.
 - Writes exact stdout and stderr bytes and exits with the exact native or replay
@@ -185,6 +240,27 @@ Level 2, Transparent Fast Path:
   This does not change the current command result, expose suggestions, or make
   future file-inspection commands replayable unless exact local proof and output
   bytes are available.
+
+`squire kernel adapter --stdio [--ensure-maintainer]`
+
+- Starts a long-lived foreground adapter for terminal runtimes.
+- Reads newline-delimited JSON requests from stdin and writes newline-delimited
+  JSON responses to stdout.
+- The request contains the already-chosen `argv`, `cwd`, optional environment
+  overlay, optional exact environment replacement, and optional session ID.
+- The response contains exact stdout/stderr bytes as base64 plus the exact exit
+  code, mode, family, proof label, and diagnostics.
+- Requests may set `debug: true` to include phase timings; they are omitted on
+  the default hot path to keep the foreground adapter small and fast.
+- Reuses kernel state across requests so repeated command serving does not pay
+  one process startup and kernel construction per command.
+- Reuses the kernel's cached mmap hot snapshot view on replay hits and writes
+  the default non-debug response through a pooled, manual JSON writer.
+- With `--ensure-maintainer`, starts or reuses the resident background
+  maintainer before serving requests.
+- This is a host/runtime integration point. It does not add an agent tool,
+  change prompts, suggest commands, or require the model to emit a Squire
+  command.
 
 `squire kernel warm [--short|--json]`
 
@@ -214,8 +290,9 @@ the agent and does not change command execution.
 
 Squire-owned setup, status, warm, maintain, benchmark, and adjacent-prewarm Git
 reads run with `GIT_OPTIONAL_LOCKS=0` to avoid contending with planner commits
-in multi-agent workflows. `squire kernel run -- <command>` preserves the
-agent-chosen command environment for native fallback.
+in multi-agent workflows. `squire kernel run -- <command>` and `squire kernel
+adapter --stdio` preserve the agent-chosen command environment for native
+fallback.
 
 Process guard telemetry is observe-only. Squire may report local process/FD
 diagnostics in status surfaces, but it never kills processes, closes file
@@ -302,6 +379,12 @@ Normal CI stays fast:
 - `go test ./...`
 - `squire boost bench repo-metadata`
 - `scripts/release_smoke.sh .tmp/squire`
+- `scripts/adapter_path_bench.py .tmp/squire`, which verifies the invisible
+  terminal-adapter UX path, exactness, first-invalid native fallback, and
+  sub-1ms replay-hit and native-overhead budgets
+- `scripts/edge_stress.py .tmp/squire --scenario echo --normal-ux --strict-performance`,
+  which enforces the sub-1ms replay p95 budget in the normal terminal adapter
+  path
 
 The nightly/manual workflow runs the default `deep-local` profile plus
 process-level edge stress when hot replay, prewarming, invalidation, or
@@ -310,7 +393,14 @@ maintainer lifecycle code changes:
 - safety gates
 - invalidation gates
 - native-only discovery boundary reporting
+- strict normal-UX replay budget with `scripts/edge_stress.py .tmp/squire --scenario echo --normal-ux --strict-performance`
+- normal-UX adapter edge stress with `scripts/edge_stress.py .tmp/squire --normal-ux`
+- normal-UX multi-agent A/B with `scripts/multi_agent_bench.py .tmp/squire`
 - `scripts/edge_stress.py .tmp/squire`
+
+Replay performance gates apply to replay wall time and require p95 below
+`1ms`. Invalid/missing-cache and never-replay commands run native, so their
+gate is Squire overhead above the native command, not total command wall time.
 
 Nightly reports repo-summary proof-gated diagnostics and native-only discovery
 diagnostics separately from enabled metadata fast-path exactness. Performance
@@ -373,13 +463,18 @@ network-dependent operations.
 
 ### Edge-Stress Testing
 
-`scripts/edge_stress.py` runs process-level stress in fresh temp repos. It
-checks concurrent hot reads, mid-warm invalidation, interrupted clients,
-dynamic `.gitignore`, environment-key separation, multi-CWD proof separation,
-symlink boundaries, SIGPIPE/early exit, ANSI/control-byte fidelity, mtime skew,
-store write failures, EMFILE pressure, signal floods, oversized native fallback,
-and scoped child-process cleanup. These tests are intentionally local and
-fault-open: failures must not corrupt the cache or remove native fallback.
+`scripts/edge_stress.py` runs process-level stress in fresh temp repos. With
+`--normal-ux`, command-serving checks route ordinary argv through long-lived
+adapter sessions so the measured command stream stays model-clean while setup,
+warm, status, and maintainer lifecycle remain Squire-owned control-plane calls.
+Process-interruption scenarios still use foreground CLI clients where the
+client process is the failure target. The suite checks concurrent hot reads,
+mid-warm invalidation, interrupted clients, dynamic `.gitignore`,
+environment-key separation, multi-CWD proof separation, symlink boundaries,
+SIGPIPE/early exit, ANSI/control-byte fidelity, mtime skew, store write
+failures, EMFILE pressure, signal floods, oversized native fallback, and scoped
+child-process cleanup. These tests are intentionally local and fault-open:
+failures must not corrupt the cache or remove native fallback.
 
 ## Current Operator Sets
 
@@ -565,36 +660,53 @@ The general rule for future replay candidates is:
 ## Benchmarking And Replay Behavior
 
 This section documents current Squire Kernel benchmark and replay behavior.
+All numbers are local measurements and should be treated as scoped evidence,
+not a broad Codex or agent-speedup claim.
 
-Current dogfood measurements from this repo on 2026-06-18:
+Current measurements from this repo on 2026-06-19:
 
-- Foreground CLI hot-client probe, 11 warmed local-discovery commands:
-  - Native wall time: `59.081ms`
-  - Squire wall time: `29.999ms`
-  - User-visible wall saved: `29.083ms`
-  - Replays: `11/11`
-  - Proof path: `cli-mmap-hot-snapshot`
-- Same probe with debug result frames enabled:
-  - Native wall time: `57.630ms`
-  - Squire wall time: `30.224ms`
-  - Kernel-phase saved: `51.847ms`
-  - Replays: `11/11`
-- Earlier pre-hot-client CLI probe:
-  - Squire wall time: `133.173ms`
-  - The regression source was foreground CLI/process setup and store-root
-    discovery overhead, not replay exactness. The CLI mmap hot client fixed
-    this by checking the hot snapshot before constructing the full kernel.
-- Deep-local benchmark after the hot-client work:
-  - Safety gates: pass
-  - Exactness: true
+- Invisible terminal-adapter UX, 1000-round `/private/tmp` run:
+  - Backend: hidden `squire kernel adapter --stdio --ensure-maintainer`
+  - Visible measured commands: `git status --short`, `git add -h`
+  - Agent-visible Squire command: `false`
+  - Measured command stream contains `squire`: `false`
+  - Total served commands: `3000`
+  - Replay hit p95: `0.487ms`
+  - Invalid/miss overhead p95: `-0.274ms`
+  - Never-direct overhead p95: `0.127ms`
+  - First post-mutation invalid request: `native`
+  - Violations: `0`
+- Strict replay echo, `/private/tmp`, 40 concurrent normal-UX requests:
+  - Adapter hot replay p95: `293us`
+  - Process CLI hot replay p95: `341us`
+  - Budget: `1000us`
+  - Violations: `0`
+- Multi-agent normal-UX A/B, `/private/tmp`, 10 rounds:
+  - Workload: mixed local discovery plus one never-replay native command.
+  - Agent-visible Squire command: `false`
+  - Exact stdout/stderr/exit-code mismatches: `0`
+  - 1 agent, 80 commands: `4.780x`, `650.765ms` wall delta
+  - 2 agents, 160 commands: `4.559x`, `528.408ms` wall delta
+  - 4 agents, 320 commands: `4.730x`, `753.041ms` wall delta
+  - 8 agents, 640 commands: `5.533x`, `1301.093ms` wall delta
+  - 16 agents, 1280 commands: `5.793x`, `2247.894ms` wall delta
+- Deep-local `/private/tmp` profile:
+  - Runs: `1219`
+  - Packages: `48`
+  - Tracked files: `341`
+  - Commits: `39`
+  - Incremental turns: `36`
+  - Safety gates: `pass`
+  - Enabled fast-path exactness: `true`
   - Enabled fast-path mismatches: `0`
   - Stale HEAD replays: `0`
   - Stale branch replays: `0`
   - Validation replays: `0`
-  - Metadata workload delta: `+3.105s` across `1167` metadata runs
-  - Metadata fast-path p95: `1931us`
-  - Current performance status: `needs_optimization` because native fallback
-    overhead p95 remains over budget in the deep-local profile.
+  - Metadata workload delta: `+2.550s`
+  - Metadata fast-path p95: `1641us`
+  - Performance status: `needs_optimization` for the older standalone
+    `kernel run` native-fallback overhead profile. This is reported separately
+    from the long-lived adapter product path.
 
 - Benchmark metrics are split by operator family:
   - `metadata exactness/boost` - measures exactness and ROI for metadata fast paths.

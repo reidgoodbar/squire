@@ -1,6 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +25,7 @@ func TestUsageTextDocumentsKernelContract(t *testing.T) {
 		"Native fallback always exists.",
 		"Runtime decisions are replay or native.",
 		"squire kernel maintain --background",
+		"squire kernel adapter --stdio",
 		"squire kernel run -- git rev-parse HEAD",
 	} {
 		if !strings.Contains(text, want) {
@@ -36,6 +45,7 @@ func TestHelpTextForArgs(t *testing.T) {
 		{name: "version topic", args: []string{"help", "version"}, want: "build identity"},
 		{name: "kernel run topic", args: []string{"kernel", "run", "--help"}, want: "The \"--\" delimiter is"},
 		{name: "kernel maintain topic", args: []string{"help", "kernel", "maintain"}, want: "resident maintainer"},
+		{name: "kernel adapter topic", args: []string{"help", "kernel", "adapter"}, want: "model still"},
 		{name: "boost topic", args: []string{"boost", "-h"}, want: "no broad Codex speedup claim"},
 	}
 
@@ -103,6 +113,7 @@ func TestKernelUsageError(t *testing.T) {
 		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown kernel subcommand "stats"`},
 		{name: "bad status option", args: []string{"status", "--json"}, want: `unknown kernel status option "--json"`},
 		{name: "missing run delimiter", args: []string{"run"}, want: "requires -- before the command"},
+		{name: "bad adapter usage", args: []string{"adapter"}, want: "invalid kernel adapter usage"},
 		{name: "bad warm option", args: []string{"warm", "--short"}, want: `does not accept option "--short"`},
 	}
 
@@ -113,6 +124,243 @@ func TestKernelUsageError(t *testing.T) {
 				t.Fatalf("kernelUsageError(%v) = %q, want %q", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestKernelAdapterServesMultipleRequestsOverOneProcess(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	requests := []adapterRequest{
+		{ID: "head", CWD: repo, Argv: []string{"git", "rev-parse", "HEAD"}},
+		{ID: "branch", CWD: repo, Argv: []string{"git", "rev-parse", "--abbrev-ref", "HEAD"}},
+	}
+	var in bytes.Buffer
+	for _, req := range requests {
+		if err := json.NewEncoder(&in).Encode(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := server.serve(ctx, &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(out.Bytes()), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("adapter returned %d response lines, want 2:\n%s", len(lines), out.String())
+	}
+	got := make(map[string]adapterResponse)
+	for _, line := range lines {
+		var resp adapterResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			t.Fatalf("response is not JSON: %s\n%v", line, err)
+		}
+		if !resp.OK {
+			t.Fatalf("adapter response failed: %+v", resp)
+		}
+		got[resp.ID] = resp
+	}
+	assertAdapterStdout(t, got["head"], runGit(t, repo, "rev-parse", "HEAD"))
+	assertAdapterStdout(t, got["branch"], runGit(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
+	if len(server.kernels) != 1 {
+		t.Fatalf("adapter constructed %d kernel instances, want one reused instance", len(server.kernels))
+	}
+}
+
+func TestAdapterEnvOverlayRestoresProcessEnvironment(t *testing.T) {
+	const key = "SQUIRE_ADAPTER_TEST_ENV"
+	t.Setenv(key, "before")
+	resp := withAdapterEnv(map[string]string{key: "during"}, false, func() adapterResponse {
+		if got := os.Getenv(key); got != "during" {
+			return adapterResponse{OK: false, Error: "env during callback = " + got}
+		}
+		return adapterResponse{OK: true}
+	})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if got := os.Getenv(key); got != "before" {
+		t.Fatalf("env after callback = %q, want before", got)
+	}
+}
+
+func TestAdapterFastResponseWriterMatchesJSONSemantics(t *testing.T) {
+	resp := adapterResponse{
+		ID:                "id-with-quote-\"",
+		OK:                true,
+		StdoutB64:         base64.StdEncoding.EncodeToString([]byte("hello\n")),
+		StderrB64:         base64.StdEncoding.EncodeToString([]byte("warn\n")),
+		ExitCode:          7,
+		Mode:              kernel.ModeReplay,
+		Family:            kernel.FamilyRepoState,
+		Proof:             "mmap-hot-snapshot",
+		NativeWallMS:      11,
+		Diagnostics:       []string{"line\nbreak", "quote\""},
+		MaintainerRunning: true,
+		MaintainerAlready: true,
+	}
+	var fast bytes.Buffer
+	writeAdapterResponseFast(&fast, resp)
+	var got adapterResponse
+	if err := json.Unmarshal(bytes.TrimSpace(fast.Bytes()), &got); err != nil {
+		t.Fatalf("fast response is invalid JSON: %s\n%v", fast.String(), err)
+	}
+	if !reflect.DeepEqual(got, resp) {
+		t.Fatalf("decoded fast response mismatch\ngot:  %+v\nwant: %+v\njson: %s", got, resp, fast.String())
+	}
+
+	var slow bytes.Buffer
+	if err := writeAdapterResponseSlow(&slow, resp); err != nil {
+		t.Fatal(err)
+	}
+	var slowMap, fastMap map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(slow.Bytes()), &slowMap); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(fast.Bytes()), &fastMap); err != nil {
+		t.Fatal(err)
+	}
+	if !jsonMapsEqual(slowMap, fastMap) {
+		t.Fatalf("fast JSON differs from standard encoder\nfast=%s\nslow=%s", fast.String(), slow.String())
+	}
+}
+
+func TestAdapterResponseWriterKeepsDebugPhases(t *testing.T) {
+	resp := adapterResponse{
+		ID:       "debug",
+		OK:       true,
+		ExitCode: 0,
+		Mode:     kernel.ModeReplay,
+		Family:   kernel.FamilyLocalRepoMetadata,
+		Phases:   &kernel.PhaseTimings{ClassifyMS: 1.25},
+	}
+	var out bytes.Buffer
+	if err := writeAdapterResponse(&out, resp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"phases"`) {
+		t.Fatalf("debug response missing phases: %s", out.String())
+	}
+	var got adapterResponse
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Phases == nil || got.Phases.ClassifyMS != resp.Phases.ClassifyMS {
+		t.Fatalf("decoded phases = %+v, want %+v", got.Phases, resp.Phases)
+	}
+}
+
+func TestAdapterPlanCacheCopiesArgv(t *testing.T) {
+	server := &adapterServer{plans: make(map[string]adapterCommandPlan)}
+	cwd := t.TempDir()
+	argv := []string{"git", "status", "--short"}
+	shortPlan := server.planFor(cwd, argv)
+	if shortPlan.key == "" {
+		t.Fatal("short plan has empty key")
+	}
+	argv[2] = "--porcelain"
+	porcelainPlan := server.planFor(cwd, argv)
+	if porcelainPlan.key == shortPlan.key {
+		t.Fatalf("mutated argv reused stale plan key %q", porcelainPlan.key)
+	}
+	argv[2] = "--short"
+	again := server.planFor(cwd, argv)
+	if again.key != shortPlan.key {
+		t.Fatalf("short plan key = %q, want cached %q", again.key, shortPlan.key)
+	}
+	if len(server.plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(server.plans))
+	}
+}
+
+func TestKernelAdapterNativeDirectSkipsMaintainerAndKernel(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		ensureMaintainer: true,
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	req := adapterRequest{
+		ID:   "never",
+		CWD:  repo,
+		Argv: []string{"python3", "-m", "unittest", "-h"},
+	}
+	resp := server.handleRequest(ctx, req)
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if resp.Mode != kernel.ModeNever {
+		t.Fatalf("mode = %s, want never", resp.Mode)
+	}
+	if resp.Family != kernel.FamilyValidation {
+		t.Fatalf("family = %s, want validation", resp.Family)
+	}
+	if len(server.kernels) != 0 {
+		t.Fatalf("native-direct path constructed %d kernel instances", len(server.kernels))
+	}
+	if len(server.maintainers) != 0 {
+		t.Fatalf("native-direct path touched maintainer state: %+v", server.maintainers)
+	}
+	assertAdapterStdout(t, resp, runCommand(t, repo, "python3", "-m", "unittest", "-h"))
+}
+
+func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	req := adapterRequest{
+		ID:   "status",
+		CWD:  repo,
+		Argv: []string{"git", "status", "--short"},
+	}
+	first := server.handleRequest(ctx, req)
+	if !first.OK {
+		t.Fatalf("first response failed: %+v", first)
+	}
+	if first.Mode != kernel.ModeNative {
+		t.Fatalf("first mode = %s, want native cold miss", first.Mode)
+	}
+	assertAdapterStdout(t, first, runGit(t, repo, "status", "--short"))
+	if len(server.plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(server.plans))
+	}
+	if len(server.hotMisses) != 1 {
+		t.Fatalf("hot misses = %d, want 1", len(server.hotMisses))
+	}
+	second := server.handleRequest(ctx, req)
+	if !second.OK {
+		t.Fatalf("second response failed: %+v", second)
+	}
+	if second.Mode != kernel.ModeNative {
+		t.Fatalf("second mode = %s, want native hot miss memo", second.Mode)
+	}
+	assertAdapterStdout(t, second, runGit(t, repo, "status", "--short"))
+	if len(server.plans) != 1 {
+		t.Fatalf("plans after second request = %d, want 1", len(server.plans))
+	}
+	if len(server.hotMisses) != 1 {
+		t.Fatalf("hot misses after second request = %d, want 1", len(server.hotMisses))
 	}
 }
 
@@ -446,4 +694,100 @@ func TestMaintainerReportShortOutput(t *testing.T) {
 			t.Fatalf("short maintainer report missing %q:\n%s", want, text)
 		}
 	}
+}
+
+func initAdapterGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "squire@example.invalid"},
+		{"config", "user.name", "Squire Kernel"},
+	} {
+		stdout, stderr, code := runGitRaw(repo, args...)
+		if code != 0 {
+			t.Fatalf("git %s failed with code %d\nstdout=%s\nstderr=%s", strings.Join(args, " "), code, stdout, stderr)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Adapter Test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "README.md"},
+		{"commit", "-m", "initial"},
+	} {
+		stdout, stderr, code := runGitRaw(repo, args...)
+		if code != 0 {
+			t.Fatalf("git %s failed with code %d\nstdout=%s\nstderr=%s", strings.Join(args, " "), code, stdout, stderr)
+		}
+	}
+	return repo
+}
+
+func runGit(t *testing.T, repo string, args ...string) []byte {
+	t.Helper()
+	stdout, stderr, code := runGitRaw(repo, args...)
+	if code != 0 {
+		t.Fatalf("git %s failed with code %d\nstdout=%s\nstderr=%s", strings.Join(args, " "), code, stdout, stderr)
+	}
+	return stdout
+}
+
+func runCommand(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s failed: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.Bytes()
+}
+
+func runGitRaw(repo string, args ...string) ([]byte, []byte, int) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			code = 1
+			stderr.WriteString(err.Error())
+		}
+	}
+	return stdout.Bytes(), stderr.Bytes(), code
+}
+
+func assertAdapterStdout(t *testing.T, resp adapterResponse, want []byte) {
+	t.Helper()
+	got, err := base64.StdEncoding.DecodeString(resp.StdoutB64)
+	if err != nil {
+		t.Fatalf("stdout is not base64: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("adapter stdout mismatch for %s\ngot:  %q\nwant: %q", resp.ID, got, want)
+	}
+	stderr, err := base64.StdEncoding.DecodeString(resp.StderrB64)
+	if err != nil {
+		t.Fatalf("stderr is not base64: %v", err)
+	}
+	if len(stderr) != 0 {
+		t.Fatalf("adapter stderr for %s = %q, want empty", resp.ID, stderr)
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("adapter exit code for %s = %d, want 0", resp.ID, resp.ExitCode)
+	}
+}
+
+func jsonMapsEqual(left, right map[string]any) bool {
+	leftBytes, leftErr := json.Marshal(left)
+	rightBytes, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
 }

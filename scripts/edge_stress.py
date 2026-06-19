@@ -10,6 +10,7 @@ exercise inside a single Go test process.
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import json
@@ -23,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -34,6 +36,95 @@ except ImportError:  # pragma: no cover - Windows fallback.
 
 class StressFailure(Exception):
     pass
+
+
+USE_NORMAL_UX = False
+ADAPTERS: dict[str, "AdapterSession"] = {}
+
+
+class AdapterSession:
+    def __init__(self, sq: list[str], repo: Path):
+        self.repo = repo
+        self.proc = subprocess.Popen(
+            sq + ["kernel", "adapter", "--stdio", "--ensure-maintainer"],
+            cwd=str(repo),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=os.environ.copy(),
+        )
+        self.seq = 0
+        self.lock = threading.Lock()
+
+    def request(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        debug: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+        with self.lock:
+            if self.proc.stdin is None or self.proc.stdout is None:
+                raise StressFailure("normal UX adapter pipes unavailable")
+            self.seq += 1
+            payload: dict[str, Any] = {
+                "id": str(self.seq),
+                "cwd": str(cwd),
+                "argv": command,
+                "session_id": "edge-stress-normal-ux",
+            }
+            if env:
+                payload["env"] = env
+            if debug:
+                payload["debug"] = True
+            self.proc.stdin.write(json.dumps(payload) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+        if not line:
+            stderr = self.proc.stderr.read() if self.proc.stderr else ""
+            raise StressFailure(f"normal UX adapter closed early: {stderr}")
+        resp = json.loads(line)
+        stdout = base64.b64decode(resp.get("stdout_b64", ""))
+        stderr = base64.b64decode(resp.get("stderr_b64", ""))
+        proc = subprocess.CompletedProcess(command, int(resp.get("exit_code", 0)), stdout, stderr)
+        return proc, resp
+
+    def close(self) -> None:
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+
+
+def adapter_key(repo: Path) -> str:
+    return str(repo.resolve())
+
+
+def adapter_for(sq: list[str], repo: Path) -> AdapterSession:
+    key = adapter_key(repo)
+    adapter = ADAPTERS.get(key)
+    if adapter is None or adapter.proc.poll() is not None:
+        adapter = AdapterSession(sq, repo)
+        ADAPTERS[key] = adapter
+    return adapter
+
+
+def close_adapter(repo: Path) -> None:
+    adapter = ADAPTERS.pop(adapter_key(repo), None)
+    if adapter is not None:
+        adapter.close()
+
+
+def close_all_adapters() -> None:
+    for adapter in list(ADAPTERS.values()):
+        adapter.close()
+    ADAPTERS.clear()
 
 
 def run(
@@ -102,6 +193,8 @@ def squire_debug(
     env: dict[str, str] | None = None,
     timeout: float = 30,
 ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any] | None]:
+    if USE_NORMAL_UX:
+        return adapter_for(sq, repo).request(command, cwd=repo, env=env, debug=True)
     debug_env = {"SQUIRE_KERNEL_DEBUG_RESULT": "1"}
     if env:
         debug_env.update(env)
@@ -168,6 +261,7 @@ def setup_kernel(sq: list[str], repo: Path, *, background: bool = True, env: dic
 
 
 def stop_kernel(sq: list[str], repo: Path) -> None:
+    close_adapter(repo)
     squire(sq, repo, ["kernel", "maintain", "--stop", "--short"], timeout=10)
 
 
@@ -313,7 +407,10 @@ def scenario_echo(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
 
         def one() -> tuple[int, subprocess.CompletedProcess[bytes]]:
             start = time.perf_counter_ns()
-            proc = squire(sq, repo, ["kernel", "run", "--", "git", "rev-parse", "--show-toplevel"])
+            if USE_NORMAL_UX:
+                proc, _ = adapter_for(sq, repo).request(["git", "rev-parse", "--show-toplevel"], cwd=repo)
+            else:
+                proc = squire(sq, repo, ["kernel", "run", "--", "git", "rev-parse", "--show-toplevel"])
             elapsed = (time.perf_counter_ns() - start) // 1000
             return elapsed, proc
 
@@ -333,6 +430,7 @@ def scenario_echo(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         return {
             "scenario": "token_stream_echo",
             "status": "pass",
+            "command_serving_ux": "adapter" if USE_NORMAL_UX else "process_cli",
             "requests": args.echo_requests,
             "hot_replay": timing_stats(hot),
             "external_process_wall": timing_stats(external_us),
@@ -1119,7 +1217,7 @@ def main() -> int:
         help="scenario to run",
     )
     parser.add_argument("--echo-requests", type=int, default=40)
-    parser.add_argument("--hot-p95-budget-us", type=int, default=2000)
+    parser.add_argument("--hot-p95-budget-us", type=int, default=1000)
     parser.add_argument("--strict-performance", action="store_true")
     parser.add_argument("--race-files", type=int, default=800)
     parser.add_argument("--race-mutation-window-s", type=float, default=1.5)
@@ -1137,7 +1235,15 @@ def main() -> int:
     parser.add_argument("--giant-bytes", type=int, default=15 * 1024 * 1024)
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--keep-tmp", action="store_true")
+    parser.add_argument(
+        "--normal-ux",
+        action="store_true",
+        help="serve ordinary commands through long-lived adapter sessions where the scenario is command-serving focused",
+    )
     args = parser.parse_args()
+
+    global USE_NORMAL_UX
+    USE_NORMAL_UX = args.normal_ux
 
     try:
         sq = resolve_squire_bin(args.squire_bin)
@@ -1164,6 +1270,8 @@ def main() -> int:
         else:
             print(f"edge_stress: fail: {exc}", file=sys.stderr)
         return 1
+    finally:
+        close_all_adapters()
 
 
 if __name__ == "__main__":

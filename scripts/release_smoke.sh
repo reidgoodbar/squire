@@ -88,6 +88,14 @@ require_contains "$status_out" "native_fallback: available" "kernel status"
 require_contains "$status_out" "runtime_decisions: replay_or_native" "kernel status"
 
 native_head=$(git rev-parse HEAD)
+expected_head_b64=$(printf "%s\n" "$native_head" | base64 | tr -d '\n')
+adapter_out=$(printf '%s\n' '{"id":"head","argv":["git","rev-parse","HEAD"],"session_id":"release-smoke"}' | "$squire_bin" kernel adapter --stdio)
+require_contains "$adapter_out" '"id":"head"' "adapter"
+require_contains "$adapter_out" '"ok":true' "adapter"
+require_contains "$adapter_out" '"exit_code":0' "adapter"
+require_contains "$adapter_out" '"mode":"replay"' "adapter"
+require_contains "$adapter_out" "\"stdout_b64\":\"$expected_head_b64\"" "adapter"
+
 squire_head=$("$squire_bin" kernel run -- git rev-parse HEAD)
 if [ "$squire_head" != "$native_head" ]; then
   echo "release smoke failed: git rev-parse HEAD mismatch" >&2
@@ -108,8 +116,8 @@ fi
 boost_out=$("$squire_bin" boost status --short)
 require_contains "$boost_out" "native_fallback_available: true" "boost status"
 require_contains "$boost_out" "runtime_decisions: replay_or_native" "boost status"
-require_contains "$boost_out" "replays: 2" "boost status"
-require_contains "$boost_out" "hot_client_replays: 2" "boost status"
+require_contains "$boost_out" "replays: 3" "boost status"
+require_contains "$boost_out" "hot_client_replays: 3" "boost status"
 
 stop_out=$("$squire_bin" kernel maintain --stop --short)
 stopped=1

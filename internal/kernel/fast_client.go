@@ -68,3 +68,26 @@ func FastHotClientReplay(ctx context.Context, sessionID, cwd, storeRoot string, 
 		Phases: phases,
 	}, true
 }
+
+func (k *Kernel) FastReplay(ctx context.Context, sessionID, cwd string, argv []string) (*RunResult, bool) {
+	inv := NormalizeInvocation(cwd, argv)
+	return k.FastReplayInvocation(ctx, sessionID, inv)
+}
+
+func (k *Kernel) FastReplayInvocation(ctx context.Context, sessionID string, inv CommandInvocation) (*RunResult, bool) {
+	_ = sessionID
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+	if k == nil || len(inv.PolicyArgv) == 0 {
+		return nil, false
+	}
+	family := Classify(inv.PolicyArgv)
+	var phases PhaseTimings
+	if replay, ok := k.tryHotSnapshotReplay(inv, family, &phases); ok {
+		return &replay, true
+	}
+	return nil, false
+}

@@ -11,7 +11,12 @@ deterministic read-only discovery operations.
 Squire Kernel transparently accelerates a tiny allowlist of repeated local Git
 metadata operations and hot-prepared deterministic read-only discovery
 operations with exact stdout, stderr, and exit-code preservation, correct
-invalidation, native fallback, and measured hot-path overhead.
+invalidation, native fallback, and measured hot-path performance.
+
+The replay performance target is sub-1ms p95 wall time for replay hits.
+Invalid/missing-cache and never-replay paths execute natively, so their
+performance target is Squire overhead above native execution, not total command
+wall time.
 
 This is not a broad Codex speedup claim.
 
@@ -53,8 +58,8 @@ Hot-prepared proof-gated replay candidates:
 
 Hot-prepared proof-gated candidates may replay only when the command key, cheap
 hot fingerprints, hot invalidation epoch, output hashes, and in-memory output
-bytes all match. Their p95 replay overhead is reported separately from metadata
-fast-path p95.
+bytes all match. Their p95 replay wall time is reported separately from
+metadata fast-path p95.
 
 The foreground CLI serving path first checks a daemon-published mmap hot
 snapshot before constructing the full kernel object, loading ledgers, or
@@ -77,6 +82,18 @@ reuse the resident hot-cache connection and keep short session-local
 daemon-unavailable and exact-command miss caches. These caches must be bounded,
 brief, and fault-open: they may suppress replay attempts, but they must never
 suppress native execution.
+For adapter integrations, replay checks should reuse the foreground kernel's
+cached mmap snapshot view rather than map/unmap the snapshot on every request.
+Adapter responses may use pooled buffers to reduce allocation churn, but the
+wire protocol must still preserve exact stdout/stderr bytes and exit code.
+
+The production foreground is host/runtime owned, not model owned. A terminal
+adapter may send already-chosen commands to Squire over a local protocol and
+receive exact stdout/stderr/exit-code results, but the agent-facing command text
+must remain the original command. The adapter must not add tools, change
+prompts, suggest commands, route models, or require the model to call Squire.
+Manual `squire kernel run -- <command>` remains a diagnostic surface, not the
+primary product UX.
 
 Workspace file inspection replay is limited to safe relative paths inside the
 workspace, regular files below the bounded size limits, non-hidden/VCS paths,

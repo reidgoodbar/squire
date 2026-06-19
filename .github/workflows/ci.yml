@@ -33,3 +33,9 @@ jobs:
           mkdir -p .tmp
           go build -o .tmp/squire ./cmd/squire
           scripts/release_smoke.sh .tmp/squire
+
+      - name: Adapter path benchmark
+        run: scripts/adapter_path_bench.py .tmp/squire
+
+      - name: Strict replay budget
+        run: scripts/edge_stress.py .tmp/squire --scenario echo --normal-ux --strict-performance

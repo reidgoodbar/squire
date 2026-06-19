@@ -584,6 +584,39 @@ func runNative(ctx context.Context, cwd string, argv []string) NativeResult {
 	return NativeResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode, Wall: time.Since(start), Err: err}
 }
 
+func RunNativeDirect(ctx context.Context, cwd string, argv []string) RunResult {
+	var phases PhaseTimings
+	classifyStart := time.Now()
+	inv := NormalizeInvocation(cwd, argv)
+	family := Classify(inv.PolicyArgv)
+	phases.ClassifyMS = elapsedMS(classifyStart)
+
+	return runNativeDirectInvocation(ctx, inv, family, phases)
+}
+
+func RunNativeDirectInvocation(ctx context.Context, inv CommandInvocation, family OperatorFamily) RunResult {
+	return runNativeDirectInvocation(ctx, inv, family, PhaseTimings{})
+}
+
+func runNativeDirectInvocation(ctx context.Context, inv CommandInvocation, family OperatorFamily, phases PhaseTimings) RunResult {
+	nativeStart := time.Now()
+	native := runNative(ctx, inv.OriginalCWD, inv.OriginalArgv)
+	phases.NativeExecWaitMS = elapsedMS(nativeStart)
+	mode := ModeNative
+	if family == FamilyValidation || family == FamilyEditOrMutation || family == FamilyPackageSetup {
+		mode = ModeNever
+	}
+	return RunResult{
+		Stdout:     native.Stdout,
+		Stderr:     native.Stderr,
+		ExitCode:   native.ExitCode,
+		Mode:       mode,
+		Family:     family,
+		NativeWall: native.Wall,
+		Phases:     phases,
+	}
+}
+
 func resolveExecutablePath(cwd, name string) (string, bool) {
 	if name == "" || strings.ContainsRune(name, filepath.Separator) {
 		return "", false

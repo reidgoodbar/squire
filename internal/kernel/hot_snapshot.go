@@ -287,6 +287,45 @@ func (k *Kernel) tryHotSnapshotReplay(inv CommandInvocation, family OperatorFami
 	}, true
 }
 
+func (k *Kernel) PreloadHotSnapshot() bool {
+	if k == nil || k.Store == nil {
+		return false
+	}
+	path := hotCacheSnapshotPath(k.Store.Root)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > hotSnapshotMaxBytes {
+		return false
+	}
+	modTime := info.ModTime().UnixNano()
+
+	k.hotCacheMu.Lock()
+	defer k.hotCacheMu.Unlock()
+	if k.hotSnapshotData != nil && k.hotSnapshotPath == path && k.hotSnapshotSize == info.Size() && k.hotSnapshotModTime == modTime {
+		return true
+	}
+	if k.hotSnapshotCleanup != nil {
+		k.hotSnapshotCleanup()
+	}
+	data, cleanup, err := mapHotSnapshotFile(path)
+	if err != nil {
+		k.hotSnapshotPath = ""
+		k.hotSnapshotSize = 0
+		k.hotSnapshotModTime = 0
+		k.hotSnapshotData = nil
+		k.hotSnapshotCleanup = nil
+		return false
+	}
+	k.hotSnapshotPath = path
+	k.hotSnapshotSize = info.Size()
+	k.hotSnapshotModTime = modTime
+	k.hotSnapshotData = data
+	k.hotSnapshotCleanup = cleanup
+	return true
+}
+
 func (k *Kernel) readHotSnapshotResponse(path string, inv CommandInvocation) (hotCacheResponse, bool) {
 	if path == "" {
 		return hotCacheResponse{}, false

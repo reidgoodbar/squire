@@ -63,6 +63,13 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case len(args) >= 3 && args[0] == "kernel" && args[1] == "adapter":
+		err = runKernelAdapter(ctx, cwd, args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	case len(args) >= 3 && args[0] == "kernel" && args[1] == "run":
 		runKernelCommand(ctx, cwd, storeRoot, args[2:])
 		return
@@ -177,6 +184,8 @@ func kernelUsageError(args []string) string {
 		return `invalid kernel maintain usage (try "squire help kernel maintain")`
 	case "prewarm-adjacent":
 		return "squire kernel prewarm-adjacent requires -- before the command"
+	case "adapter":
+		return `invalid kernel adapter usage (try "squire help kernel adapter")`
 	default:
 		return fmt.Sprintf(`unknown kernel subcommand %q (try "squire help kernel")`, args[0])
 	}
@@ -217,6 +226,7 @@ usage:
   squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
   squire kernel maintain --background-status [--short|--json]
   squire kernel maintain --stop [--short|--json]
+  squire kernel adapter --stdio [--ensure-maintainer]
   squire boost status [--short|--json]
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
@@ -238,6 +248,7 @@ help:
   squire help version
   squire help kernel run
   squire help kernel maintain
+  squire help kernel adapter
   squire help boost
 `
 }
@@ -292,6 +303,16 @@ Runs an agent-chosen command through Squire Kernel. The "--" delimiter is
 required so Squire options cannot be confused with the command being served.
 On a valid proof, Squire returns exact stdout, stderr, and exit code. Otherwise
 it runs the original command natively.
+`
+	case "kernel adapter":
+		return `usage:
+  squire kernel adapter --stdio [--ensure-maintainer]
+
+Starts a long-lived terminal adapter process for host runtimes. The model still
+emits ordinary commands; the terminal layer sends those already-chosen commands
+to this adapter over JSON lines. Responses contain exact stdout/stderr bytes as
+base64 plus the exact exit code. If --ensure-maintainer is set, the adapter
+starts or reuses the resident background maintainer before serving requests.
 `
 	case "kernel warm":
 		return `usage:

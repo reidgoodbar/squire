@@ -40,6 +40,10 @@ go test ./...
 go run ./cmd/squire boost bench repo-metadata
 go run ./cmd/squire boost bench deep-local
 scripts/release_smoke.sh ./squire
+scripts/adapter_path_bench.py ./squire
+scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
+scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
+scripts/edge_stress.py ./squire --normal-ux
 scripts/edge_stress.py ./squire
 ```
 
@@ -52,6 +56,11 @@ Required gates:
 - Validation replays are zero.
 - Safety gates pass.
 - Mutation-boundary invalidation is observed in the repo-metadata benchmark.
+- Adapter replay hits stay below the scoped `1ms` p95 wall-time budget.
+- Adapter invalid/miss fallback and never-direct paths stay below the scoped
+  p95 Squire-overhead budget above native execution.
+- Multi-agent adapter A/B keeps exact stdout/stderr/exit-code equality with
+  zero mismatches and a Squire-free measured command stream.
 
 Performance gates must be reported. A performance gate failure blocks a release
 only when the release claim depends on that budget.
@@ -62,8 +71,9 @@ GitHub Actions provides three release surfaces:
 
 - `.github/workflows/ci.yml` runs fast tests, the repo metadata benchmark, and
   release smoke on pushes and pull requests.
-- `.github/workflows/nightly.yml` runs the deeper baseline plus edge stress on
-  a schedule and manually.
+- `.github/workflows/nightly.yml` runs the deeper baseline, strict replay
+  budget, adapter benchmarks, multi-agent A/B, and edge stress on a schedule
+  and manually.
 - `.github/workflows/release.yml` runs the release gate, builds artifacts, and
   publishes a GitHub Release from either a `v*` tag or manual dispatch.
 
@@ -88,6 +98,10 @@ The release workflow must pass before artifacts are published. It runs:
 - `squire boost bench repo-metadata`
 - `squire boost bench deep-local`
 - `scripts/release_smoke.sh`
+- `scripts/adapter_path_bench.py`
+- `scripts/edge_stress.py --scenario echo --normal-ux --strict-performance`
+- `scripts/multi_agent_bench.py --agents 1,2 --rounds 3`
+- `scripts/edge_stress.py --normal-ux`
 - `scripts/edge_stress.py`
 - release safety-gate assertions
 
@@ -122,15 +136,45 @@ Use the scripted smoke when possible:
 scripts/release_smoke.sh ./squire
 ```
 
-Run the process-level edge stress suite before release candidates that touch
-hot replay, prewarming, invalidation, or maintainer lifecycle code:
+Run the normal-UX and process-level edge stress suites before release candidates
+that touch hot replay, prewarming, invalidation, or maintainer lifecycle code:
 
 ```sh
+scripts/edge_stress.py ./squire --normal-ux
 scripts/edge_stress.py ./squire
+```
+
+Run the adapter path benchmark before release candidates that touch foreground
+serving, classification, hot replay, native fallback, or terminal adapter code:
+
+```sh
+scripts/adapter_path_bench.py ./squire
+```
+
+Run the strict replay-budget check before release candidates that touch hot
+snapshot replay or the terminal adapter path:
+
+```sh
+scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
+```
+
+Run the multi-agent adapter benchmark before release candidates that touch
+adapter concurrency, hot snapshot reads, resident maintainer behavior, or
+normal terminal UX:
+
+```sh
+scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
 ```
 
 Expected behavior:
 
+- Normal-UX command-serving checks route ordinary argv through long-lived
+  adapter sessions; model-visible command text remains Squire-free.
+- Replay hits return from the mmap hot snapshot under the 1ms p95 budget.
+- Replayable invalid/missing-cache commands fall back native with small p95
+  overhead.
+- Never-replay commands use native-direct behavior with small p95
+  overhead.
 - Concurrent identical hot requests preserve exact output and report hot replay
   p50/p95/max timing.
 - Mid-warm workspace mutations never replay stale file bytes.
@@ -138,6 +182,8 @@ Expected behavior:
   file-descriptor counts flat when the platform exposes them.
 - Dynamic `.gitignore` changes invalidate stale status output.
 - Environment-sensitive path discovery keeps distinct PATH footprints separate.
+- Multi-agent runs preserve exact output across concurrent long-lived adapter
+  clients and report scoped wall-time deltas for that workload only.
 
 Run the release binary through a fresh local repo:
 
@@ -186,6 +232,9 @@ Attach benchmark JSON artifacts for:
 
 - `repo-metadata`
 - `deep-local`
+- `adapter-path-bench`
+- `strict-replay-budget`
+- `multi-agent-bench`
 
 Release notes should summarize exactness, invalidation, replay counts, and
 measured wall-time deltas with the command count and workload scope that
