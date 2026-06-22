@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	_ = os.Setenv("SQUIRE_KERNEL_SYNC_LEDGER_WRITES", "1")
+	os.Exit(m.Run())
+}
+
 func TestFastPathReplayExactAndHeadInvalidates(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)
@@ -1153,6 +1158,10 @@ func TestForegroundNativeObservationPreparesLaterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := New(DefaultStoreRoot(repo))
+	k.mu.Lock()
+	k.asyncForegroundObserve = true
+	k.mu.Unlock()
+	defer k.WaitForegroundObservations()
 	if _, err := k.Warm(ctx, repo); err != nil {
 		t.Fatal(err)
 	}

@@ -65,9 +65,6 @@ func (k *Kernel) Warm(ctx context.Context, cwd string) (WarmReport, error) {
 	if k.Oracle == nil {
 		k.Oracle = NewRepoOracle()
 	}
-	k.mu.Lock()
-	k.asyncForegroundObserve = true
-	k.mu.Unlock()
 	if err := k.Store.Init(); err != nil {
 		return WarmReport{}, err
 	}

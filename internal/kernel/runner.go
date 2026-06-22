@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 )
@@ -20,6 +21,7 @@ type Kernel struct {
 	saveScheduled   bool
 
 	asyncForegroundObserve bool
+	foregroundObserveWG    sync.WaitGroup
 	preparedLoaded         bool
 	preparedSignal         string
 	preparedAvailable      bool
@@ -244,7 +246,9 @@ func (k *Kernel) observeForegroundNativeAsync(sessionID string, inv CommandInvoc
 	}
 	argv := append([]string(nil), inv.PolicyArgv...)
 	cwd := inv.PolicyCWD
+	k.foregroundObserveWG.Add(1)
 	go func() {
+		defer k.foregroundObserveWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		var ws WorldState
@@ -322,6 +326,13 @@ func (k *Kernel) observeForegroundNativeAsync(sessionID string, inv CommandInvoc
 		k.hydratePreparedReplayCache(ledger, k.Store.Signal(), &phases)
 		_ = k.saveLedgerSync(ledger, &phases)
 	}()
+}
+
+func (k *Kernel) WaitForegroundObservations() {
+	if k == nil {
+		return
+	}
+	k.foregroundObserveWG.Wait()
 }
 
 func requiresKernelWorld(argv []string) bool {
@@ -509,6 +520,10 @@ func (k *Kernel) saveLedgerSync(ledger *ValidityLedger, phases *PhaseTimings) er
 
 func (k *Kernel) scheduleLedgerSave() {
 	if k.Store == nil {
+		return
+	}
+	if os.Getenv("SQUIRE_KERNEL_SYNC_LEDGER_WRITES") == "1" {
+		k.flushLedgerNow()
 		return
 	}
 	k.mu.Lock()
