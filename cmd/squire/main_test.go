@@ -21,6 +21,7 @@ func TestUsageTextDocumentsKernelContract(t *testing.T) {
 	for _, want := range []string{
 		"Squire Kernel v1",
 		"squire version",
+		"squire session",
 		"Agent chooses. Squire serves.",
 		"Native fallback always exists.",
 		"Runtime decisions are replay or native.",
@@ -42,6 +43,9 @@ func TestHelpTextForArgs(t *testing.T) {
 	}{
 		{name: "global long help", args: []string{"--help"}, want: "usage:"},
 		{name: "global help topic", args: []string{"help"}, want: "usage:"},
+		{name: "session topic", args: []string{"help", "session"}, want: "scoped Squire session"},
+		{name: "vm topic", args: []string{"help", "vm"}, want: "isolated Linux execution mode"},
+		{name: "vm session topic", args: []string{"vm", "session", "--help"}, want: "guest lifecycle runner"},
 		{name: "version topic", args: []string{"help", "version"}, want: "build identity"},
 		{name: "kernel run topic", args: []string{"kernel", "run", "--help"}, want: "The \"--\" delimiter is"},
 		{name: "kernel maintain topic", args: []string{"help", "kernel", "maintain"}, want: "resident maintainer"},
@@ -59,6 +63,364 @@ func TestHelpTextForArgs(t *testing.T) {
 				t.Fatalf("help text missing %q:\n%s", tt.want, text)
 			}
 		})
+	}
+}
+
+func TestParseSessionOptions(t *testing.T) {
+	opts, err := parseSessionOptions([]string{"--quiet", "--metadata-only", "--no-maintainer", "--enable-warm-file-replay", "--preload", "--shim", "/tmp/shim", "--preload-lib", "/tmp/preload.dylib", "--", "sh", "-lc", "git status --short"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Quiet || !opts.MetadataOnly || opts.NoWarm || !opts.NoMaintainer || !opts.EnableWarmFileReplay || !opts.Preload || opts.ShimPath != "/tmp/shim" || opts.PreloadLib != "/tmp/preload.dylib" {
+		t.Fatalf("unexpected opts: %+v", opts)
+	}
+	if !reflect.DeepEqual(opts.Command, []string{"sh", "-lc", "git status --short"}) {
+		t.Fatalf("command = %#v", opts.Command)
+	}
+
+	if _, err := parseSessionOptions([]string{"--quiet"}); err == nil {
+		t.Fatal("missing delimiter should fail")
+	}
+	if _, err := parseSessionOptions([]string{"--metadata-only", "--no-warm", "--", "sh"}); err == nil {
+		t.Fatal("conflicting warm options should fail")
+	}
+	if _, err := parseSessionOptions([]string{"--preload", "--path-shims", "--", "sh"}); err == nil {
+		t.Fatal("conflicting transport options should fail")
+	}
+}
+
+func TestParseVMSessionOptions(t *testing.T) {
+	opts, err := parseVMSessionOptions([]string{"--quiet", "--backend", "external-runner", "--runner", "/tmp/runner", "--", "codex", "exec", "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Quiet || opts.Backend != vmBackendExternalRunner || opts.Runner != "/tmp/runner" {
+		t.Fatalf("unexpected opts: %+v", opts)
+	}
+	if !reflect.DeepEqual(opts.Command, []string{"codex", "exec", "task"}) {
+		t.Fatalf("command = %#v", opts.Command)
+	}
+	if _, err := parseVMSessionOptions([]string{"--backend", "bad", "--", "sh"}); err == nil {
+		t.Fatal("bad backend should fail")
+	}
+	if _, err := parseVMSessionOptions([]string{"--quiet"}); err == nil {
+		t.Fatal("missing delimiter should fail")
+	}
+}
+
+func TestVMStatusLinuxLocal(t *testing.T) {
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "linux")
+	t.Setenv("GOARCH_OVERRIDE_FOR_TEST", "arm64")
+	report := detectVMStatus("/repo", "/store", vmBackendAuto, "")
+	if !report.Available {
+		t.Fatalf("linux-local should be available: %+v", report)
+	}
+	if report.Backend != vmBackendLinuxLocal {
+		t.Fatalf("backend = %q, want linux-local", report.Backend)
+	}
+	if report.HostArch != "arm64" {
+		t.Fatalf("host arch = %q", report.HostArch)
+	}
+	if report.ChangesAgentCommands {
+		t.Fatal("VM mode should not change agent commands")
+	}
+	if report.UsesHostCommandShims {
+		t.Fatal("VM mode should not use host command shims")
+	}
+	if !report.PreservesHostMacSemantics {
+		t.Fatal("linux-local should preserve host semantics on Linux")
+	}
+}
+
+func TestVMStatusDarwinRequiresHelperAndGuestConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	t.Setenv("PATH", tmp)
+	t.Setenv("SQUIRE_VM_HELPER", "")
+	t.Setenv("SQUIRE_VM_DARWIN_HELPER", "")
+	t.Setenv("SQUIRE_VM_RUNNER", "")
+	report := detectVMStatus("/repo", "/store", vmBackendAuto, "")
+	if report.Available {
+		t.Fatalf("darwin VM should require a helper and guest config: %+v", report)
+	}
+	if report.Backend != vmBackendVirtualization {
+		t.Fatalf("backend = %q, want virtualization-framework", report.Backend)
+	}
+	if report.PreservesHostMacSemantics {
+		t.Fatal("Linux VM mode should not claim to preserve macOS host semantics")
+	}
+	text := vmStatusOut(report, outputShort)
+	if !strings.Contains(text, "squire-vm-darwin helper is not installed") {
+		t.Fatalf("short status missing helper diagnostic:\n%s", text)
+	}
+	if !strings.Contains(text, "uses_host_command_shims: false") {
+		t.Fatalf("short status should make host shim boundary explicit:\n%s", text)
+	}
+}
+
+func TestVMStatusDarwinHelperRequiresGuestConfig(t *testing.T) {
+	tmp := t.TempDir()
+	helper := filepath.Join(tmp, "squire-vm-darwin")
+	writeExecutableScript(t, helper, `#!/bin/sh
+printf '%s\n' '{"available":false,"framework_supported":true,"guest_configured":false,"diagnostics":["missing readable SQUIRE_VM_KERNEL or SQUIRE_VM_BUNDLE/kernel","missing readable SQUIRE_VM_INITRD or SQUIRE_VM_DISK"]}'
+`)
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	t.Setenv("PATH", tmp)
+	t.Setenv("SQUIRE_VM_HELPER", helper)
+	t.Setenv("SQUIRE_VM_KERNEL", "")
+	t.Setenv("SQUIRE_VM_INITRD", "")
+	t.Setenv("SQUIRE_VM_DISK", "")
+
+	report := detectVMStatus("/repo", "/store", vmBackendAuto, "")
+	if report.Available {
+		t.Fatalf("darwin VM should require guest assets: %+v", report)
+	}
+	if report.VMHelper != helper {
+		t.Fatalf("vm helper = %q, want %q", report.VMHelper, helper)
+	}
+	if report.GuestConfigured {
+		t.Fatal("guest should not be configured without kernel/initrd/disk")
+	}
+	text := vmStatusOut(report, outputShort)
+	if !strings.Contains(text, "guest_configured: false") || !strings.Contains(text, "missing readable SQUIRE_VM_KERNEL") {
+		t.Fatalf("short status missing guest config diagnostics:\n%s", text)
+	}
+}
+
+func TestVMStatusDarwinHelperConfigured(t *testing.T) {
+	tmp := t.TempDir()
+	helper := filepath.Join(tmp, "squire-vm-darwin")
+	kernelFile := filepath.Join(tmp, "kernel")
+	initrdFile := filepath.Join(tmp, "initrd")
+	writeExecutableScript(t, helper, `#!/bin/sh
+printf '%s\n' '{"available":true,"framework_supported":true,"guest_configured":true,"diagnostics":["guest kernel configuration is present"]}'
+`)
+	if err := os.WriteFile(kernelFile, []byte("kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(initrdFile, []byte("initrd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	t.Setenv("PATH", tmp)
+	t.Setenv("SQUIRE_VM_HELPER", helper)
+	t.Setenv("SQUIRE_VM_KERNEL", kernelFile)
+	t.Setenv("SQUIRE_VM_INITRD", initrdFile)
+	t.Setenv("SQUIRE_VM_AGENT_PORT", "2048")
+
+	report := detectVMStatus("/repo", "/store", vmBackendAuto, "")
+	if !report.Available {
+		t.Fatalf("darwin VM should be available with helper and guest assets: %+v", report)
+	}
+	if !report.GuestConfigured {
+		t.Fatal("guest should be configured")
+	}
+	if report.GuestAgentPort != 2048 {
+		t.Fatalf("guest agent port = %d, want 2048", report.GuestAgentPort)
+	}
+	json := vmStatusOut(report, outputJSON)
+	if !strings.Contains(json, `"backend": "virtualization-framework"`) || !strings.Contains(json, `"guest_configured": true`) {
+		t.Fatalf("json status missing virtualization fields:\n%s", json)
+	}
+}
+
+func TestVMStatusExternalRunner(t *testing.T) {
+	tmp := t.TempDir()
+	runner := filepath.Join(tmp, "runner")
+	writeExecutable(t, runner)
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	report := detectVMStatus("/repo", "/store", vmBackendAuto, runner)
+	if !report.Available {
+		t.Fatalf("external runner should be available: %+v", report)
+	}
+	if report.Backend != vmBackendExternalRunner {
+		t.Fatalf("backend = %q, want external-runner", report.Backend)
+	}
+	if report.Runner != runner {
+		t.Fatalf("runner = %q, want %q", report.Runner, runner)
+	}
+	json := vmStatusOut(report, outputJSON)
+	if !strings.Contains(json, `"backend": "external-runner"`) || !strings.Contains(json, `"available": true`) {
+		t.Fatalf("json status missing external runner fields:\n%s", json)
+	}
+}
+
+func TestVMExternalRunnerArgs(t *testing.T) {
+	args := vmExternalRunnerArgs("/repo", "/store", []string{"codex", "exec", "task"})
+	want := []string{"session", "--cwd", "/repo", "--store-root", "/store", "--", "codex", "exec", "task"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("runner args = %#v, want %#v", args, want)
+	}
+}
+
+func TestBuildPreloadSessionEnvironment(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "python3"} {
+		writeExecutable(t, filepath.Join(bin, name))
+	}
+	preload := filepath.Join(tmp, "squire-preload.dylib")
+	if err := os.WriteFile(preload, []byte("lib"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(tmp, "squire-preload-helper")
+	writeExecutable(t, helper)
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	env, err := buildPreloadSessionEnvironment(tmp, preload, helper, []string{"PATH=" + bin, "DYLD_INSERT_LIBRARIES=/existing/lib.dylib"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envSliceValue(env, "SQUIRE_PRELOAD_ENABLE"); got != "1" {
+		t.Fatalf("SQUIRE_PRELOAD_ENABLE = %q", got)
+	}
+	if got := envSliceValue(env, "SQUIRE_PRELOAD_LIB"); got != preload {
+		t.Fatalf("SQUIRE_PRELOAD_LIB = %q", got)
+	}
+	if got := envSliceValue(env, "SQUIRE_PRELOAD_HELPER"); got != helper {
+		t.Fatalf("SQUIRE_PRELOAD_HELPER = %q", got)
+	}
+	if got := envSliceValue(env, "DYLD_INSERT_LIBRARIES"); got != preload+string(os.PathListSeparator)+"/existing/lib.dylib" {
+		t.Fatalf("DYLD_INSERT_LIBRARIES = %q", got)
+	}
+	if got := envSliceValue(env, "PATH"); got != bin {
+		t.Fatalf("PATH should not be shimmed in preload mode: %q", got)
+	}
+	wantGit, err := filepath.EvalSymlinks(filepath.Join(bin, "git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envSliceValue(env, "SQUIRE_REAL_GIT"); got != wantGit {
+		t.Fatalf("SQUIRE_REAL_GIT = %q, want %q", got, wantGit)
+	}
+	if got := envSliceValue(env, "SQUIRE_SHIM_REAL_PATH"); got != bin {
+		t.Fatalf("SQUIRE_SHIM_REAL_PATH = %q", got)
+	}
+}
+
+func TestIsPreloadUnsafeLauncher(t *testing.T) {
+	for _, command := range []string{"python", "/opt/homebrew/bin/python3", "/opt/homebrew/bin/python3.14", "pip", "pip3.14"} {
+		if !isPreloadUnsafeLauncher(command) {
+			t.Fatalf("%s should be treated as preload unsafe", command)
+		}
+	}
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	for _, command := range []string{"sh", "/bin/zsh", "/usr/bin/env"} {
+		if !isPreloadUnsafeLauncher(command) {
+			t.Fatalf("%s should be treated as preload unsafe on darwin", command)
+		}
+	}
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "linux")
+	for _, command := range []string{"sh", "/bin/zsh", "/usr/bin/env", "codex", "node"} {
+		if isPreloadUnsafeLauncher(command) {
+			t.Fatalf("%s should not be treated as preload unsafe", command)
+		}
+	}
+}
+
+func TestPreferScopedPathShimsForCodexOnDarwin(t *testing.T) {
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
+	for _, command := range []string{"codex", "/opt/homebrew/bin/codex", "/opt/homebrew/Caskroom/codex/0.140.0/codex-aarch64-apple-darwin"} {
+		if !preferScopedPathShimsForLauncher(command) {
+			t.Fatalf("%s should prefer scoped path shims on darwin", command)
+		}
+	}
+	for _, command := range []string{"node", "claude", "/opt/homebrew/bin/zsh"} {
+		if preferScopedPathShimsForLauncher(command) {
+			t.Fatalf("%s should not prefer scoped path shims on darwin", command)
+		}
+	}
+	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "linux")
+	if preferScopedPathShimsForLauncher("codex") {
+		t.Fatal("codex should not prefer scoped path shims on linux")
+	}
+}
+
+func TestBuildSessionEnvironmentCreatesScopedFallbacks(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	shimDir := filepath.Join(tmp, "shimdir")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(tmp, "squire-mmap-shim")
+	writeExecutable(t, shim)
+	for _, name := range []string{"git", "cat", "sed", "which", "python3"} {
+		writeExecutable(t, filepath.Join(bin, name))
+	}
+
+	env, linked, err := buildSessionEnvironment(tmp, shimDir, shim, []string{"PATH=" + bin, "KEEP=1"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked < 5 {
+		t.Fatalf("linked = %d, want at least native tools plus command", linked)
+	}
+	pathValue := envSliceValue(env, "PATH")
+	if !strings.HasPrefix(pathValue, shimDir+string(os.PathListSeparator)) {
+		t.Fatalf("PATH was not scoped through shim dir: %q", pathValue)
+	}
+	if got := envSliceValue(env, "SQUIRE_SHIM_REAL_PATH"); got != bin {
+		t.Fatalf("SQUIRE_SHIM_REAL_PATH = %q, want %q", got, bin)
+	}
+	wantGit, err := filepath.EvalSymlinks(filepath.Join(bin, "git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envSliceValue(env, "SQUIRE_REAL_GIT"); got != wantGit {
+		t.Fatalf("SQUIRE_REAL_GIT = %q, want %q", got, wantGit)
+	}
+	if !isExecutableFile(filepath.Join(shimDir, "git")) {
+		t.Fatal("git shim was not created")
+	}
+	if !isExecutableFile(filepath.Join(shimDir, "command")) {
+		t.Fatal("external command compatibility shim was not created")
+	}
+}
+
+func TestBuildSessionEnvironmentPassesWarmFileToolsThroughByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	shimDir := filepath.Join(tmp, "shimdir")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(tmp, "squire-mmap-shim")
+	writeExecutable(t, shim)
+	for _, name := range []string{"git", "cat", "sed"} {
+		writeExecutable(t, filepath.Join(bin, name))
+	}
+
+	env, _, err := buildSessionEnvironment(tmp, shimDir, shim, []string{"PATH=" + bin}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cat", "sed"} {
+		target, err := filepath.EvalSymlinks(filepath.Join(shimDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := filepath.EvalSymlinks(filepath.Join(bin, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target != want {
+			t.Fatalf("%s passthrough = %q, want %q", name, target, want)
+		}
+	}
+	if got := envSliceValue(env, "SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"); got != "" {
+		t.Fatalf("warm file replay env = %q, want unset", got)
+	}
+	if !isExecutableFile(filepath.Join(shimDir, "git")) {
+		t.Fatal("git shim should still be created")
 	}
 }
 
@@ -100,6 +462,42 @@ func TestVersionOutput(t *testing.T) {
 func TestHelpTextDoesNotInterceptCommandHelpAfterDelimiter(t *testing.T) {
 	if text, ok := helpTextForArgs([]string{"kernel", "run", "--", "git", "--help"}); ok {
 		t.Fatalf("help intercepted command argv after --:\n%s", text)
+	}
+}
+
+func TestParseAdapterOptionsDefaultsToProductLifecycle(t *testing.T) {
+	opts, err := parseAdapterOptions([]string{"--stdio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Stdio {
+		t.Fatal("--stdio was not parsed")
+	}
+	if !opts.EnsureMaintainer {
+		t.Fatal("adapter should ensure the resident maintainer by default")
+	}
+}
+
+func TestParseAdapterOptionsNoMaintainerDiagnosticEscape(t *testing.T) {
+	opts, err := parseAdapterOptions([]string{"--stdio", "--no-maintainer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Stdio {
+		t.Fatal("--stdio was not parsed")
+	}
+	if opts.EnsureMaintainer {
+		t.Fatal("--no-maintainer should disable automatic maintainer lifecycle")
+	}
+}
+
+func TestParseAdapterOptionsAcceptsLegacyEnsureMaintainer(t *testing.T) {
+	opts, err := parseAdapterOptions([]string{"--stdio", "--ensure-maintainer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.EnsureMaintainer {
+		t.Fatal("--ensure-maintainer should remain accepted as a compatibility no-op")
 	}
 }
 
@@ -470,6 +868,9 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		HotClientReplayWallMeasured:  1,
 		HotClientReplayWallAvgUS:     1200,
 		HotClientNetSavedMeasuredMS:  8,
+		HotClientEventLogPath:        "/tmp/squire/hot_client_events.log",
+		HotClientEventLogExists:      true,
+		HotClientEventLogBytes:       42,
 		DiagnosticMismatches:         1,
 		DiagnosticMismatchCategories: map[string]int{"ordering": 1},
 		DiagnosticSampleSkips:        4,
@@ -487,6 +888,9 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		"hot_client_replays: 1",
 		"hot_client_replay_wall_avg_us: 1200",
 		"hot_client_net_saved_measured_ms: 8",
+		"hot_client_event_log_path: /tmp/squire/hot_client_events.log",
+		"hot_client_event_log_exists: true",
+		"hot_client_event_log_bytes: 42",
 		"native_fallback_available: true",
 		"runtime_decisions: replay_or_native",
 	} {
@@ -498,12 +902,59 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 	for _, want := range []string{
 		`"claim": "scoped"`,
 		`"replays": 3`,
+		`"hot_client_event_log_exists": true`,
 		`"native_fallback_available": true`,
 		`"runtime_decisions": "replay_or_native"`,
 	} {
 		if !strings.Contains(json, want) {
 			t.Fatalf("boost json output missing %q:\n%s", want, json)
 		}
+	}
+}
+
+func TestHotEventPipeRecordsValidReplayEvents(t *testing.T) {
+	storeRoot := t.TempDir()
+	pipe := startHotEventPipe(storeRoot)
+	if pipe == nil {
+		t.Fatal("expected hot event pipe")
+	}
+	_, _ = pipe.writer.WriteString("123 replay c-mmap-hot-snapshot 7 11\n")
+	_, _ = pipe.writer.WriteString("not an event\n")
+	_ = pipe.writer.Close()
+	finishHotEventPipe(pipe)
+	stats := kernel.LoadHotClientStats(storeRoot)
+	if stats.Replays != 1 {
+		t.Fatalf("replays = %d, want 1", stats.Replays)
+	}
+	if stats.NativeWallAvoidedMS != 7 {
+		t.Fatalf("native wall avoided = %d, want 7", stats.NativeWallAvoidedMS)
+	}
+	if stats.ReplayWallUS != 11 {
+		t.Fatalf("replay wall = %d, want 11", stats.ReplayWallUS)
+	}
+}
+
+func TestOpenHotSnapshotFile(t *testing.T) {
+	storeRoot := t.TempDir()
+	if openHotSnapshotFile(storeRoot) != nil {
+		t.Fatal("missing snapshot should not open")
+	}
+	want := []byte("snapshot")
+	if err := os.WriteFile(filepath.Join(storeRoot, "hot_snapshot.bin"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := openHotSnapshotFile(storeRoot)
+	if file == nil {
+		t.Fatal("expected snapshot file")
+	}
+	defer file.Close()
+	got := make([]byte, len(want))
+	_, err := file.ReadAt(got, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("snapshot bytes = %q, want %q", got, want)
 	}
 }
 
@@ -744,6 +1195,18 @@ func runCommand(t *testing.T, dir string, args ...string) []byte {
 		t.Fatalf("%s failed: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes()
+}
+
+func writeExecutable(t *testing.T, path string) {
+	t.Helper()
+	writeExecutableScript(t, path, "#!/bin/sh\nexit 0\n")
+}
+
+func writeExecutableScript(t *testing.T, path, script string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func runGitRaw(repo string, args ...string) ([]byte, []byte, int) {

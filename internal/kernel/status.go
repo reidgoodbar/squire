@@ -43,6 +43,11 @@ type BoostStatusReport struct {
 	HotClientReplayWallMeasured  int            `json:"hot_client_replay_wall_measured"`
 	HotClientReplayWallAvgUS     int64          `json:"hot_client_replay_wall_avg_us"`
 	HotClientNetSavedMeasuredMS  int64          `json:"hot_client_net_saved_measured_ms"`
+	HotClientLastEventUnixNano   int64          `json:"hot_client_last_event_unix_nano"`
+	HotClientLastReplayUnixNano  int64          `json:"hot_client_last_replay_unix_nano"`
+	HotClientEventLogPath        string         `json:"hot_client_event_log_path"`
+	HotClientEventLogExists      bool           `json:"hot_client_event_log_exists"`
+	HotClientEventLogBytes       int64          `json:"hot_client_event_log_bytes"`
 	DiagnosticMismatches         int            `json:"diagnostic_mismatches"`
 	DiagnosticMismatchCategories map[string]int `json:"diagnostic_mismatch_categories,omitempty"`
 	DiagnosticSampleSkips        int            `json:"diagnostic_sample_skips"`
@@ -57,7 +62,7 @@ func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	if err := k.Store.Init(); err != nil {
 		return "", err
 	}
-	ws := k.Oracle.Snapshot(ctx, cwd)
+	ws := k.Oracle.MetadataSnapshot(ctx, cwd)
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire Kernel setup complete")
 	fmt.Fprintln(&b, "privacy_mode: standard")
@@ -350,6 +355,13 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 		return BoostStatusReport{}, err
 	}
 	hotStats := LoadHotClientStats(storeRoot)
+	hotEventLogPath := hotClientStatsPath(storeRoot)
+	var hotEventLogExists bool
+	var hotEventLogBytes int64
+	if info, err := os.Stat(hotEventLogPath); err == nil {
+		hotEventLogExists = true
+		hotEventLogBytes = info.Size()
+	}
 	report := BoostStatusReport{
 		Claim:                       scopedKernelClaim,
 		EnabledFastPaths:            EnabledFastPaths(),
@@ -363,6 +375,11 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 		HotClientReplayWallMeasured: hotStats.ReplayWallMeasured,
 		HotClientReplayWallAvgUS:    averageInt64(hotStats.ReplayWallUS, hotStats.ReplayWallMeasured),
 		HotClientNetSavedMeasuredMS: hotStats.NetWallSavedMeasuredMS,
+		HotClientLastEventUnixNano:  hotStats.LastEventUnixNano,
+		HotClientLastReplayUnixNano: hotStats.LastReplayUnixNano,
+		HotClientEventLogPath:       hotEventLogPath,
+		HotClientEventLogExists:     hotEventLogExists,
+		HotClientEventLogBytes:      hotEventLogBytes,
 		Invalidations:               "derived from epoch mismatch",
 		NativeFallbackAvailable:     true,
 		RuntimeDecisions:            "replay_or_native",
@@ -398,6 +415,11 @@ func FormatBoostStatusReport(report BoostStatusReport) string {
 	fmt.Fprintf(&b, "hot_client_replay_wall_measured: %d\n", report.HotClientReplayWallMeasured)
 	fmt.Fprintf(&b, "hot_client_replay_wall_avg_us: %d\n", report.HotClientReplayWallAvgUS)
 	fmt.Fprintf(&b, "hot_client_net_saved_measured_ms: %d\n", report.HotClientNetSavedMeasuredMS)
+	fmt.Fprintf(&b, "hot_client_last_event_unix_nano: %d\n", report.HotClientLastEventUnixNano)
+	fmt.Fprintf(&b, "hot_client_last_replay_unix_nano: %d\n", report.HotClientLastReplayUnixNano)
+	fmt.Fprintf(&b, "hot_client_event_log_path: %s\n", report.HotClientEventLogPath)
+	fmt.Fprintf(&b, "hot_client_event_log_exists: %t\n", report.HotClientEventLogExists)
+	fmt.Fprintf(&b, "hot_client_event_log_bytes: %d\n", report.HotClientEventLogBytes)
 	fmt.Fprintf(&b, "diagnostic_mismatches: %d\n", report.DiagnosticMismatches)
 	fmt.Fprintf(&b, "diagnostic_mismatch_categories: %v\n", report.DiagnosticMismatchCategories)
 	fmt.Fprintf(&b, "diagnostic_sample_skips: %d\n", report.DiagnosticSampleSkips)

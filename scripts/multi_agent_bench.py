@@ -125,7 +125,7 @@ class Adapter:
         self.repo = repo
         self.agent_id = agent_id
         self.proc = subprocess.Popen(
-            [str(squire), "kernel", "adapter", "--stdio", "--ensure-maintainer"],
+            [str(squire), "kernel", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -315,7 +315,7 @@ def bench_level(squire: Path, agents: int, rounds: int) -> dict[str, Any]:
             "ux": {
                 "mode": "invisible_terminal_adapter",
                 "agent_visible_squire_command": False,
-                "hidden_backend": "squire kernel adapter --stdio --ensure-maintainer",
+                "hidden_backend": "squire kernel adapter --stdio",
                 "measured_command_stream_contains_squire": False,
             },
             "native": {

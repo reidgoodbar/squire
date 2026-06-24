@@ -18,29 +18,58 @@ type HotClientStats struct {
 	ReplayWallUS           int64 `json:"replay_wall_us"`
 	ReplayWallMeasured     int   `json:"replay_wall_measured"`
 	NetWallSavedMeasuredMS int64 `json:"net_wall_saved_measured_ms"`
+	LastEventUnixNano      int64 `json:"last_event_unix_nano"`
+	LastReplayUnixNano     int64 `json:"last_replay_unix_nano"`
 }
 
 func RecordHotClientResult(storeRoot string, res RunResult, replayWall time.Duration) {
 	if storeRoot == "" || res.Mode != ModeReplay || res.Proof == nil || !isHotClientProof(res.Proof.OperationKey) {
 		return
 	}
+	line := fmt.Sprintf("%d replay %s %d %d", time.Now().UnixNano(), res.Proof.OperationKey, res.Observation.NativeWallMS, replayWall.Microseconds())
+	_ = AppendHotClientEventLine(storeRoot, []byte(line))
+}
+
+func AppendHotClientEventLine(storeRoot string, line []byte) error {
+	line = bytes.TrimSpace(line)
+	if storeRoot == "" || !validHotClientEventLine(line) {
+		return nil
+	}
 	if err := os.MkdirAll(storeRoot, 0o700); err != nil {
-		return
+		return err
 	}
 	path := hotClientStatsPath(storeRoot)
 	if info, err := os.Stat(path); err == nil && info.Size() >= hotClientStatsMaxBytes {
-		return
+		return nil
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return
+		return err
 	}
 	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%d replay %s %d %d\n", time.Now().UnixNano(), res.Family, res.Observation.NativeWallMS, replayWall.Microseconds())
+	_, err = f.Write(append(line, '\n'))
+	return err
+}
+
+func validHotClientEventLine(line []byte) bool {
+	fields := bytes.Fields(line)
+	if len(fields) != 5 || string(fields[1]) != "replay" || !isHotClientProof(string(fields[2])) {
+		return false
+	}
+	if _, err := strconv.ParseInt(string(fields[0]), 10, 64); err != nil {
+		return false
+	}
+	if _, err := strconv.ParseInt(string(fields[3]), 10, 64); err != nil {
+		return false
+	}
+	if _, err := strconv.ParseInt(string(fields[4]), 10, 64); err != nil {
+		return false
+	}
+	return true
 }
 
 func isHotClientProof(proof string) bool {
-	return proof == "cli-mmap-hot-snapshot" || proof == "mmap-hot-snapshot"
+	return proof == "cli-mmap-hot-snapshot" || proof == "mmap-hot-snapshot" || proof == "c-mmap-hot-snapshot"
 }
 
 func LoadHotClientStats(storeRoot string) HotClientStats {
@@ -57,6 +86,14 @@ func LoadHotClientStats(storeRoot string) HotClientStats {
 		fields := bytes.Fields(line)
 		if len(fields) < 2 {
 			continue
+		}
+		if ts, err := strconv.ParseInt(string(fields[0]), 10, 64); err == nil {
+			if ts > stats.LastEventUnixNano {
+				stats.LastEventUnixNano = ts
+			}
+			if string(fields[1]) == "replay" && ts > stats.LastReplayUnixNano {
+				stats.LastReplayUnixNano = ts
+			}
 		}
 		switch string(fields[1]) {
 		case "replay":

@@ -56,6 +56,13 @@ Hot-prepared proof-gated replay candidates:
 - `which <common-tool>`
 - `command -v <common-tool>` for external PATH executables only
 
+Scoped product sessions may pass tiny file readers such as `cat` and `sed`
+directly through to native tools by default when native is faster than the
+foreground proof cost. Warm-file replay remains an explicit coverage and
+experiment mode through `squire session --enable-warm-file-replay -- ...`.
+Passing through an unprofitable operator is a native fallback choice, not a new
+agent-visible behavior.
+
 Hot-prepared proof-gated candidates may replay only when the command key, cheap
 hot fingerprints, hot invalidation epoch, output hashes, and in-memory output
 bytes all match. Their p95 replay wall time is reported separately from
@@ -77,23 +84,123 @@ native execution wins. A separate background maintainer may produce durable
 evidence and reports, publish the mmap snapshot, and serve exact prepared
 output to fresh foreground processes over a local Unix-socket daemon cache.
 
-The production foreground should be long-lived. A long-lived foreground may
-reuse the resident hot-cache connection and keep short session-local
-daemon-unavailable and exact-command miss caches. These caches must be bounded,
-brief, and fault-open: they may suppress replay attempts, but they must never
-suppress native execution.
-For adapter integrations, replay checks should reuse the foreground kernel's
-cached mmap snapshot view rather than map/unmap the snapshot on every request.
-Adapter responses may use pooled buffers to reduce allocation churn, but the
-wire protocol must still preserve exact stdout/stderr bytes and exit code.
+The primary production foreground is a scoped session transport. `squire
+session -- <command>` prefers a local preload library when available and the
+launcher is safe for preload inheritance, sets exact native fallback paths,
+launches the ordinary shell or agent command, and hooks selected exec-family
+calls inside that child process tree. The preload library reads the resident
+maintainer's mmap hot snapshot directly, serves only proven entries, refuses
+replay for custom-env exec calls it cannot prove, and falls through to native
+exec on every miss, unsupported launcher, unsupported argv, or absent/corrupt
+snapshot.
 
-The production foreground is host/runtime owned, not model owned. A terminal
-adapter may send already-chosen commands to Squire over a local protocol and
-receive exact stdout/stderr/exit-code results, but the agent-facing command text
-must remain the original command. The adapter must not add tools, change
-prompts, suggest commands, route models, or require the model to call Squire.
-Manual `squire kernel run -- <command>` remains a diagnostic surface, not the
-primary product UX.
+For known unsafe launchers, or when preload is unavailable, the session runs
+native with no command interception. `--preload` requires the preload transport
+for any launcher and must fail closed to session startup if the local library is
+unavailable. Squire must not install global shell state.
+
+On macOS, SIP-protected system launchers such as `/bin/sh`, `/bin/zsh`,
+`/bin/bash`, and `/usr/bin/env` are preload-unsafe because they ignore
+`DYLD_INSERT_LIBRARIES`. They must run native unless a future native adapter can
+attach below that protected launcher boundary.
+
+In Linux guest mode, Squire launches Codex preload-first when the guest preload
+library is available, because the microVM removes macOS `DYLD` and protected
+shell limits. The Codex binary itself may be static and ignore preload, but the
+preload environment can still reach dynamic child shells if Codex and its
+sandbox preserve it. The preload transport must handle both direct tool exec
+and simple `execve("/bin/sh", "-c", <allowlisted command>)` shell launches
+before falling back to native shell execution. Scoped guest-local mmap shims are
+the fallback or diagnostic transport when preload assets are absent or explicitly
+requested.
+Both transports remain model-invisible and session-scoped: the agent emits the
+same commands, Squire reads only the local hot snapshot, and every miss or
+invalid proof falls back to the native executable.
+Replay accounting must not require sandboxed child commands to open the ledger
+or store directly. Scoped sessions should provide a session-owned inherited
+event FD for tiny replay accounting events, validate those event lines in the
+parent Squire process, and append them to the local store from that parent.
+Scoped sessions should also pass the current hot snapshot as an inherited
+read-only FD when available, so replay children can `mmap` a proven snapshot
+without reopening `hot_snapshot.bin` by path on every command. Direct
+event-file append and path-opened snapshots are fallback paths only.
+The host VM helper may forward only a narrow Squire diagnostic/session
+allowlist into the guest, such as `SQUIRE_VM_GUEST_SESSION_TRANSPORT`,
+`SQUIRE_PRELOAD_TRACE`, and shim debug flags. It must not forward arbitrary host
+environment variables into the guest command. Trace and hard-hit flags are
+diagnostic; production performance measurements must run without
+`SQUIRE_PRELOAD_TRACE` and without `SQUIRE_SHIM_REQUIRE_HIT`.
+
+For non-protected launchers, preload may replay simple `exec*` and
+`posix_spawn*` commands. The supported `posix_spawn` file-action subset is
+strictly limited to recorded `close` and `dup2` actions, which covers common
+stdout/stderr pipe capture. Unknown file actions or spawn attributes must fall
+back native.
+
+Long-lived adapter integrations remain a compatibility path for host runtimes
+that already expose a command executor. A long-lived foreground may reuse the
+resident hot-cache connection and keep short session-local daemon-unavailable
+and exact-command miss caches. These caches must be bounded, brief, and
+fault-open: they may suppress replay attempts, but they must never suppress
+native execution. For adapter integrations, replay checks should reuse the
+foreground kernel's cached mmap snapshot view rather than map/unmap the
+snapshot on every request. Adapter responses may use pooled buffers to reduce
+allocation churn, but the wire protocol must still preserve exact
+stdout/stderr bytes and exit code.
+
+The production foreground is host/runtime owned, not model owned. A scoped
+session or terminal adapter may serve already-chosen commands through Squire,
+but the agent-facing command text must remain the original command. These
+foregrounds must not add tools, change prompts, suggest commands, route models,
+or require the model to call Squire. The normal session and adapter start or
+reuse the resident background maintainer by default so the maintainer lifecycle
+is a host concern, not an agent behavior. Manual `squire kernel run --
+<command>` remains a diagnostic surface, not the primary product UX.
+
+`squire vm session -- <command>` is a separate Linux guest execution mode. It
+exists to run the ordinary agent loop inside a Linux environment where
+`LD_PRELOAD`, process interception, and Linux deployment parity are first-class
+instead of fighting host macOS protected shells and hardened runtimes. The
+agent-facing command text must still remain unchanged, and the guest must obey
+the same replay contract: exact stdout/stderr/exit-code or native fallback
+inside the guest. VM mode must not depend on host command shims, session-local
+host PATH tricks, or the macOS scoped C shim fallback.
+
+On Linux hosts, `squire vm session` may use the same scoped session kernel
+directly. On macOS, VM mode uses the built-in `squire-vm-darwin`
+Virtualization.framework helper when that helper is installed and Linux guest
+assets are configured. The helper must be signed with the
+`com.apple.security.virtualization` entitlement and the host/session must report
+Virtualization.framework support. The helper may boot a configured Linux kernel
+with an initrd or disk image, expose the workspace and store through virtiofs,
+and send the already-chosen command to a guest agent over an exact framed guest
+protocol. The current working macOS MVP uses virtio serial by default; vsock is
+allowed only when the guest kernel/initramfs proves AF_VSOCK support. Squire
+does not bundle a guest image yet, so helper presence alone is not an
+availability proof.
+The guest bootstrap may switch from the raw initramfs rootfs into a
+tmpfs-backed root so Linux sandbox tools can use `pivot_root`. Guest `/tmp`
+must be a normal writable sticky directory.
+Interactive guest sessions must keep terminal bytes separate from control
+messages. The macOS helper uses one virtio serial channel for the framed
+request/response protocol and a second virtio serial channel as the guest TTY
+for interactive commands such as `codex`. The helper must propagate the host
+terminal row/column size into the guest TTY before launching the interactive
+command.
+
+Codex inside VM mode requires an explicit Linux Codex guest bundle and an
+explicit `SQUIRE_VM_CODEX_HOME` mount when the user wants to expose local Codex
+auth/config to the guest. Squire must not mount Codex credentials implicitly.
+The guest may install ordinary Linux sandbox/discovery tools such as
+`bubblewrap`, `git`, and `ripgrep` as part of the guest bootstrap, but those
+tools run inside the guest and do not change the agent-visible command text.
+Codex sandboxed read-only commands such as `git status --short --branch` must
+run inside the guest without requiring a host approval fallback.
+
+An explicitly configured `SQUIRE_VM_RUNNER` or `--runner` may provide the same
+guest contract externally. VM mode must not pretend to preserve host-native
+macOS command semantics. Xcode, iOS, Homebrew-only, and other macOS-specific
+workflows should remain host-native.
 
 Workspace file inspection replay is limited to safe relative paths inside the
 workspace, regular files below the bounded size limits, non-hidden/VCS paths,

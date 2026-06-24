@@ -48,6 +48,17 @@ func main() {
 	case len(args) == 1 && args[0] == "setup":
 		enableSquireOwnedGitReads()
 		out, err = kernel.Setup(ctx, cwd, storeRoot)
+	case len(args) >= 1 && args[0] == "session":
+		enableSquireOwnedGitReads()
+		err = runSession(ctx, cwd, storeRoot, args[1:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	case len(args) >= 1 && args[0] == "vm":
+		enableSquireOwnedGitReads()
+		out, err = runVM(ctx, cwd, storeRoot, args[1:])
 	case len(args) >= 1 && args[0] == "version":
 		var format outputFormat
 		format, err = outputFormatFromTrailingArgsDefault(args[1:], outputShort)
@@ -70,6 +81,13 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case len(args) >= 3 && args[0] == "kernel" && args[1] == "shim-helper":
+		err = runKernelShimHelper(ctx, cwd, args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	case len(args) >= 3 && args[0] == "kernel" && args[1] == "run":
 		runKernelCommand(ctx, cwd, storeRoot, args[2:])
 		return
@@ -82,12 +100,17 @@ func main() {
 	case len(args) >= 2 && args[0] == "kernel" && args[1] == "warm":
 		enableSquireOwnedGitReads()
 		var format outputFormat
-		format, err = outputFormatFromTrailingArgs(args[2:])
+		var metadataOnly bool
+		format, metadataOnly, err = parseWarmArgs(args[2:])
 		if err != nil {
 			break
 		}
 		var report kernel.WarmReport
-		report, err = kernel.Warm(ctx, cwd, storeRoot)
+		if metadataOnly {
+			report, err = kernel.WarmMetadata(ctx, cwd, storeRoot)
+		} else {
+			report, err = kernel.Warm(ctx, cwd, storeRoot)
+		}
 		if err == nil {
 			out = warmReportOut(report, format)
 		}
@@ -141,6 +164,9 @@ func main() {
 	case args[0] == "boost":
 		fatalUsage(boostUsageError(args[1:]))
 		os.Exit(2)
+	case args[0] == "vm":
+		fatalUsage(vmUsageError(args[1:]))
+		os.Exit(2)
 	default:
 		fatalUsage(fmt.Sprintf("unknown command %q", args[0]))
 		os.Exit(2)
@@ -186,6 +212,8 @@ func kernelUsageError(args []string) string {
 		return "squire kernel prewarm-adjacent requires -- before the command"
 	case "adapter":
 		return `invalid kernel adapter usage (try "squire help kernel adapter")`
+	case "shim-helper":
+		return `invalid kernel shim-helper usage (try "squire help kernel shim-helper")`
 	default:
 		return fmt.Sprintf(`unknown kernel subcommand %q (try "squire help kernel")`, args[0])
 	}
@@ -217,16 +245,20 @@ func usageText() string {
 
 usage:
   squire setup
+  squire session [--quiet] [--metadata-only|--no-warm] [--no-maintainer] [--enable-warm-file-replay] [--preload] [--preload-lib <path>] -- <command> [args...]
+  squire vm status [--short|--json]
+  squire vm session [--quiet] [--backend auto|linux-local|external-runner] [--runner <path>] -- <command> [args...]
   squire version [--short|--json]
   squire kernel status [--short]
   squire kernel run -- <command> [args...]
-  squire kernel warm [--short|--json]
+  squire kernel warm [--metadata-only] [--short|--json]
   squire kernel maintain --once [--short|--json]
   squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
   squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
   squire kernel maintain --background-status [--short|--json]
   squire kernel maintain --stop [--short|--json]
-  squire kernel adapter --stdio [--ensure-maintainer]
+  squire kernel adapter --stdio [--no-maintainer]
+  squire kernel shim-helper --socket <path>
   squire boost status [--short|--json]
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
@@ -240,15 +272,20 @@ principles:
 first use:
   squire setup
   squire kernel maintain --background --short
-  squire kernel warm --short
+  squire kernel warm --metadata-only --short
+  squire session -- $SHELL
   squire kernel run -- git rev-parse HEAD
+  squire vm status --short
   squire kernel status --short
 
 help:
+  squire help session
+  squire help vm
   squire help version
   squire help kernel run
   squire help kernel maintain
   squire help kernel adapter
+  squire help kernel shim-helper
   squire help boost
 `
 }
@@ -278,6 +315,51 @@ func helpTopic(topic []string) string {
 Initializes the local Squire Kernel store, prints privacy mode, and does not
 install global command shims.
 `
+	case "session":
+		return `usage:
+  squire session [--quiet] [--metadata-only|--no-warm] [--no-maintainer] [--enable-warm-file-replay] [--preload] [--preload-lib <path>] -- <command> [args...]
+
+Starts a scoped Squire session around an ordinary shell or agent command. Squire
+starts or reuses the resident maintainer and warms local proofs. By default it
+prefers a scoped preload library when the launcher is safe and the library is
+available, tries the same mmap proof before selected exec calls, and falls
+through to native exec on any miss. For known unsafe launchers, or when preload
+is unavailable, the session runs native with no command interception. The
+command and anything it launches still emits ordinary commands such as git,
+cat, sed, node, or python; the model never has to call Squire.
+
+--preload requires the preload transport for any launcher and errors if the
+local library is not available.
+
+Misses, unsupported argv, invalid proofs, validation commands, edits,
+mutations, and package setup all execute natively through exact fallback paths.
+Tiny native file readers such as cat and sed are not replayed by default because
+native is faster on small local files; --enable-warm-file-replay opts into
+bounded preload coverage experiments.
+`
+	case "vm", "vm status", "vm session":
+		return `usage:
+  squire vm status [--short|--json]
+  squire vm session [--quiet] [--backend auto|linux-local|external-runner] [--runner <path>] -- <command> [args...]
+
+Runs Squire as an isolated Linux execution mode. On Linux hosts, vm session uses
+the same scoped session kernel directly. On macOS, vm session runs the
+Virtualization.framework Linux guest when SQUIRE_VM_HELPER, SQUIRE_VM_KERNEL,
+and SQUIRE_VM_INITRD are configured, or falls back to an external runner when
+SQUIRE_VM_RUNNER or --runner is provided to hand the session to a guest lifecycle
+runner. Codex launches inside the guest use session-scoped guest-local mmap
+shims for reliable child-command interception. This is the guest lifecycle runner
+contract.
+
+The model still emits ordinary commands. The guest runner contract receives:
+
+  <runner> session --cwd <host-cwd> --store-root <store-root> -- <command> [args...]
+
+The guest must run Squire Kernel inside the Linux environment and preserve the
+same contract: exact stdout/stderr/exit-code or native fallback inside the
+guest. Host-native and vm sessions are intentionally separate because Linux
+guest execution does not preserve macOS-specific command semantics.
+`
 	case "version":
 		return `usage:
   squire version [--short|--json]
@@ -306,22 +388,39 @@ it runs the original command natively.
 `
 	case "kernel adapter":
 		return `usage:
-  squire kernel adapter --stdio [--ensure-maintainer]
+  squire kernel adapter --stdio [--no-maintainer]
 
 Starts a long-lived terminal adapter process for host runtimes. The model still
 emits ordinary commands; the terminal layer sends those already-chosen commands
 to this adapter over JSON lines. Responses contain exact stdout/stderr bytes as
-base64 plus the exact exit code. If --ensure-maintainer is set, the adapter
-starts or reuses the resident background maintainer before serving requests.
+base64 plus the exact exit code. By default, the adapter starts or reuses the
+resident background maintainer before serving requests. --no-maintainer is a
+diagnostic escape hatch for measuring native-direct adapter overhead.
+
+This is now a compatibility path for host runtimes that can already integrate
+over stdio. The primary scoped foreground path is the preload session, which
+reads the maintainer-published hot snapshot from inside the launched process
+tree when preload can attach and falls back to native exec on any miss.
+`
+	case "kernel shim-helper":
+		return `usage:
+  squire kernel shim-helper --socket <path>
+
+Experimental scoped-shim helper. It listens on a local Unix socket, accepts
+already-chosen argv/cwd requests from temporary per-session shims, serves them
+through the same adapter decision path, and returns exact stdout/stderr bytes
+plus exit code. It is not a global shim installer and should be launched only
+inside an explicit Squire-owned session.
 `
 	case "kernel warm":
 		return `usage:
-  squire kernel warm [--short|--json]
+  squire kernel warm [--metadata-only] [--short|--json]
 
 Prepares local read-only proofs and hot outputs for later agent-chosen
 commands. It does not suggest commands, change prompts, mutate files, or skip
 native fallback. JSON is the default output for automation; use --short for a
-compact human-readable summary.
+compact human-readable summary. Use --metadata-only to prepare only enabled
+local metadata fast paths and their hot snapshot.
 `
 	case "kernel maintain":
 		return `usage:
@@ -342,10 +441,12 @@ human-readable status.
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
 
-Shows local acceleration counters and runs scoped benchmarks. Benchmarks make
-no broad Codex speedup claim. Benchmark JSON is the default output for
-automation; use --short for a compact human-readable summary. Boost status is
-human-readable by default; use --json for automation.
+Shows local acceleration counters and runs scoped benchmarks. Boost status
+includes hot-client replay counts and last event/replay Unix nanosecond
+timestamps so recent session activity can be distinguished from older ledger
+data. Benchmarks make no broad Codex speedup claim. Benchmark JSON is the
+default output for automation; use --short for a compact human-readable
+summary. Boost status is human-readable by default; use --json for automation.
 `
 	default:
 		return usageText()
@@ -557,6 +658,26 @@ func outputFormatFromTrailingArgsDefault(args []string, def outputFormat) (outpu
 		return outputJSON, fmt.Errorf("unknown output option %q", remaining[0])
 	}
 	return format, nil
+}
+
+func parseWarmArgs(args []string) (outputFormat, bool, error) {
+	remaining, format, err := splitOutputFormatFlag(args)
+	if err != nil {
+		return outputJSON, false, err
+	}
+	metadataOnly := false
+	for _, arg := range remaining {
+		switch arg {
+		case "--metadata-only":
+			if metadataOnly {
+				return outputJSON, false, fmt.Errorf("squire kernel warm option %q specified more than once", arg)
+			}
+			metadataOnly = true
+		default:
+			return outputJSON, false, fmt.Errorf("unknown warm option %q", arg)
+		}
+	}
+	return format, metadataOnly, nil
 }
 
 func parseForegroundOptions(args []string) (kernel.MaintainerOptions, error) {

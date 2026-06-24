@@ -38,6 +38,41 @@ stdout, stderr, exit codes, prompts, model routing, or final decisions.
   state remains authoritative.
 - It does not require OpenTelemetry. OTel is optional session metadata only.
 
+## Install
+
+Install the `squire` binary once for the current user:
+
+```sh
+curl -fsSL https://squire.run/install.sh | bash
+```
+
+The installer downloads the matching release archive from GitHub, verifies it
+with `SHA256SUMS`, and installs `squire` to `~/.local/bin` by default. Override
+the install location with `SQUIRE_INSTALL_DIR`:
+
+```sh
+curl -fsSL https://squire.run/install.sh | SQUIRE_INSTALL_DIR=/usr/local/bin bash
+```
+
+This is a system/user-level install only. It does not install global command
+shims, does not start a global daemon, and does not create repo state until
+Squire is run inside a workspace.
+
+On macOS, Apple's protected `/bin/zsh`, `/bin/sh`, `/bin/bash`, and
+`/usr/bin/env` ignore `DYLD_INSERT_LIBRARIES`. Squire does not preload those
+shells directly. For hardened launchers such as Codex, `squire session`
+automatically uses scoped mmap shims instead, so Codex can keep launching
+ordinary `/bin/zsh -lc ...` commands while Squire accelerates eligible tools
+resolved inside that scoped session PATH. Homebrew zsh is optional for future
+preload-safe shell integrations:
+
+```sh
+brew install zsh
+```
+
+Squire installs and works without Homebrew zsh. No global command shims are
+installed.
+
 ## Try It
 
 ```sh
@@ -46,6 +81,8 @@ squire kernel maintain --background --short
 squire kernel warm --short
 squire kernel run -- git rev-parse HEAD
 squire kernel status --short
+squire vm status --short
+squire session -- $SHELL
 ```
 
 ## Normal Product UX
@@ -57,15 +94,217 @@ agent runtime continues to choose ordinary commands such as `git status
 Squire belongs below that layer:
 
 - a resident background maintainer keeps local world state warm;
-- a terminal adapter forwards already-chosen commands to Squire over a local
-  protocol;
+- a scoped preload library reads the maintainer-published mmap hot snapshot
+  before selected exec calls when the platform supports it;
+- hardened launchers such as Codex on macOS use scoped mmap shims because their
+  signed runtime does not accept `DYLD_INSERT_LIBRARIES`;
+- runtimes that already provide a command-executor adapter can use the stdio
+  compatibility adapter instead;
 - Squire either returns exact proven bytes or runs the command natively.
 
 `squire kernel run -- <command>` is a diagnostic/manual surface. A production
-agent integration should use `squire kernel adapter --stdio --ensure-maintainer`
-as a long-lived host process, not as a model-visible command.
+agent integration should use `squire session`, not a model-visible command.
+The installed preload library is never installed globally into the user's
+shell. Session launchers scope the transport to one child process tree and set
+exact native fallback paths when preload can attach. The stdio adapter remains
+as a compatibility path for host runtimes that can already forward
+already-chosen commands over JSON lines.
 
-The current invisible UX proof is `scripts/adapter_path_bench.py`. It creates a
+The normal user-facing launcher is:
+
+```sh
+squire session -- codex
+# or
+squire session -- claude
+# or
+squire session -- $SHELL
+```
+
+Inside that process, the agent or shell runs ordinary commands. Squire starts or
+reuses the resident maintainer and warms local proofs. Squire prefers the scoped
+preload transport when the local library is available and the launcher is safe
+for preload inheritance. On macOS, `squire session -- codex` automatically uses
+scoped mmap shims because the Codex binary is hardened and does not load the
+preload library. Misses, unsafe commands, invalid proofs, mutations,
+validation, and package setup still execute natively.
+
+For Codex on macOS, the preferred clean path is now Linux guest mode below:
+`squire vm session -- codex`. That avoids host protected-shell and hardened
+runtime behavior instead of depending on host command shims. Inside the guest,
+Squire launches Codex through a preload-first scoped session when the guest
+preload library is available, with guest-local mmap shims as the fallback when
+preload assets are absent or explicitly requested through
+`SQUIRE_VM_GUEST_SESSION_TRANSPORT=path-shims`. Codex still emits ordinary
+commands while eligible child `git`, `cat`, `sed`, and discovery calls can hit
+the hot snapshot.
+The macOS VM helper forwards a narrow Squire diagnostic allowlist into the
+guest, including `SQUIRE_VM_GUEST_SESSION_TRANSPORT`,
+`SQUIRE_PRELOAD_TRACE`, `SQUIRE_SHIM_DEBUG`, and `SQUIRE_SHIM_REQUIRE_HIT`, so
+preload reachability can be tested without forwarding arbitrary host
+environment variables. Those flags are diagnostic only. Performance runs should
+leave `SQUIRE_PRELOAD_TRACE` and `SQUIRE_SHIM_REQUIRE_HIT` unset so misses can
+fall back natively and stderr tracing does not dominate sub-millisecond replay
+measurements.
+For Codex, the preload path must catch simple shell execution too: Codex may
+`execve` a dynamic `/bin/sh -c <command>` instead of spawning `git` directly.
+Squire handles those simple shell commands before native shell fallback. Replay
+accounting uses a session-owned inherited event FD first, then falls back to a
+direct event-file append. The session also passes the current hot snapshot as an
+inherited read-only FD so replay hits can `mmap` the already-open snapshot
+instead of opening `hot_snapshot.bin` by path on every child command. VM guest
+sessions additionally request a read-only session-local snapshot copy, which
+keeps replay hits from faulting snapshot pages through the shared store mount.
+That lets sandboxed Codex child processes record replays without direct write
+access to the mounted Squire store and keeps production preload replay below
+the 1ms p95 target.
+
+For workloads that can run in Linux, Squire also exposes a separate guest-mode
+surface:
+
+```sh
+squire vm status --short
+squire vm session -- codex
+```
+
+This is not a host-native macOS compatibility mode. It is an isolated Linux
+execution mode intended to avoid Apple protected-shell and hardened-runtime
+limits entirely. It must not depend on host command shims or session-local host
+PATH tricks. On Linux hosts, `squire vm session` immediately uses the same
+scoped session kernel locally. On macOS, `squire vm session` uses the optional
+`squire-vm-darwin` helper built from `vm/squire_vm_darwin.swift` when it is
+installed and the Linux guest assets are configured.
+
+The Darwin helper uses Virtualization.framework, boots a configured Linux
+kernel with an initrd or disk image, shares the host workspace and Squire store
+through virtiofs, and sends the already-chosen command to a guest agent over a
+virtio serial protocol by default. A vsock transport remains an opt-in
+experiment through `SQUIRE_VM_TRANSPORT=vsock`, but the working macOS MVP uses
+serial because the Alpine virt initramfs does not expose AF_VSOCK by default.
+The guest agent returns exact stdout/stderr/exit-code bytes, or native fallback
+happens inside Linux. `install.sh` compiles the helper with Swift and ad-hoc
+signs it with the `com.apple.security.virtualization` entitlement when
+`codesign` is present. Squire does not bundle a Linux guest image yet, so macOS
+status may show the helper installed while guest configuration or host
+Virtualization.framework support is missing.
+
+Required macOS guest configuration:
+
+```sh
+export SQUIRE_VM_KERNEL=/path/to/kernel.Image
+export SQUIRE_VM_INITRD=/path/to/initrd   # or SQUIRE_VM_DISK=/path/to/disk.img
+export SQUIRE_VM_TRANSPORT=serial         # optional, default serial
+```
+
+From a source checkout, build a local Alpine-based test guest bundle:
+
+```sh
+scripts/build_vm_guest_bundle.sh /tmp/squire-vm-guest
+export SQUIRE_VM_KERNEL=/tmp/squire-vm-guest/kernel.Image
+export SQUIRE_VM_INITRD=/tmp/squire-vm-guest/initrd
+squire vm session -- /bin/sh -lc 'echo hello from guest'
+```
+
+To build a Codex-enabled local guest bundle, include the Linux Codex release
+binary and explicitly mount Codex auth/config:
+
+```sh
+SQUIRE_VM_INCLUDE_CODEX=1 scripts/build_vm_guest_bundle.sh /tmp/squire-vm-guest-codex
+export SQUIRE_VM_KERNEL=/tmp/squire-vm-guest-codex/kernel.Image
+export SQUIRE_VM_INITRD=/tmp/squire-vm-guest-codex/initrd
+export SQUIRE_VM_CODEX_HOME=$HOME/.codex
+squire vm session -- codex doctor --summary
+squire vm session -- codex exec --skip-git-repo-check 'Print exactly VM_CODEX_OK.'
+```
+
+`SQUIRE_VM_CODEX_HOME` is intentionally explicit because it exposes local Codex
+auth/config files to the local Linux guest. The Codex-enabled Alpine bundle
+installs guest-side `bubblewrap`, `git`, and `ripgrep` at boot so Codex can use
+normal Linux sandbox and discovery tools. The guest switches from the raw
+initramfs rootfs into a tmpfs-backed root at boot so `bubblewrap` can use
+`pivot_root`, and `/tmp` is created as a normal `01777` directory. A local macOS
+smoke verified Codex v0.140.0 inside the guest: network and WebSocket
+connectivity passed, auth loaded, `bubblewrap 0.11.2`, `git version 2.54.0`,
+and `ripgrep 15.1.0` were available, a sandboxed `git status --short --branch`
+ran without approval fallback, and a minimal `codex exec` returned
+`VM_CODEX_OK`. Interactive `squire vm session -- codex` uses a second virtio
+serial console as the guest TTY, propagates host terminal rows/columns into
+that guest TTY, and keeps the first serial channel as the control protocol for
+startup and exit-code reporting.
+
+This test must be run from a normal terminal context that can use
+Virtualization.framework. The Codex sandbox used while developing Squire can
+report `Virtualization.framework reports this host is unsupported` even when
+the same signed helper works unsandboxed.
+
+As an escape hatch, an external Linux guest runner can still be configured
+through `SQUIRE_VM_RUNNER` or `--runner`:
+
+```sh
+SQUIRE_VM_RUNNER=/path/to/linux-guest-runner squire vm session -- codex
+```
+
+The guest runner contract is:
+
+```sh
+<runner> session --cwd <host-cwd> --store-root <store-root> -- <command> [args...]
+```
+
+Inside the guest, Codex or another agent still emits ordinary commands, and
+Squire still returns exact proven bytes or falls back to native execution inside
+Linux. This path is useful for JS, Python, Go, Rust, and server-style projects
+that are already Linux-compatible. It is not equivalent for Xcode, iOS,
+Homebrew-only, or macOS-specific projects.
+
+The scoped preload proof is `scripts/session_preload_bench.py`. It uses a
+non-protected local launcher and repeated ordinary `posix_spawnp("git",
+"rev-parse", "HEAD")` calls with stdout captured through `posix_spawn` file
+actions, so the benchmark exercises the preload transport used by agent-style
+pipe capture, not the legacy transport. By default, measured replay rounds use
+production fallback mode; pass `--require-hit-measurement` only for diagnostic
+hard-hit measurements. A current `/private/tmp` production run measured native
+p50 `15.40ms` versus preload-session replay p50 `0.75ms` and p95 `0.87ms`,
+with exact output and native fallback still available. The hard-hit diagnostic
+run measured replay p50 `0.81ms`. Use `--shell-launcher` to measure the
+Codex-shaped `sh -c "git rev-parse HEAD"` path; the current shell-launch
+production run measured native p50 `20.10ms` versus preload replay p50
+`0.62ms` and p95 `0.69ms`. VM/Codex traces should be run separately because
+`SQUIRE_PRELOAD_TRACE=1` intentionally adds stderr writes.
+
+A live macOS VM/Codex session using `squire vm session -- codex` and production
+preload settings produced fresh replay samples of `486us`, `619us`, `929us`,
+`587us`, and `555us` for repeated plain `git rev-parse HEAD` calls. Those
+samples were all exact `c-mmap-hot-snapshot` replays and all below the 1ms
+target. Older entries in `hot_client_events.log` may include pre-optimization
+samples, so release checks should evaluate a fresh post-start window rather
+than the lifetime average.
+
+Tiny `cat`/`sed` reads pass through native tools by default because proving a
+replay by hashing the file is usually more expensive than native process
+startup for very small files. `squire session --enable-warm-file-replay -- ...`
+opts into bounded preload coverage experiments; product mode keeps the
+unprofitable tiny-reader path native while preserving exact fallback.
+
+The preload transport uses `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` to hook
+exec-family calls inside the session and calls the same mmap proof engine before
+native exec loads the target binary. It is the preferred transport when
+available, but preload support still depends on the platform and launcher. On
+macOS, SIP-protected launchers such as `/bin/zsh`, `/bin/sh`, and
+`/usr/bin/env` ignore `DYLD_INSERT_LIBRARIES`, so normal auto mode treats them
+as preload-unsafe and runs native. Non-protected user binaries can use the
+preload path, including simple `posix_spawn` / `posix_spawnp` launches and the
+common pipe-capture file actions built from `posix_spawn_file_actions_addclose`
+and `posix_spawn_file_actions_adddup2`. In a controlled `/private/tmp` driver,
+repeated `posix_spawnp("git", "rev-parse", "HEAD")` with stdout pipe capture
+measured native p50 `7.10ms` versus preload-session replay p50 `0.386ms`, with
+exact output and native fallback still available. `--preload` requires preload
+for any launcher and is intended for diagnostics and launcher-specific testing.
+
+The older Codex-on-macOS scoped mmap shim proof remains a diagnostic fallback,
+not the preferred product direction. For production Codex work that can run on
+Linux, use `squire vm session -- codex` so the whole agent loop runs in the
+guest and the host macOS launcher does not need to be intercepted.
+
+The long-lived adapter UX proof is `scripts/adapter_path_bench.py`. It creates a
 fresh temp Git repo, starts the long-lived adapter as the hidden backend, and
 measures ordinary visible commands. The measured command stream contains no
 `squire kernel run -- ...` command. A 1000-round `/private/tmp` run served 3000
@@ -102,6 +341,7 @@ For release checks:
 go test ./...
 squire boost bench repo-metadata
 scripts/release_smoke.sh ./squire
+scripts/session_preload_bench.py ./squire --rounds 5 --commands 100
 scripts/adapter_path_bench.py ./squire
 scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
 scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
@@ -206,6 +446,59 @@ Level 2, Transparent Fast Path:
 - Prints privacy mode.
 - Does not install global command shims by default.
 
+`squire session [--quiet] [--metadata-only|--no-warm] [--no-maintainer] [--enable-warm-file-replay] [--preload] [--preload-lib <path>] -- <command> [args...]`
+
+- Starts a scoped Squire session around an ordinary shell or agent command.
+- Starts or reuses the resident background maintainer unless `--no-maintainer`
+  is set.
+- Warms local proofs unless `--no-warm` is set. `--metadata-only` narrows warm
+  work to enabled metadata fast paths.
+- Prefers the scoped preload transport when `squire-preload.dylib` or
+  `squire-preload.so` is available and the launcher is safe for preload
+  inheritance.
+- Uses scoped mmap shims automatically for hardened Codex on macOS, where the
+  Codex binary does not load `DYLD_INSERT_LIBRARIES` but its `/bin/zsh -lc ...`
+  child commands can still resolve eligible tools through a session-local PATH.
+- Runs native without command interception for other known unsafe launchers or
+  when no scoped transport is available.
+- On macOS, system launchers protected by SIP, including `/bin/sh`,
+  `/bin/zsh`, `/bin/bash`, and `/usr/bin/env`, are treated as preload-unsafe
+  because they ignore `DYLD_INSERT_LIBRARIES`.
+- Passes tiny native file readers such as `cat` and `sed` through by default;
+  `--enable-warm-file-replay` opts into bounded preload coverage experiments.
+- `--preload` requires the scoped preload transport for any launcher and errors
+  if the local library is unavailable.
+- `--path-shims` is a diagnostic escape hatch. It creates session-local symlinks
+  to `squire-mmap-shim`; it never installs global command shims.
+- This is the preferred no-model-change UX. The model sees and emits normal
+  commands; Squire remains outside the prompt/tool surface.
+
+`squire vm status [--short|--json]`
+
+- Reports whether the Linux guest execution mode is available.
+- On Linux, reports `linux-local` when the host can use the same scoped session
+  kernel directly.
+- On macOS, reports the `virtualization-framework` backend, the optional
+  `squire-vm-darwin` helper, and whether Linux guest assets are configured.
+- Reports `uses_host_command_shims: false`; VM mode is guest-owned execution,
+  not the host C shim fallback.
+- Does not claim macOS host-semantic preservation; the guest OS is Linux.
+
+`squire vm session [--quiet] [--backend auto|linux-local|external-runner] [--runner <path>] -- <command> [args...]`
+
+- Starts an isolated Linux execution session for an ordinary agent or shell
+  command.
+- On Linux hosts, runs through the existing scoped `squire session` machinery,
+  so Linux-native interception can be used without macOS protected-shell limits.
+- On macOS, uses the built-in Virtualization.framework helper when installed
+  and configured.
+- With `--runner` or `SQUIRE_VM_RUNNER`, delegates lifecycle to an external
+  Linux guest runner using the documented runner contract.
+- On macOS without a helper/guest config or runner, fails clearly instead of
+  silently falling back to host-native execution with different guarantees.
+- Keeps the model-visible command unchanged. The guest must preserve exact
+  stdout/stderr/exit-code replay or native fallback inside Linux.
+
 `squire version [--short|--json]`
 
 - Prints Squire Kernel build identity.
@@ -228,7 +521,9 @@ Level 2, Transparent Fast Path:
 
 - Runs the agent-chosen command through Squire Kernel.
 - This is a diagnostic/manual CLI surface; normal product integrations should
-  prefer the long-lived terminal adapter so the model never has to call Squire.
+  prefer scoped preload sessions or, for host runtimes with executor
+  integration, the long-lived terminal adapter so the model never has to call
+  Squire.
 - First tries the foreground CLI mmap hot-client path before constructing the
   full kernel object, loading ledgers, or touching the daemon/socket path.
 - Writes exact stdout and stderr bytes and exits with the exact native or replay
@@ -241,9 +536,9 @@ Level 2, Transparent Fast Path:
   future file-inspection commands replayable unless exact local proof and output
   bytes are available.
 
-`squire kernel adapter --stdio [--ensure-maintainer]`
+`squire kernel adapter --stdio [--no-maintainer]`
 
-- Starts a long-lived foreground adapter for terminal runtimes.
+- Starts a long-lived foreground compatibility adapter for terminal runtimes.
 - Reads newline-delimited JSON requests from stdin and writes newline-delimited
   JSON responses to stdout.
 - The request contains the already-chosen `argv`, `cwd`, optional environment
@@ -256,16 +551,39 @@ Level 2, Transparent Fast Path:
   one process startup and kernel construction per command.
 - Reuses the kernel's cached mmap hot snapshot view on replay hits and writes
   the default non-debug response through a pooled, manual JSON writer.
-- With `--ensure-maintainer`, starts or reuses the resident background
-  maintainer before serving requests.
+- Starts or reuses the resident background maintainer before serving requests.
+- `--ensure-maintainer` is accepted as a compatibility no-op. `--no-maintainer`
+  disables automatic maintainer lifecycle only for diagnostics.
 - This is a host/runtime integration point. It does not add an agent tool,
   change prompts, suggest commands, or require the model to emit a Squire
   command.
 
-`squire kernel warm [--short|--json]`
+`squire-preload.dylib` / `squire-preload.so`
+
+- Optional scoped preload library compiled by `install.sh` when `cc` is
+  available.
+- Preferred by `squire session` when available; it is never installed as a
+  global shell preload.
+- Hooks exec-family calls, refuses custom-env `execve` replays it cannot prove,
+  and uses the mmap hot snapshot proof engine.
+- Falls through to native exec on every miss, unsupported argv, unsupported
+  launcher, or absent/corrupt snapshot.
+
+`squire-mmap-shim`
+
+- Optional local helper compiled by `install.sh` when `cc` is available.
+- Used by `squire session -- codex` on macOS as a scoped fallback for Codex's
+  hardened runtime.
+- Exposed only through a temporary session PATH. It is not installed into the
+  user's shell profile and is not visible as a command the model has to choose.
+- Recomputes the same local invalidation proof before replay and execs the real
+  tool natively on every miss unless diagnostics explicitly require a hit.
+
+`squire kernel warm [--metadata-only] [--short|--json]`
 
 - Prepares local world state for likely future operations.
-- Precomputes exact outputs only for the existing enabled metadata fast paths.
+- Precomputes exact outputs for the enabled metadata fast paths and bounded
+  proof-gated read-only candidates.
 - Concurrently prewarms bounded proof-gated read-only candidates, including
   repo-summary commands, workspace source/config inspection, well-known manifest
   reads, eligible workspace file bytes for bounded `cat`/`sed -n` replay, tool
@@ -352,6 +670,10 @@ descriptors, or mutates the process tree.
   argv, cwd, stdout, stderr, or source bytes.
 - Reports aggregate native wall time avoided, measured replay wall time, average
   replay wall time, and measured net wall saved for hot-client replays.
+- Reports `hot_client_last_replay_unix_nano` and
+  `hot_client_last_event_unix_nano`, so a user can prove whether the visible
+  counters changed during the current run rather than coming from an older
+  ledger.
 - Human-readable output is the default. Use `--json` for automation.
 
 `squire boost bench repo-metadata [--short|--json]`
@@ -666,7 +988,7 @@ not a broad Codex or agent-speedup claim.
 Current measurements from this repo on 2026-06-19:
 
 - Invisible terminal-adapter UX, 1000-round `/private/tmp` run:
-  - Backend: hidden `squire kernel adapter --stdio --ensure-maintainer`
+  - Backend: hidden `squire kernel adapter --stdio`
   - Visible measured commands: `git status --short`, `git add -h`
   - Agent-visible Squire command: `false`
   - Measured command stream contains `squire`: `false`

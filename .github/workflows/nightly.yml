@@ -21,8 +21,14 @@ jobs:
       - name: Prepare writable Go cache
         run: mkdir -p "$GOCACHE" artifacts .tmp
 
+      - name: Installer syntax
+        run: sh -n install.sh
+
       - name: Unit tests
         run: go test ./...
+
+      - name: VM status
+        run: go run ./cmd/squire vm status --short | tee artifacts/vm-status.txt
 
       - name: Repo metadata benchmark
         run: go run ./cmd/squire boost bench repo-metadata | tee artifacts/repo-metadata.json
@@ -41,6 +47,9 @@ jobs:
 
       - name: Adapter path benchmark
         run: scripts/adapter_path_bench.py .tmp/squire --json | tee artifacts/adapter-path-bench.json
+
+      - name: Scoped preload session benchmark
+        run: scripts/session_preload_bench.py .tmp/squire --rounds 5 --commands 100 --json | tee artifacts/session-preload-bench.json
 
       - name: Strict replay budget
         run: scripts/edge_stress.py .tmp/squire --scenario echo --normal-ux --strict-performance --json | tee artifacts/strict-replay-budget.json

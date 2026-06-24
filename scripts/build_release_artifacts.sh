@@ -29,17 +29,18 @@ fi
 
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
+cp install.sh "$out_dir/install.sh"
 
 ldflags="-s -w -X main.buildVersion=$version -X main.buildCommit=$commit -X main.buildDate=$date_utc"
-targets="
+targets="${SQUIRE_RELEASE_TARGETS:-"
 linux amd64
 linux arm64
 darwin amd64
 darwin arm64
 windows amd64
-"
+"}"
 
-checksum_files=""
+checksum_files="install.sh"
 set -- $targets
 while [ "$#" -gt 0 ]; do
   goos="$1"
@@ -63,6 +64,13 @@ while [ "$#" -gt 0 ]; do
     ./cmd/squire
 
   cp README.md RELEASE_CHECKLIST.md SQUIRE_KERNEL_CONTRACT.md "$stage/"
+  mkdir -p "$stage/shims"
+  cp shims/squire_mmap_shim.c "$stage/shims/"
+  cp shims/squire_preload.c "$stage/shims/"
+  cp shims/squire_preload_helper.c "$stage/shims/"
+  mkdir -p "$stage/vm"
+  cp vm/squire_vm_darwin.swift "$stage/vm/"
+  cp vm/squire_vm_darwin.entitlements "$stage/vm/"
   if [ -f LICENSE ]; then
     cp LICENSE "$stage/"
   fi

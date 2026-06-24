@@ -61,14 +61,35 @@ func Warm(ctx context.Context, cwd, storeRoot string) (WarmReport, error) {
 	return k.Warm(ctx, cwd)
 }
 
+func WarmMetadata(ctx context.Context, cwd, storeRoot string) (WarmReport, error) {
+	k := New(storeRoot)
+	return k.WarmMetadata(ctx, cwd)
+}
+
 func (k *Kernel) Warm(ctx context.Context, cwd string) (WarmReport, error) {
+	return k.warm(ctx, cwd, false)
+}
+
+func (k *Kernel) WarmMetadata(ctx context.Context, cwd string) (WarmReport, error) {
+	return k.warm(ctx, cwd, true)
+}
+
+func (k *Kernel) warm(ctx context.Context, cwd string, metadataOnly bool) (WarmReport, error) {
 	if k.Oracle == nil {
 		k.Oracle = NewRepoOracle()
 	}
 	if err := k.Store.Init(); err != nil {
 		return WarmReport{}, err
 	}
-	ws := k.Oracle.Snapshot(ctx, cwd)
+	var ws WorldState
+	if metadataOnly {
+		ws = k.Oracle.MetadataSnapshot(ctx, cwd)
+		if ws.OracleAvailable && ws.RepoRoot != "" && absPath(cwd) != ws.RepoRoot {
+			ws = k.Oracle.MetadataSnapshot(ctx, ws.RepoRoot)
+		}
+	} else {
+		ws = k.Oracle.Snapshot(ctx, cwd)
+	}
 	ledger, err := k.Store.Load()
 	if err != nil {
 		return WarmReport{}, err
@@ -118,6 +139,13 @@ func (k *Kernel) Warm(ctx context.Context, cwd string) (WarmReport, error) {
 				}
 			}
 		}
+	}
+	if metadataOnly {
+		report.Notes = append(report.Notes, "metadata-only warm skipped workspace/speculative prewarming")
+		if err := k.finishWarm(ledger, &phases); err != nil {
+			return WarmReport{}, err
+		}
+		return report, nil
 	}
 
 	prewarmed, prewarmedReports := k.prewarmProofGatedOutputs(ctx, effectiveCWD, ws, ledger, &phases)
@@ -204,10 +232,17 @@ func (k *Kernel) Warm(ctx context.Context, cwd string) (WarmReport, error) {
 		})
 	}
 
-	if err := k.Store.Save(ledger); err != nil {
+	if err := k.finishWarm(ledger, &phases); err != nil {
 		return WarmReport{}, err
 	}
-	k.hydratePreparedReplayCache(ledger, k.Store.Signal(), &phases)
+	return report, nil
+}
+
+func (k *Kernel) finishWarm(ledger *ValidityLedger, phases *PhaseTimings) error {
+	if err := k.Store.Save(ledger); err != nil {
+		return err
+	}
+	k.hydratePreparedReplayCache(ledger, k.Store.Signal(), phases)
 	k.mu.Lock()
 	k.ledger = ledger
 	k.ledgerLoaded = true
@@ -215,7 +250,7 @@ func (k *Kernel) Warm(ctx context.Context, cwd string) (WarmReport, error) {
 	k.ledgerDiag = nil
 	k.ledgerSignal = k.Store.Signal()
 	k.mu.Unlock()
-	return report, nil
+	return nil
 }
 
 func enabledFastPathArgv() [][]string {

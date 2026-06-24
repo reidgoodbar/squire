@@ -81,7 +81,7 @@ class Adapter:
     def __init__(self, squire: Path, repo: Path):
         self.repo = repo
         self.proc = subprocess.Popen(
-            [str(squire), "kernel", "adapter", "--stdio", "--ensure-maintainer"],
+            [str(squire), "kernel", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -223,7 +223,7 @@ def main() -> int:
             "ux": {
                 "mode": "invisible_terminal_adapter",
                 "agent_visible_squire_command": False,
-                "hidden_backend": "squire kernel adapter --stdio --ensure-maintainer",
+                "hidden_backend": "squire kernel adapter --stdio",
                 "visible_commands": [" ".join(hit_cmd), " ".join(never_cmd)],
                 "measured_command_stream_contains_squire": False,
             },

@@ -46,7 +46,7 @@ class AdapterSession:
     def __init__(self, sq: list[str], repo: Path):
         self.repo = repo
         self.proc = subprocess.Popen(
-            sq + ["kernel", "adapter", "--stdio", "--ensure-maintainer"],
+            sq + ["kernel", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

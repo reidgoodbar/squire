@@ -123,13 +123,17 @@ func runKernelAdapter(ctx context.Context, defaultCWD string, args []string) err
 }
 
 func parseAdapterOptions(args []string) (adapterOptions, error) {
-	var opts adapterOptions
+	opts := adapterOptions{EnsureMaintainer: true}
 	for _, arg := range args {
 		switch arg {
 		case "--stdio":
 			opts.Stdio = true
 		case "--ensure-maintainer":
+			// Kept as a compatibility no-op; the product adapter owns the
+			// maintainer lifecycle by default.
 			opts.EnsureMaintainer = true
+		case "--no-maintainer":
+			opts.EnsureMaintainer = false
 		default:
 			return opts, fmt.Errorf("unknown kernel adapter option %q", arg)
 		}

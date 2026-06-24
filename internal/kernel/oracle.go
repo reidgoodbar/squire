@@ -39,7 +39,13 @@ func (o *RepoOracle) FastSnapshot(ctx context.Context, cwd string) WorldState {
 			return refreshed
 		}
 	}
-	return o.Snapshot(ctx, cwd)
+	return o.MetadataSnapshot(ctx, cwd)
+}
+
+func (o *RepoOracle) MetadataSnapshot(ctx context.Context, cwd string) WorldState {
+	ws := o.metadataSnapshot(ctx, cwd)
+	o.storeCached(cwd, ws)
+	return ws
 }
 
 func (o *RepoOracle) ShadowSnapshot(ctx context.Context, cwd string) WorldState {
@@ -180,6 +186,61 @@ func (o *RepoOracle) fullSnapshot(ctx context.Context, cwd string) WorldState {
 		ws.UntrackedSummary,
 	}, "|"))
 	ws.ToolIdentity = toolIdentity(ctx, cwd)
+	return ws
+}
+
+func (o *RepoOracle) metadataSnapshot(ctx context.Context, cwd string) WorldState {
+	_ = ctx
+	ws := WorldState{
+		RepoRoot:            cwd,
+		DirtyState:          "unknown",
+		ToolIdentity:        map[string]string{},
+		EvidenceQuality:     EvidenceMissing,
+		OracleAvailable:     false,
+		CollectedAtUnixNano: time.Now().UnixNano(),
+	}
+	if abs, err := filepath.Abs(cwd); err == nil {
+		ws.RepoRoot = abs
+	}
+	repoRoot, gitDirAbs, ok := discoverGitDir(cwd)
+	if !ok {
+		ws.OracleDiagnostics = append(ws.OracleDiagnostics, "not a git worktree")
+		ws.WorkspaceEpoch = hashString(ws.RepoRoot)
+		return ws
+	}
+	ws.RepoRoot = repoRoot
+	ws.GitDirAbs = gitDirAbs
+	ws.OracleAvailable = true
+	ws.EvidenceQuality = EvidenceStrong
+	if rel, err := filepath.Rel(absPath(cwd), gitDirAbs); err == nil {
+		ws.GitDir = filepath.ToSlash(rel)
+	} else {
+		ws.GitDir = gitDirAbs
+	}
+	if head, branch, ok := readHeadAndBranch(gitDirAbs); ok {
+		ws.Head = head
+		ws.Branch = branch
+		ws.HeadEpoch = hashString(head)
+	} else {
+		ws.OracleDiagnostics = append(ws.OracleDiagnostics, "HEAD unavailable")
+		ws.EvidenceQuality = EvidencePartial
+	}
+	if fp, ok := hashFile(filepath.Join(gitDirAbs, "config")); ok {
+		ws.ConfigFingerprint = fp
+		ws.ConfigEpoch = fp
+	}
+	if fp, ok := hashFile(filepath.Join(gitDirAbs, "index")); ok {
+		ws.IndexFingerprint = fp
+		ws.IndexEpoch = fp
+	}
+	ws.IgnoreRuleFingerprint = ignoreRuleFingerprint(ws.RepoRoot, ws.GitDirAbs)
+	ws.WorkspaceEpoch = hashString(strings.Join([]string{
+		ws.HeadEpoch,
+		ws.ConfigEpoch,
+		ws.IndexEpoch,
+		ws.IgnoreRuleFingerprint,
+		ws.DirtyState,
+	}, "|"))
 	return ws
 }
 
