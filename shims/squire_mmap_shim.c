@@ -60,6 +60,8 @@
 #define MAX_ARGC 64
 #define PATH_BUF 4096
 #define HASH_HEX 65
+#define HOT_CLIENT_PROOF_C_MMAP "c-mmap-hot-snapshot"
+#define HOT_CLIENT_PROOF_C_SYNTHETIC "c-mmap-hot-synthetic"
 
 typedef struct {
 	unsigned char *data;
@@ -93,7 +95,21 @@ typedef struct {
 typedef struct {
 	unsigned char *data;
 	size_t len;
+	int borrowed;
 } mapped_snapshot;
+
+typedef struct {
+	mapped_snapshot snap;
+	const unsigned char *stdout_data;
+	const unsigned char *stderr_data;
+	uint32_t stdout_len;
+	uint32_t stderr_len;
+	int exit_code;
+	int synthetic_safe;
+	uint64_t native_wall_ms;
+	char store_root[PATH_BUF];
+	long long replay_start_ns;
+} prepared_exact_replay;
 
 static long long stat_mtime_nano(const struct stat *st);
 static int join_path(char *out, size_t cap, const char *left, const char *right);
@@ -117,6 +133,16 @@ static int write_all(int fd, const void *buf, size_t len) {
 		len -= (size_t)n;
 	}
 	return 1;
+}
+
+static int write_event_best_effort(int fd, const void *buf, size_t len) {
+	for (;;) {
+		ssize_t n = write(fd, buf, len);
+		if (n < 0 && errno == EINTR) {
+			continue;
+		}
+		return n == (ssize_t)len;
+	}
 }
 
 static long long now_realtime_ns(void) {
@@ -253,7 +279,10 @@ static int mkdir_p(const char *path) {
 	return mkdir(tmp, 0700) == 0 || errno == EEXIST;
 }
 
-static void record_hot_replay_event(const char *store_root, long long native_wall_ms, long long replay_start_ns) {
+static void record_hot_replay_event_kind(const char *store_root, const char *proof, long long native_wall_ms, long long replay_start_ns) {
+	if (proof == NULL || proof[0] == '\0') {
+		proof = HOT_CLIENT_PROOF_C_MMAP;
+	}
 	long long replay_us = 0;
 	long long now_mono = now_monotonic_ns();
 	if (replay_start_ns > 0 && now_mono > replay_start_ns) {
@@ -263,18 +292,19 @@ static void record_hot_replay_event(const char *store_root, long long native_wal
 		replay_us = 1;
 	}
 	char line[256];
-	int n = snprintf(line, sizeof(line), "%lld replay c-mmap-hot-snapshot %lld %lld\n",
-	                 now_realtime_ns(), native_wall_ms, replay_us);
+	int n = snprintf(line, sizeof(line), "%lld replay %s %lld %lld\n",
+	                 now_realtime_ns(), proof, native_wall_ms, replay_us);
 	if (n <= 0 || n >= (int)sizeof(line)) {
 		return;
 	}
 	int event_fd = hot_event_fd();
 	if (event_fd >= 0) {
-		if (write_all(event_fd, line, (size_t)n)) {
+		if (write_event_best_effort(event_fd, line, (size_t)n)) {
 			mmap_trace_path("event-write-fd-ok", NULL);
-			return;
+		} else {
+			mmap_trace_errno_path("event-write-fd-dropped", NULL, errno);
 		}
-		mmap_trace_errno_path("event-write-fd-failed", NULL, errno);
+		return;
 	}
 	if (store_root == NULL || store_root[0] == '\0' || getenv("SQUIRE_SHIM_DISABLE_EVENT_LOG") != NULL) {
 		mmap_trace_path("event-write-skip-disabled", store_root);
@@ -305,6 +335,10 @@ static void record_hot_replay_event(const char *store_root, long long native_wal
 		mmap_trace_errno_path("event-write-skip-write", event_path, errno);
 	}
 	close(fd);
+}
+
+static void record_hot_replay_event(const char *store_root, long long native_wall_ms, long long replay_start_ns) {
+	record_hot_replay_event_kind(store_root, HOT_CLIENT_PROOF_C_MMAP, native_wall_ms, replay_start_ns);
 }
 
 static void env_key_for_tool(const char *tool, char out[128]) {
@@ -1886,12 +1920,40 @@ static int map_snapshot_fd(int fd, mapped_snapshot *snap) {
 	}
 	snap->data = data;
 	snap->len = (size_t)st.st_size;
+	snap->borrowed = 0;
+	return 1;
+}
+
+static int map_snapshot_fd_cached(int fd, mapped_snapshot *snap) {
+	static int cached_fd = -1;
+	static unsigned char *cached_data;
+	static size_t cached_len;
+	if (cached_fd == fd && cached_data != NULL && cached_len >= HOT_HEADER_BYTES) {
+		snap->data = cached_data;
+		snap->len = cached_len;
+		snap->borrowed = 1;
+		return 1;
+	}
+	struct stat st;
+	if (fstat(fd, &st) != 0 || st.st_size < HOT_HEADER_BYTES || st.st_size > HOT_MAX_BYTES) {
+		return 0;
+	}
+	unsigned char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED) {
+		return 0;
+	}
+	cached_fd = fd;
+	cached_data = data;
+	cached_len = (size_t)st.st_size;
+	snap->data = cached_data;
+	snap->len = cached_len;
+	snap->borrowed = 1;
 	return 1;
 }
 
 static int map_snapshot(const char *store_root, mapped_snapshot *snap) {
 	int inherited_fd = hot_snapshot_fd();
-	if (inherited_fd >= 0 && map_snapshot_fd(inherited_fd, snap)) {
+	if (inherited_fd >= 0 && map_snapshot_fd_cached(inherited_fd, snap)) {
 		mmap_trace_path("snapshot-fd-ok", NULL);
 		return 1;
 	}
@@ -1915,15 +1977,17 @@ static int map_snapshot(const char *store_root, mapped_snapshot *snap) {
 	}
 	snap->data = data;
 	snap->len = (size_t)st.st_size;
+	snap->borrowed = 0;
 	return 1;
 }
 
 static void unmap_snapshot(mapped_snapshot *snap) {
-	if (snap->data != NULL) {
+	if (snap->data != NULL && !snap->borrowed) {
 		munmap(snap->data, snap->len);
 	}
 	snap->data = NULL;
 	snap->len = 0;
+	snap->borrowed = 0;
 }
 
 static int snapshot_header(mapped_snapshot *snap, uint32_t *count, uint32_t *payload_offset, uint32_t *total_size) {
@@ -2135,6 +2199,85 @@ static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const
 		_exit(0);
 	}
 	return 0;
+}
+
+static int prepare_exact_replay_for_epoch(mapped_snapshot *snap, policy_invocation *inv, const char epoch[256], prepared_exact_replay *prepared) {
+	char key[HASH_HEX];
+	command_key(inv, key);
+	const unsigned char *out, *err;
+	uint32_t out_len, err_len;
+	int exit_code;
+	uint64_t native_wall_ms = 0;
+	if (!snapshot_find(snap, key, epoch, HOT_KIND_EXACT, &out, &out_len, &err, &err_len, &exit_code, &native_wall_ms)) {
+		return 0;
+	}
+	if (out_len + err_len > MAX_FAST_OUTPUT_BYTES) {
+		return 0;
+	}
+	prepared->stdout_data = out;
+	prepared->stderr_data = err;
+	prepared->stdout_len = out_len;
+	prepared->stderr_len = err_len;
+	prepared->exit_code = exit_code;
+	prepared->native_wall_ms = native_wall_ms;
+	return 1;
+}
+
+static int prepare_exact_replay(int argc, char **argv, prepared_exact_replay *prepared) {
+	if (prepared == NULL) {
+		return 0;
+	}
+	memset(prepared, 0, sizeof(*prepared));
+	prepared->replay_start_ns = now_monotonic_ns();
+	policy_invocation inv;
+	if (!normalize_invocation(argc, argv, &inv)) {
+		return 0;
+	}
+	if (!discover_store_root(inv.cwd, prepared->store_root)) {
+		return 0;
+	}
+	if (!map_snapshot(prepared->store_root, &prepared->snap)) {
+		return 0;
+	}
+	char epoch[256];
+	if (git_metadata_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
+		return 1;
+	}
+	if (repo_summary_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		return 1;
+	}
+	if (tool_version_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		return 1;
+	}
+	if (command_path_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		return 1;
+	}
+	unmap_snapshot(&prepared->snap);
+	memset(prepared, 0, sizeof(*prepared));
+	return 0;
+}
+
+static void release_prepared_exact_replay(prepared_exact_replay *prepared) {
+	if (prepared == NULL) {
+		return;
+	}
+	unmap_snapshot(&prepared->snap);
+	memset(prepared, 0, sizeof(*prepared));
+}
+
+static void emit_prepared_exact_replay(prepared_exact_replay *prepared) {
+	if (prepared == NULL) {
+		_exit(127);
+	}
+	if (prepared->stdout_len > 0 && !write_all(STDOUT_FILENO, prepared->stdout_data, prepared->stdout_len)) {
+		_exit(127);
+	}
+	if (prepared->stderr_len > 0 && !write_all(STDERR_FILENO, prepared->stderr_data, prepared->stderr_len)) {
+		_exit(127);
+	}
+	record_hot_replay_event(prepared->store_root, (long long)prepared->native_wall_ms, prepared->replay_start_ns);
+	_exit(prepared->exit_code);
 }
 
 static int try_replay(int argc, char **argv) {

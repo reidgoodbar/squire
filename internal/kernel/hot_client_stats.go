@@ -13,6 +13,9 @@ const hotClientStatsMaxBytes = 1024 * 1024
 
 type HotClientStats struct {
 	Replays                int   `json:"replays"`
+	GoClientReplays        int   `json:"go_client_replays"`
+	PreparedChildReplays   int   `json:"prepared_child_replays"`
+	SyntheticReplays       int   `json:"synthetic_replays"`
 	NativeFallbacks        int   `json:"native_fallbacks"`
 	NativeWallAvoidedMS    int64 `json:"native_wall_avoided_ms"`
 	ReplayWallUS           int64 `json:"replay_wall_us"`
@@ -69,7 +72,10 @@ func validHotClientEventLine(line []byte) bool {
 }
 
 func isHotClientProof(proof string) bool {
-	return proof == "cli-mmap-hot-snapshot" || proof == "mmap-hot-snapshot" || proof == "c-mmap-hot-snapshot"
+	return proof == "cli-mmap-hot-snapshot" ||
+		proof == "mmap-hot-snapshot" ||
+		proof == "c-mmap-hot-snapshot" ||
+		proof == "c-mmap-hot-synthetic"
 }
 
 func LoadHotClientStats(storeRoot string) HotClientStats {
@@ -98,6 +104,16 @@ func LoadHotClientStats(storeRoot string) HotClientStats {
 		switch string(fields[1]) {
 		case "replay":
 			stats.Replays++
+			if len(fields) >= 3 {
+				switch string(fields[2]) {
+				case "cli-mmap-hot-snapshot", "mmap-hot-snapshot":
+					stats.GoClientReplays++
+				case "c-mmap-hot-snapshot":
+					stats.PreparedChildReplays++
+				case "c-mmap-hot-synthetic":
+					stats.SyntheticReplays++
+				}
+			}
 			var nativeMS int64
 			if len(fields) >= 4 {
 				if parsed, err := strconv.ParseInt(string(fields[3]), 10, 64); err == nil {

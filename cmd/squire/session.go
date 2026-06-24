@@ -330,6 +330,7 @@ func startHotEventPipe(storeRoot string) *hotEventPipe {
 	if err != nil {
 		return nil
 	}
+	setSessionPipeNonblock(writer)
 	pipe := &hotEventPipe{
 		reader: reader,
 		writer: writer,

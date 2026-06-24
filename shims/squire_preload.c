@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -618,6 +620,8 @@ typedef int (*file_actions_init_fn)(posix_spawn_file_actions_t *);
 typedef int (*file_actions_destroy_fn)(posix_spawn_file_actions_t *);
 typedef int (*file_actions_addclose_fn)(posix_spawn_file_actions_t *, int);
 typedef int (*file_actions_adddup2_fn)(posix_spawn_file_actions_t *, int, int);
+typedef pid_t (*waitpid_fn)(pid_t, int *, int);
+typedef pid_t (*wait_fn)(int *);
 static execve_fn real_execve_ptr;
 static execv_fn real_execv_ptr;
 static execvp_fn real_execvp_ptr;
@@ -628,6 +632,27 @@ static file_actions_init_fn real_file_actions_init_ptr;
 static file_actions_destroy_fn real_file_actions_destroy_ptr;
 static file_actions_addclose_fn real_file_actions_addclose_ptr;
 static file_actions_adddup2_fn real_file_actions_adddup2_ptr;
+static waitpid_fn real_waitpid_ptr;
+static wait_fn real_wait_ptr;
+
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+static int native_execve_call(const char *path, char *const argv[], char *const envp[]) {
+#if defined(SYS_execve)
+	return (int)syscall(SYS_execve, path, argv, envp);
+#else
+	if (real_execve_ptr == NULL) {
+		errno = ENOSYS;
+		return -1;
+	}
+	return real_execve_ptr(path, argv, envp);
+#endif
+}
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #define MAX_TRACKED_FILE_ACTIONS 128
 #define MAX_FILE_ACTIONS_PER_RECORD 32
@@ -650,6 +675,102 @@ typedef struct {
 
 static tracked_file_actions_record tracked_file_actions[MAX_TRACKED_FILE_ACTIONS];
 
+#define MAX_SYNTHETIC_CHILDREN 128
+#define SYNTHETIC_PID_START 1073000000
+#define SYNTHETIC_PID_FLOOR 1070000000
+
+typedef struct {
+	int used;
+	pid_t pid;
+	int exit_code;
+} synthetic_child_record;
+
+static synthetic_child_record synthetic_children[MAX_SYNTHETIC_CHILDREN];
+static volatile int synthetic_child_lock;
+static pid_t next_synthetic_pid = SYNTHETIC_PID_START;
+
+static void synthetic_lock(void) {
+	while (__sync_lock_test_and_set(&synthetic_child_lock, 1)) {
+	}
+}
+
+static void synthetic_unlock(void) {
+	__sync_lock_release(&synthetic_child_lock);
+}
+
+static int register_synthetic_child(int exit_code, pid_t *pid_out) {
+	if (pid_out == NULL) {
+		return 0;
+	}
+	synthetic_lock();
+	for (int i = 0; i < MAX_SYNTHETIC_CHILDREN; i++) {
+		if (!synthetic_children[i].used) {
+			pid_t pid = next_synthetic_pid--;
+			if (next_synthetic_pid < SYNTHETIC_PID_FLOOR) {
+				next_synthetic_pid = SYNTHETIC_PID_START;
+			}
+			synthetic_children[i].used = 1;
+			synthetic_children[i].pid = pid;
+			synthetic_children[i].exit_code = exit_code;
+			*pid_out = pid;
+			synthetic_unlock();
+			return 1;
+		}
+	}
+	synthetic_unlock();
+	return 0;
+}
+
+static pid_t consume_synthetic_child(pid_t pid, int *status) {
+	int found = -1;
+	synthetic_lock();
+	if (pid > 0) {
+		for (int i = 0; i < MAX_SYNTHETIC_CHILDREN; i++) {
+			if (synthetic_children[i].used && synthetic_children[i].pid == pid) {
+				found = i;
+				break;
+			}
+		}
+	} else if (pid == -1) {
+		for (int i = 0; i < MAX_SYNTHETIC_CHILDREN; i++) {
+			if (synthetic_children[i].used) {
+				found = i;
+				break;
+			}
+		}
+	}
+	if (found < 0) {
+		synthetic_unlock();
+		return 0;
+	}
+	pid_t out_pid = synthetic_children[found].pid;
+	int exit_code = synthetic_children[found].exit_code & 0xff;
+	synthetic_children[found].used = 0;
+	synthetic_children[found].pid = 0;
+	synthetic_children[found].exit_code = 0;
+	synthetic_unlock();
+	if (status != NULL) {
+		*status = exit_code << 8;
+	}
+	return out_pid;
+}
+
+static void discard_synthetic_child(pid_t pid) {
+	if (pid <= 0) {
+		return;
+	}
+	synthetic_lock();
+	for (int i = 0; i < MAX_SYNTHETIC_CHILDREN; i++) {
+		if (synthetic_children[i].used && synthetic_children[i].pid == pid) {
+			synthetic_children[i].used = 0;
+			synthetic_children[i].pid = 0;
+			synthetic_children[i].exit_code = 0;
+			break;
+		}
+	}
+	synthetic_unlock();
+}
+
 __attribute__((constructor)) static void squire_preload_init(void) {
 	squire_preload_trace_enabled = env_truthy("SQUIRE_PRELOAD_TRACE");
 	squire_preload_active = env_truthy("SQUIRE_PRELOAD_ENABLE") ||
@@ -667,6 +788,8 @@ __attribute__((constructor)) static void squire_preload_init(void) {
 	real_file_actions_destroy_ptr = (file_actions_destroy_fn)dlsym(RTLD_NEXT, "posix_spawn_file_actions_destroy");
 	real_file_actions_addclose_ptr = (file_actions_addclose_fn)dlsym(RTLD_NEXT, "posix_spawn_file_actions_addclose");
 	real_file_actions_adddup2_ptr = (file_actions_adddup2_fn)dlsym(RTLD_NEXT, "posix_spawn_file_actions_adddup2");
+	real_waitpid_ptr = (waitpid_fn)dlsym(RTLD_NEXT, "waitpid");
+	real_wait_ptr = (wait_fn)dlsym(RTLD_NEXT, "wait");
 #if defined(__APPLE__)
 	void *kernel = dlopen("/usr/lib/system/libsystem_kernel.dylib", RTLD_NOW);
 	if (kernel != NULL) {
@@ -753,6 +876,119 @@ static int apply_tracked_file_actions(const posix_spawn_file_actions_t *key) {
 	return 1;
 }
 
+static int fd_was_closed(int fd, const int *closed_fds, int closed_count) {
+	for (int i = 0; i < closed_count; i++) {
+		if (closed_fds[i] == fd) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int resolve_synthetic_output_fds(const posix_spawn_file_actions_t *key, int *stdout_fd, int *stderr_fd) {
+	if (stdout_fd == NULL || stderr_fd == NULL) {
+		return 0;
+	}
+	int out_fd = STDOUT_FILENO;
+	int err_fd = STDERR_FILENO;
+	int out_open = 1;
+	int err_open = 1;
+	int closed_fds[MAX_FILE_ACTIONS_PER_RECORD];
+	int closed_count = 0;
+	tracked_file_actions_record *record = find_file_actions_record(key);
+	if (key != NULL && (record == NULL || record->unsupported)) {
+		return 0;
+	}
+	for (int i = 0; record != NULL && i < record->count; i++) {
+		tracked_file_action *action = &record->actions[i];
+		if (action->kind == FILE_ACTION_CLOSE) {
+			if (closed_count < MAX_FILE_ACTIONS_PER_RECORD) {
+				closed_fds[closed_count++] = action->fd;
+			}
+			if (action->fd == STDOUT_FILENO) {
+				out_open = 0;
+			}
+			if (action->fd == STDERR_FILENO) {
+				err_open = 0;
+			}
+			continue;
+		}
+		if (action->kind == FILE_ACTION_DUP2) {
+			if (fd_was_closed(action->fd, closed_fds, closed_count)) {
+				return 0;
+			}
+			if (action->newfd == STDOUT_FILENO) {
+				out_fd = action->fd;
+				out_open = 1;
+			}
+			if (action->newfd == STDERR_FILENO) {
+				err_fd = action->fd;
+				err_open = 1;
+			}
+			continue;
+		}
+		return 0;
+	}
+	if (!out_open || !err_open || out_fd < 0 || err_fd < 0) {
+		return 0;
+	}
+	*stdout_fd = out_fd;
+	*stderr_fd = err_fd;
+	return 1;
+}
+
+static int synthetic_stdout_fd_supported(int fd, uint32_t len) {
+	if (fd < 0) {
+		return 0;
+	}
+#if defined(PIPE_BUF)
+	if (len > PIPE_BUF) {
+		return 0;
+	}
+#else
+	if (len > 512) {
+		return 0;
+	}
+#endif
+	struct stat st;
+	if (fstat(fd, &st) != 0) {
+		return 0;
+	}
+	return S_ISFIFO(st.st_mode);
+}
+
+static int emit_synthetic_prepared_replay(prepared_exact_replay *prepared, const posix_spawn_file_actions_t *file_actions, pid_t *pid_out) {
+	if (prepared == NULL || pid_out == NULL || !prepared->synthetic_safe) {
+		return 0;
+	}
+	if (prepared->exit_code != 0 || prepared->stderr_len != 0 || prepared->stdout_len == 0) {
+		return 0;
+	}
+	int stdout_fd, stderr_fd;
+	if (!resolve_synthetic_output_fds(file_actions, &stdout_fd, &stderr_fd)) {
+		return 0;
+	}
+	if (!synthetic_stdout_fd_supported(stdout_fd, prepared->stdout_len)) {
+		return 0;
+	}
+	pid_t synthetic_pid;
+	if (!register_synthetic_child(prepared->exit_code, &synthetic_pid)) {
+		return 0;
+	}
+	ssize_t n = write(stdout_fd, prepared->stdout_data, prepared->stdout_len);
+	if (n < 0 && errno == EINTR) {
+		n = write(stdout_fd, prepared->stdout_data, prepared->stdout_len);
+	}
+	if (n != (ssize_t)prepared->stdout_len) {
+		discard_synthetic_child(synthetic_pid);
+		return 0;
+	}
+	record_hot_replay_event_kind(prepared->store_root, HOT_CLIENT_PROOF_C_SYNTHETIC, (long long)prepared->native_wall_ms, prepared->replay_start_ns);
+	*pid_out = synthetic_pid;
+	(void)stderr_fd;
+	return 1;
+}
+
 static int envp_contains_ptr(char *const envp[], char *entry) {
 	if (envp == NULL || entry == NULL) {
 		return 0;
@@ -803,6 +1039,32 @@ static int spawn_shell_replay_child(int use_path, pid_t *pid, const char *path, 
 		return -1;
 	}
 
+	prepared_exact_replay prepared;
+	if (prepare_exact_replay(parsed_argc, parsed_argv, &prepared)) {
+		pid_t synthetic_pid;
+		if (emit_synthetic_prepared_replay(&prepared, file_actions, &synthetic_pid)) {
+			release_prepared_exact_replay(&prepared);
+			preload_trace("shell-spawn-synthetic-child", parsed_argv[0]);
+			*pid = synthetic_pid;
+			return 0;
+		}
+		pid_t child = fork();
+		if (child < 0) {
+			release_prepared_exact_replay(&prepared);
+			return errno;
+		}
+		if (child == 0) {
+			if (file_actions != NULL && !apply_tracked_file_actions(file_actions)) {
+				_exit(127);
+			}
+			emit_prepared_exact_replay(&prepared);
+		}
+		release_prepared_exact_replay(&prepared);
+		preload_trace("shell-spawn-prepared-child", parsed_argv[0]);
+		*pid = child;
+		return 0;
+	}
+
 	pid_t child = fork();
 	if (child < 0) {
 		return errno;
@@ -842,6 +1104,32 @@ static int native_spawn(int use_path, pid_t *pid, const char *path, const posix_
 	char **native_envp = scrub_preload_envp(envp);
 	int rc;
 #if defined(__APPLE__)
+	if (attrp == NULL) {
+		if (file_actions != NULL) {
+			tracked_file_actions_record *record = find_file_actions_record(file_actions);
+			if (record == NULL || record->unsupported) {
+				free_scrubbed_envp(native_envp, envp);
+				return ENOTSUP;
+			}
+		}
+		pid_t child = fork();
+		if (child < 0) {
+			rc = errno;
+			free_scrubbed_envp(native_envp, envp);
+			return rc;
+		}
+		if (child == 0) {
+			if (file_actions != NULL && !apply_tracked_file_actions(file_actions)) {
+				_exit(127);
+			}
+			squire_preload_guard = 1;
+			exec_native_child(use_path, path, argv, native_envp);
+			_exit(127);
+		}
+		*pid = child;
+		free_scrubbed_envp(native_envp, envp);
+		return 0;
+	}
 	if (kernel_posix_spawn_ptr != NULL) {
 		char resolved[PATH_BUF];
 		const char *spawn_path = path;
@@ -853,7 +1141,9 @@ static int native_spawn(int use_path, pid_t *pid, const char *path, const posix_
 			}
 			spawn_path = resolved;
 		}
+		squire_preload_guard = 1;
 		rc = kernel_posix_spawn_ptr(pid, spawn_path, file_actions, attrp, argv, native_envp);
+		squire_preload_guard = 0;
 		free_scrubbed_envp(native_envp, envp);
 		return rc;
 	}
@@ -916,7 +1206,9 @@ static int spawn_helper(int use_path, pid_t *pid, const char *path, const posix_
 #if defined(__APPLE__)
 	if (kernel_posix_spawn_ptr != NULL) {
 		preload_trace("helper-spawn-kernel", helper);
+		squire_preload_guard = 1;
 		int rc = kernel_posix_spawn_ptr(pid, helper, file_actions, attrp, helper_argv, helper_envp);
+		squire_preload_guard = 0;
 		free_scrubbed_envp(helper_envp, envp);
 		free(helper_argv);
 		return rc;
@@ -945,7 +1237,7 @@ static void exec_native_child(int use_path, const char *path, char *const argv[]
 		native_path = resolved;
 	}
 	char **native_envp = scrub_preload_envp(envp);
-	real_execve_ptr(native_path, argv, native_envp);
+	native_execve_call(native_path, argv, native_envp);
 	_exit(errno == ENOENT ? 127 : 126);
 }
 
@@ -963,6 +1255,29 @@ static int spawn_replay_child(int use_path, pid_t *pid, const char *path, const 
 		if (record == NULL || record->unsupported) {
 			return -1;
 		}
+	}
+	prepared_exact_replay prepared;
+	if (prepare_exact_replay(count_argv(argv), (char **)argv, &prepared)) {
+		pid_t synthetic_pid;
+		if (emit_synthetic_prepared_replay(&prepared, file_actions, &synthetic_pid)) {
+			release_prepared_exact_replay(&prepared);
+			*pid = synthetic_pid;
+			return 0;
+		}
+		pid_t child = fork();
+		if (child < 0) {
+			release_prepared_exact_replay(&prepared);
+			return errno;
+		}
+		if (child == 0) {
+			if (file_actions != NULL && !apply_tracked_file_actions(file_actions)) {
+				_exit(127);
+			}
+			emit_prepared_exact_replay(&prepared);
+		}
+		release_prepared_exact_replay(&prepared);
+		*pid = child;
+		return 0;
 	}
 	pid_t child = fork();
 	if (child < 0) {
@@ -988,22 +1303,6 @@ static int spawn_replay_child(int use_path, pid_t *pid, const char *path, const 
 
 int squire_preload_file_actions_init(posix_spawn_file_actions_t *actions) {
 	preload_trace("file-actions-init", NULL);
-#if defined(__APPLE__)
-	if (actions == NULL) {
-		return EINVAL;
-	}
-	void *token = calloc(1, 1);
-	if (token == NULL) {
-		return ENOMEM;
-	}
-	*actions = token;
-	tracked_file_actions_record *record = ensure_file_actions_record(actions);
-	if (record != NULL) {
-		record->unsupported = 0;
-		record->count = 0;
-	}
-	return 0;
-#else
 	if (real_file_actions_init_ptr == NULL) {
 		preload_trace("file-actions-init-missing", NULL);
 		return ENOSYS;
@@ -1017,36 +1316,23 @@ int squire_preload_file_actions_init(posix_spawn_file_actions_t *actions) {
 		}
 	}
 	return rc;
-#endif
 }
 
 int squire_preload_file_actions_destroy(posix_spawn_file_actions_t *actions) {
 	preload_trace("file-actions-destroy", NULL);
-	remove_file_actions_record(actions);
-#if defined(__APPLE__)
-	if (actions != NULL && *actions != NULL) {
-		free(*actions);
-		*actions = NULL;
-	}
-	return 0;
-#else
 	if (real_file_actions_destroy_ptr == NULL) {
 		preload_trace("file-actions-destroy-missing", NULL);
 		return ENOSYS;
 	}
-	return real_file_actions_destroy_ptr(actions);
-#endif
+	int rc = real_file_actions_destroy_ptr(actions);
+	if (rc == 0) {
+		remove_file_actions_record(actions);
+	}
+	return rc;
 }
 
 int squire_preload_file_actions_addclose(posix_spawn_file_actions_t *actions, int fd) {
 	preload_trace("file-actions-addclose", NULL);
-#if defined(__APPLE__)
-	if (actions == NULL || *actions == NULL || fd < 0) {
-		return EINVAL;
-	}
-	append_file_action(actions, FILE_ACTION_CLOSE, fd, -1);
-	return 0;
-#else
 	if (real_file_actions_addclose_ptr == NULL) {
 		preload_trace("file-actions-addclose-missing", NULL);
 		return ENOSYS;
@@ -1056,18 +1342,10 @@ int squire_preload_file_actions_addclose(posix_spawn_file_actions_t *actions, in
 		append_file_action(actions, FILE_ACTION_CLOSE, fd, -1);
 	}
 	return rc;
-#endif
 }
 
 int squire_preload_file_actions_adddup2(posix_spawn_file_actions_t *actions, int fd, int newfd) {
 	preload_trace("file-actions-adddup2", NULL);
-#if defined(__APPLE__)
-	if (actions == NULL || *actions == NULL || fd < 0 || newfd < 0) {
-		return EBADF;
-	}
-	append_file_action(actions, FILE_ACTION_DUP2, fd, newfd);
-	return 0;
-#else
 	if (real_file_actions_adddup2_ptr == NULL) {
 		preload_trace("file-actions-adddup2-missing", NULL);
 		return ENOSYS;
@@ -1077,7 +1355,6 @@ int squire_preload_file_actions_adddup2(posix_spawn_file_actions_t *actions, int
 		append_file_action(actions, FILE_ACTION_DUP2, fd, newfd);
 	}
 	return rc;
-#endif
 }
 
 int squire_preload_execve(const char *path, char *const argv[], char *const envp[]) {
@@ -1089,44 +1366,43 @@ int squire_preload_execve(const char *path, char *const argv[], char *const envp
 		return 0;
 	}
 	if (envp != NULL && envp != environ) {
-		if (real_execve_ptr == NULL) {
-			errno = ENOSYS;
-			return -1;
-		}
-		return real_execve_ptr(path, argv, scrub_preload_envp_in_place(envp));
+		return native_execve_call(path, argv, scrub_preload_envp_in_place(envp));
 	}
 	maybe_replay_exec(path, argv, envp);
-	if (real_execve_ptr == NULL) {
-		errno = ENOSYS;
-		return -1;
-	}
 	char **native_envp = scrub_preload_envp(envp);
-	return real_execve_ptr(path, argv, native_envp);
+	return native_execve_call(path, argv, native_envp);
 }
 
 int squire_preload_execv(const char *path, char *const argv[]) {
 	preload_trace("execv", path);
 	maybe_replay_exec(path, argv, environ);
-	if (real_execv_ptr == NULL) {
-		errno = ENOSYS;
-		return -1;
-	}
-	return real_execv_ptr(path, argv);
+	return native_execve_call(path, argv, environ);
 }
 
 int squire_preload_execvp(const char *file, char *const argv[]) {
 	preload_trace("execvp", file);
 	maybe_replay_exec(file, argv, environ);
-	if (real_execvp_ptr == NULL) {
-		errno = ENOSYS;
-		return -1;
+	char resolved[PATH_BUF];
+	const char *native_path = file;
+	if (file != NULL && strchr(file, '/') == NULL) {
+		char cwd[PATH_BUF];
+		if (getcwd(cwd, sizeof(cwd)) == NULL || !resolve_executable(cwd, file, resolved)) {
+			errno = ENOENT;
+			return -1;
+		}
+		native_path = resolved;
 	}
-	return real_execvp_ptr(file, argv);
+	return native_execve_call(native_path, argv, environ);
 }
 
 int squire_preload_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *file_actions, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]) {
 	preload_trace("posix_spawn", path);
 	if (squire_preload_guard) {
+#if defined(__APPLE__)
+		if (kernel_posix_spawn_ptr != NULL) {
+			return kernel_posix_spawn_ptr(pid, path, file_actions, attrp, argv, envp);
+		}
+#endif
 		if (real_posix_spawn_ptr == NULL) {
 			return ENOSYS;
 		}
@@ -1146,6 +1422,20 @@ int squire_preload_posix_spawn(pid_t *pid, const char *path, const posix_spawn_f
 int squire_preload_posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *file_actions, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]) {
 	preload_trace("posix_spawnp", file);
 	if (squire_preload_guard) {
+#if defined(__APPLE__)
+		if (kernel_posix_spawn_ptr != NULL) {
+			char resolved[PATH_BUF];
+			const char *spawn_path = file;
+			if (file != NULL && strchr(file, '/') == NULL) {
+				char cwd[PATH_BUF];
+				if (getcwd(cwd, sizeof(cwd)) == NULL || !resolve_executable(cwd, file, resolved)) {
+					return ENOENT;
+				}
+				spawn_path = resolved;
+			}
+			return kernel_posix_spawn_ptr(pid, spawn_path, file_actions, attrp, argv, envp);
+		}
+#endif
 		if (real_posix_spawnp_ptr == NULL) {
 			return ENOSYS;
 		}
@@ -1160,6 +1450,33 @@ int squire_preload_posix_spawnp(pid_t *pid, const char *file, const posix_spawn_
 		return replay_rc;
 	}
 	return native_spawn(1, pid, file, file_actions, attrp, argv, envp);
+}
+
+pid_t squire_preload_waitpid(pid_t pid, int *status, int options) {
+	pid_t synthetic = consume_synthetic_child(pid, status);
+	if (synthetic > 0) {
+		return synthetic;
+	}
+	if (real_waitpid_ptr == NULL) {
+		errno = ECHILD;
+		return -1;
+	}
+	return real_waitpid_ptr(pid, status, options);
+}
+
+pid_t squire_preload_wait(int *status) {
+	pid_t synthetic = consume_synthetic_child(-1, status);
+	if (synthetic > 0) {
+		return synthetic;
+	}
+	if (real_wait_ptr != NULL) {
+		return real_wait_ptr(status);
+	}
+	if (real_waitpid_ptr != NULL) {
+		return real_waitpid_ptr(-1, status, 0);
+	}
+	errno = ECHILD;
+	return -1;
 }
 
 #if defined(__APPLE__)
@@ -1180,6 +1497,8 @@ SQUIRE_INTERPOSE(squire_preload_file_actions_init, posix_spawn_file_actions_init
 SQUIRE_INTERPOSE(squire_preload_file_actions_destroy, posix_spawn_file_actions_destroy);
 SQUIRE_INTERPOSE(squire_preload_file_actions_addclose, posix_spawn_file_actions_addclose);
 SQUIRE_INTERPOSE(squire_preload_file_actions_adddup2, posix_spawn_file_actions_adddup2);
+SQUIRE_INTERPOSE(squire_preload_waitpid, waitpid);
+SQUIRE_INTERPOSE(squire_preload_wait, wait);
 #else
 int execve(const char *path, char *const argv[], char *const envp[]) {
 	return squire_preload_execve(path, argv, envp);
@@ -1215,6 +1534,14 @@ int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *actions, int f
 
 int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *actions, int fd, int newfd) {
 	return squire_preload_file_actions_adddup2(actions, fd, newfd);
+}
+
+pid_t waitpid(pid_t pid, int *status, int options) {
+	return squire_preload_waitpid(pid, status, options);
+}
+
+pid_t wait(int *status) {
+	return squire_preload_wait(status);
 }
 
 #endif

@@ -84,15 +84,21 @@ native execution wins. A separate background maintainer may produce durable
 evidence and reports, publish the mmap snapshot, and serve exact prepared
 output to fresh foreground processes over a local Unix-socket daemon cache.
 
-The primary production foreground is a scoped session transport. `squire
-session -- <command>` prefers a local preload library when available and the
-launcher is safe for preload inheritance, sets exact native fallback paths,
-launches the ordinary shell or agent command, and hooks selected exec-family
-calls inside that child process tree. The preload library reads the resident
-maintainer's mmap hot snapshot directly, serves only proven entries, refuses
-replay for custom-env exec calls it cannot prove, and falls through to native
-exec on every miss, unsupported launcher, unsupported argv, or absent/corrupt
-snapshot.
+The primary production foreground is `squire codex`, which launches Codex
+through a zero-extra-step backend router. On macOS, Squire must use the Linux
+microVM backend when the helper and guest assets are already configured, then
+fall back to the host scoped session if the VM is unavailable or fails before
+Codex takes over. `squire codex` must not stop the user to provision VM assets.
+On Linux hosts, it may use the local scoped session kernel directly. The
+lower-level `squire session -- <command>` surface remains available for
+advanced launchers and diagnostics. Scoped sessions prefer a local preload
+library when available and the launcher is safe for preload inheritance, set
+exact native fallback paths, launch the ordinary shell or agent command, and
+hook selected exec-family calls inside that child process tree.
+The preload library reads the resident maintainer's mmap hot snapshot directly,
+serves only proven entries, refuses replay for custom-env exec calls it cannot
+prove, and falls through to native exec on every miss, unsupported launcher,
+unsupported argv, or absent/corrupt snapshot.
 
 For known unsafe launchers, or when preload is unavailable, the session runs
 native with no command interception. `--preload` requires the preload transport
@@ -135,7 +141,18 @@ For non-protected launchers, preload may replay simple `exec*` and
 `posix_spawn*` commands. The supported `posix_spawn` file-action subset is
 strictly limited to recorded `close` and `dup2` actions, which covers common
 stdout/stderr pipe capture. Unknown file actions or spawn attributes must fall
-back native.
+back native. Native fallback from the preload library must not recurse through
+the interposed exec/spawn symbols; it must either use direct native exec, a
+guarded native spawn path, or a fork/exec fallback with the same tracked file
+actions.
+
+For tiny successful metadata outputs, preload may satisfy a compatible
+`posix_spawn*` call with a synthetic completed child instead of forking a real
+replay child. This is allowed only when stdout is small enough for a single
+pipe-safe write, stderr is empty, exit code is zero, the output comes from a
+valid hot-snapshot proof, and the caller's subsequent `wait`/`waitpid` status is
+byte-compatible with native success. Synthetic replay accounting is reported
+separately from prepared-child replay accounting.
 
 Long-lived adapter integrations remain a compatibility path for host runtimes
 that already expose a command executor. A long-lived foreground may reuse the
@@ -148,14 +165,15 @@ snapshot on every request. Adapter responses may use pooled buffers to reduce
 allocation churn, but the wire protocol must still preserve exact
 stdout/stderr bytes and exit code.
 
-The production foreground is host/runtime owned, not model owned. A scoped
-session or terminal adapter may serve already-chosen commands through Squire,
-but the agent-facing command text must remain the original command. These
-foregrounds must not add tools, change prompts, suggest commands, route models,
-or require the model to call Squire. The normal session and adapter start or
-reuse the resident background maintainer by default so the maintainer lifecycle
-is a host concern, not an agent behavior. Manual `squire kernel run --
-<command>` remains a diagnostic surface, not the primary product UX.
+The production foreground is host/runtime owned, not model owned. `squire
+codex`, a scoped session, or a terminal adapter may serve already-chosen
+commands through Squire, but the agent-facing command text must remain the
+original command. These foregrounds must not add tools, change prompts, suggest
+commands, route models, or require the model to call Squire. The normal session
+and adapter start or reuse the resident background maintainer by default so the
+maintainer lifecycle is a host concern, not an agent behavior. Manual `squire
+kernel run -- <command>` remains a diagnostic surface, not the primary product
+UX.
 
 `squire vm session -- <command>` is a separate Linux guest execution mode. It
 exists to run the ordinary agent loop inside a Linux environment where

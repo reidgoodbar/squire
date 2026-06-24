@@ -48,6 +48,15 @@ func main() {
 	case len(args) == 1 && args[0] == "setup":
 		enableSquireOwnedGitReads()
 		out, err = kernel.Setup(ctx, cwd, storeRoot)
+	case len(args) >= 1 && args[0] == "codex":
+		enableSquireOwnedGitReads()
+		code, runErr := runCodex(ctx, cwd, storeRoot, args[1:])
+		if runErr != nil {
+			fmt.Fprintln(os.Stderr, runErr)
+			os.Exit(1)
+		}
+		os.Exit(code)
+		return
 	case len(args) >= 1 && args[0] == "session":
 		enableSquireOwnedGitReads()
 		err = runSession(ctx, cwd, storeRoot, args[1:])
@@ -191,6 +200,34 @@ func fatalUsage(message string) {
 	usage()
 }
 
+func codexCommand(args []string) []string {
+	command := []string{"codex"}
+	return append(command, args...)
+}
+
+func codexVMOptionsForStatus(status vmStatusReport, args []string) (vmSessionOptions, bool) {
+	if !status.Available {
+		return vmSessionOptions{}, false
+	}
+	return vmSessionOptions{
+		Command: codexCommand(args),
+		Backend: status.Backend,
+		Runner:  status.Runner,
+		Quiet:   true,
+	}, true
+}
+
+func runCodex(ctx context.Context, cwd, storeRoot string, args []string) (int, error) {
+	status := detectVMStatus(cwd, storeRoot, vmBackendAuto, "")
+	if opts, ok := codexVMOptionsForStatus(status, args); ok {
+		code, err := runVMSession(ctx, cwd, storeRoot, opts)
+		if err == nil || ctx.Err() != nil {
+			return code, err
+		}
+	}
+	return runScopedSession(ctx, cwd, storeRoot, sessionOptions{Command: codexCommand(args), Quiet: true})
+}
+
 func kernelUsageError(args []string) string {
 	if len(args) == 0 {
 		return `missing kernel subcommand (try "squire help kernel")`
@@ -244,6 +281,10 @@ func usageText() string {
 	return `Squire Kernel v1
 
 usage:
+  squire codex [codex args...]
+  squire boost status --short
+
+advanced:
   squire setup
   squire session [--quiet] [--metadata-only|--no-warm] [--no-maintainer] [--enable-warm-file-replay] [--preload] [--preload-lib <path>] -- <command> [args...]
   squire vm status [--short|--json]
@@ -270,15 +311,11 @@ principles:
   Validation, edits, mutations, and package installs are never replayed.
 
 first use:
-  squire setup
-  squire kernel maintain --background --short
-  squire kernel warm --metadata-only --short
-  squire session -- $SHELL
-  squire kernel run -- git rev-parse HEAD
-  squire vm status --short
-  squire kernel status --short
+  cd your-repo
+  squire codex
 
 help:
+  squire help codex
   squire help session
   squire help vm
   squire help version
@@ -308,10 +345,31 @@ func helpTopic(topic []string) string {
 		return usageText()
 	}
 	switch strings.Join(topic, " ") {
+	case "codex":
+		return `usage:
+  squire codex [codex args...]
+
+Starts Codex inside the normal Squire Kernel product path. This is the
+recommended UX. It does not require a separate setup command. On macOS, Squire
+uses the Linux microVM backend first when it is already configured, then falls
+back to the host scoped session. On Linux hosts, Squire uses the local scoped
+session kernel directly.
+
+The model still sees and emits ordinary commands. Squire scopes local store
+prep, warm state, the resident maintainer, hot snapshot access, exact replay,
+and native fallback below Codex. It does not add tools, alter prompts, suggest
+commands, stop for VM provisioning, or require Codex to call Squire.
+
+Examples:
+  squire codex
+  squire codex exec "Explain this repo"
+  squire codex --skip-git-repo-check exec "Print OK"
+`
 	case "setup":
 		return `usage:
   squire setup
 
+Advanced preflight/repair command. It is not required before squire codex.
 Initializes the local Squire Kernel store, prints privacy mode, and does not
 install global command shims.
 `
@@ -442,11 +500,12 @@ human-readable status.
   squire boost bench deep-local [--short|--json]
 
 Shows local acceleration counters and runs scoped benchmarks. Boost status
-includes hot-client replay counts and last event/replay Unix nanosecond
-timestamps so recent session activity can be distinguished from older ledger
-data. Benchmarks make no broad Codex speedup claim. Benchmark JSON is the
-default output for automation; use --short for a compact human-readable
-summary. Boost status is human-readable by default; use --json for automation.
+includes hot-client replay counts, Go-client/prepared-child/synthetic replay
+breakdowns, and last event/replay Unix nanosecond timestamps so recent session
+activity can be distinguished from older ledger data.
+Benchmarks make no broad Codex speedup claim. Benchmark JSON is the default
+output for automation; use --short for a compact human-readable summary. Boost
+status is human-readable by default; use --json for automation.
 `
 	default:
 		return usageText()

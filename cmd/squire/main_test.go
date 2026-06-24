@@ -20,6 +20,7 @@ func TestUsageTextDocumentsKernelContract(t *testing.T) {
 	text := usageText()
 	for _, want := range []string{
 		"Squire Kernel v1",
+		"squire codex",
 		"squire version",
 		"squire session",
 		"Agent chooses. Squire serves.",
@@ -27,7 +28,7 @@ func TestUsageTextDocumentsKernelContract(t *testing.T) {
 		"Runtime decisions are replay or native.",
 		"squire kernel maintain --background",
 		"squire kernel adapter --stdio",
-		"squire kernel run -- git rev-parse HEAD",
+		"squire kernel run -- <command>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("usage text missing %q:\n%s", want, text)
@@ -43,6 +44,7 @@ func TestHelpTextForArgs(t *testing.T) {
 	}{
 		{name: "global long help", args: []string{"--help"}, want: "usage:"},
 		{name: "global help topic", args: []string{"help"}, want: "usage:"},
+		{name: "codex topic", args: []string{"help", "codex"}, want: "recommended UX"},
 		{name: "session topic", args: []string{"help", "session"}, want: "scoped Squire session"},
 		{name: "vm topic", args: []string{"help", "vm"}, want: "isolated Linux execution mode"},
 		{name: "vm session topic", args: []string{"vm", "session", "--help"}, want: "guest lifecycle runner"},
@@ -63,6 +65,32 @@ func TestHelpTextForArgs(t *testing.T) {
 				t.Fatalf("help text missing %q:\n%s", tt.want, text)
 			}
 		})
+	}
+}
+
+func TestCodexVMOptionsForStatus(t *testing.T) {
+	if got := codexCommand([]string{"exec", "Explain this repo"}); !reflect.DeepEqual(got, []string{"codex", "exec", "Explain this repo"}) {
+		t.Fatalf("codexCommand = %#v", got)
+	}
+
+	unavailable := vmStatusReport{Available: false, Backend: vmBackendVirtualization}
+	if _, ok := codexVMOptionsForStatus(unavailable, []string{"exec", "task"}); ok {
+		t.Fatal("unavailable VM should not be selected")
+	}
+
+	available := vmStatusReport{Available: true, Backend: vmBackendExternalRunner, Runner: "/tmp/runner"}
+	opts, ok := codexVMOptionsForStatus(available, []string{"exec", "task"})
+	if !ok {
+		t.Fatal("available VM should be selected")
+	}
+	if opts.Backend != vmBackendExternalRunner || opts.Runner != "/tmp/runner" {
+		t.Fatalf("unexpected VM opts: %+v", opts)
+	}
+	if !opts.Quiet {
+		t.Fatal("squire codex should launch VM sessions quietly")
+	}
+	if !reflect.DeepEqual(opts.Command, []string{"codex", "exec", "task"}) {
+		t.Fatalf("VM command = %#v", opts.Command)
 	}
 }
 
@@ -862,6 +890,9 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		Replays:                      3,
 		NativeFallbacks:              2,
 		HotClientReplays:             1,
+		HotClientGoReplays:           0,
+		HotClientPreparedReplays:     0,
+		HotClientSyntheticReplays:    1,
 		HotClientNativeFallbacks:     0,
 		HotClientNativeAvoidedMS:     9,
 		HotClientReplayWallUS:        1200,
@@ -886,6 +917,7 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		"replays: 3",
 		"native_fallbacks: 2",
 		"hot_client_replays: 1",
+		"hot_client_synthetic_replays: 1",
 		"hot_client_replay_wall_avg_us: 1200",
 		"hot_client_net_saved_measured_ms: 8",
 		"hot_client_event_log_path: /tmp/squire/hot_client_events.log",
@@ -919,18 +951,25 @@ func TestHotEventPipeRecordsValidReplayEvents(t *testing.T) {
 		t.Fatal("expected hot event pipe")
 	}
 	_, _ = pipe.writer.WriteString("123 replay c-mmap-hot-snapshot 7 11\n")
+	_, _ = pipe.writer.WriteString("124 replay c-mmap-hot-synthetic 9 13\n")
 	_, _ = pipe.writer.WriteString("not an event\n")
 	_ = pipe.writer.Close()
 	finishHotEventPipe(pipe)
 	stats := kernel.LoadHotClientStats(storeRoot)
-	if stats.Replays != 1 {
-		t.Fatalf("replays = %d, want 1", stats.Replays)
+	if stats.Replays != 2 {
+		t.Fatalf("replays = %d, want 2", stats.Replays)
 	}
-	if stats.NativeWallAvoidedMS != 7 {
-		t.Fatalf("native wall avoided = %d, want 7", stats.NativeWallAvoidedMS)
+	if stats.PreparedChildReplays != 1 {
+		t.Fatalf("prepared replays = %d, want 1", stats.PreparedChildReplays)
 	}
-	if stats.ReplayWallUS != 11 {
-		t.Fatalf("replay wall = %d, want 11", stats.ReplayWallUS)
+	if stats.SyntheticReplays != 1 {
+		t.Fatalf("synthetic replays = %d, want 1", stats.SyntheticReplays)
+	}
+	if stats.NativeWallAvoidedMS != 16 {
+		t.Fatalf("native wall avoided = %d, want 16", stats.NativeWallAvoidedMS)
+	}
+	if stats.ReplayWallUS != 24 {
+		t.Fatalf("replay wall = %d, want 24", stats.ReplayWallUS)
 	}
 }
 

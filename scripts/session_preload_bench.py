@@ -269,14 +269,60 @@ def summary(values: list[float]) -> dict[str, float | int]:
     if not ordered:
         return {"count": 0}
     p95_index = min(len(ordered) - 1, int(round((len(ordered) - 1) * 0.95)))
+    p99_index = min(len(ordered) - 1, int(round((len(ordered) - 1) * 0.99)))
     return {
         "count": len(ordered),
         "min_ms": round(ordered[0], 6),
         "p50_ms": round(statistics.median(ordered), 6),
         "p95_ms": round(ordered[p95_index], 6),
+        "p99_ms": round(ordered[p99_index], 6),
         "max_ms": round(ordered[-1], 6),
         "avg_ms": round(statistics.mean(ordered), 6),
     }
+
+
+def percentile_index(count: int, percentile: float) -> int:
+    if count <= 0:
+        return 0
+    idx = int(count * percentile + 0.999999) - 1
+    if idx < 0:
+        return 0
+    if idx >= count:
+        return count - 1
+    return idx
+
+
+def summary_us(values: list[int]) -> dict[str, float | int]:
+    ordered = sorted(values)
+    if not ordered:
+        return {"count": 0}
+    return {
+        "count": len(ordered),
+        "min_us": ordered[0],
+        "p50_us": ordered[percentile_index(len(ordered), 0.50)],
+        "p95_us": ordered[percentile_index(len(ordered), 0.95)],
+        "p99_us": ordered[percentile_index(len(ordered), 0.99)],
+        "p999_us": ordered[percentile_index(len(ordered), 0.999)],
+        "max_us": ordered[-1],
+        "avg_us": round(statistics.mean(ordered), 3),
+        "under_1ms": sum(1 for value in ordered if value < 1000),
+    }
+
+
+def hot_client_replay_us(repo: Path) -> list[int]:
+    log = repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    if not log.exists():
+        return []
+    values: list[int] = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[1] != "replay":
+            continue
+        try:
+            values.append(int(parts[4]))
+        except ValueError:
+            continue
+    return values
 
 
 def main() -> int:
@@ -338,6 +384,7 @@ def main() -> int:
         run([str(driver), str(args.commands)], repo, env=native_env)
         native_times.append((time.perf_counter_ns() - start) / 1_000_000 / args.commands)
 
+    hot_events_before = len(hot_client_replay_us(repo))
     for _ in range(args.rounds):
         start = time.perf_counter_ns()
         run(
@@ -358,6 +405,7 @@ def main() -> int:
             env=replay_env,
         )
         preload_times.append((time.perf_counter_ns() - start) / 1_000_000 / args.commands)
+    hot_events = hot_client_replay_us(repo)[hot_events_before:]
 
     try:
         run([str(squire), "kernel", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
@@ -376,6 +424,7 @@ def main() -> int:
         "mismatches": 0 if exactness else 1,
         "native_ms_per_command": native,
         "preload_ms_per_command": preload_summary,
+        "hot_client_replay_us": summary_us(hot_events),
         "delta_p50_ms": round(native["p50_ms"] - preload_summary["p50_ms"], 6),
         "require_hit_measurement": args.require_hit_measurement,
         "ux": {
