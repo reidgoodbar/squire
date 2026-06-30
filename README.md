@@ -104,12 +104,23 @@ Proof-gated read-only candidates include:
 - `git status --porcelain`
 - `git ls-files`
 - supported `git diff` forms
-- bounded `cat` and `sed -n` reads for safe workspace files
+- bounded `cat`, `sed -n`, `head`, and `tail` reads for safe workspace files
+- `file <bounded workspace source/config file>` from exact native warm output
+- bounded literal `grep -F` and `grep -q -F` checks on warmed workspace files
+- tight `ls`, `ls -p`, and `ls -la` directory listings for safe workspace directories
+- `printenv <non-sensitive variable>`
 - common `<tool> --version` probes
 - simple `which` and external `command -v` lookups
+- static environment probes such as `whoami`, `hostname`, `id`, and supported `uname` forms
 
 These replay only from exact native observations while the local proof still
 matches.
+
+Selected composed shell forms are also eligible when the shell is launched
+through the helper-owned `posix_spawn` path. Squire parses a tiny deterministic
+grammar over proof-backed source commands and bounded in-memory filters, then
+falls back by execing the original shell on any miss. Direct in-process shell
+replacement remains disabled.
 
 ## What Never Replays
 
@@ -128,20 +139,35 @@ Current scoped claim:
 > deterministic read-only discovery operations with exact stdout/stderr/exit
 > code preservation, local validity proof, and native fallback.
 
-Latest mixed local UX benchmark:
+Latest scoped-preload benchmark:
 
-- commands: `270`
-- workload: fresh Python/TypeScript repo, one normal scoped zsh session, plain
-  commands across Git metadata, repo summaries, bounded file reads, tool
-  probes, and native-control commands
-- agent-visible Squire commands in measured stream: `0`
-- exact mismatches: `0`
-- hot mmap replays: `204`
-- native total: `3797.337ms`
-- Squire total: `816.421ms`
-- workload delta: `2980.916ms`
-- speedup: `4.651x`
-- replay p50/p95/p99/max: `132us` / `880us` / `1243us` / `1428us`
+- commands covered: `31`
+- rounds: `1000` operations per command, `5` e2e samples
+- exactness: `31/31`
+- direct command group: native p50 sum `167.549ms`, Squire p50 sum
+  `3.172ms`, `52.8x`
+- composed shell group: native p50 sum `155.398ms`, Squire p50 sum
+  `21.420ms`, `7.3x`
+- all commands: native p50 sum `322.948ms`, Squire p50 sum `24.591ms`,
+  `13.1x`
+- direct e2e p95 examples:
+  - `git rev-parse HEAD`: `0.097ms`
+  - `git status --short`: `0.379ms`
+  - `git ls-files`: `0.156ms`
+  - `cat src/app.js`: `0.129ms`
+  - `grep -F two src/app.js`: `0.122ms`
+- composed examples:
+  - `git rev-parse HEAD | cat`: native p50 `17.959ms`, Squire p50
+    `2.428ms`, `7.4x`
+  - `git status --short | head -n 5`: native p50 `19.344ms`, Squire p50
+    `2.892ms`, `6.7x`
+  - `cat src/app.js | grep -F two | head -n 1`: native p50 `6.593ms`,
+    Squire p50 `2.524ms`, `2.6x`
+
+Direct commands use synthetic completed-child replay when the exact output is
+tiny and pipe-safe. Composed shell commands use the helper shell-plan path, so
+they improve substantially but remain milliseconds e2e because the shell
+composition envelope still exists.
 
 This benchmark measures local command-serving time only. It does not include
 model thinking time, network time, or a broad Codex task-speedup claim.

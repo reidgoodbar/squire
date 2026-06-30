@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,16 @@ var sessionShimNames = []string{
 	"git",
 	"cat",
 	"sed",
+	"head",
+	"tail",
+	"file",
+	"grep",
+	"printenv",
+	"ls",
+	"whoami",
+	"uname",
+	"id",
+	"hostname",
 	"which",
 	"command",
 	"rg",
@@ -39,7 +51,6 @@ var sessionShimNames = []string{
 
 type sessionOptions struct {
 	Command              []string
-	ShimPath             string
 	PreloadLib           string
 	Quiet                bool
 	MetadataOnly         bool
@@ -47,7 +58,6 @@ type sessionOptions struct {
 	NoMaintainer         bool
 	EnableWarmFileReplay bool
 	Preload              bool
-	PathShims            bool
 }
 
 func runSession(ctx context.Context, cwd, storeRoot string, args []string) error {
@@ -75,9 +85,6 @@ func parseSessionOptions(args []string) (sessionOptions, error) {
 			if opts.MetadataOnly && opts.NoWarm {
 				return opts, fmt.Errorf("squire session cannot combine --metadata-only and --no-warm")
 			}
-			if opts.Preload && opts.PathShims {
-				return opts, fmt.Errorf("squire session cannot combine --preload and --path-shims")
-			}
 			return opts, nil
 		}
 		switch arg {
@@ -93,20 +100,12 @@ func parseSessionOptions(args []string) (sessionOptions, error) {
 			opts.EnableWarmFileReplay = true
 		case "--preload":
 			opts.Preload = true
-		case "--path-shims", "--no-preload":
-			opts.PathShims = true
 		case "--preload-lib":
 			if i+1 >= len(args) {
 				return opts, fmt.Errorf("squire session --preload-lib requires a path")
 			}
 			i++
 			opts.PreloadLib = args[i]
-		case "--shim":
-			if i+1 >= len(args) {
-				return opts, fmt.Errorf("squire session --shim requires a path")
-			}
-			i++
-			opts.ShimPath = args[i]
 		default:
 			return opts, fmt.Errorf("unknown session option %q", arg)
 		}
@@ -116,9 +115,6 @@ func parseSessionOptions(args []string) (sessionOptions, error) {
 
 func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOptions) (int, error) {
 	env := append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_STORE_ROOT="+storeRoot)
-	linked := 0
-	shimDir := ""
-	shimPath := ""
 	transport := "native"
 	var err error
 	launcherForSafety := opts.Command[0]
@@ -127,11 +123,7 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 			launcherForSafety = resolved
 		}
 	}
-	autoPathShims := !opts.Preload && !opts.PathShims && preferScopedPathShimsForLauncher(launcherForSafety)
-	if opts.PathShims || autoPathShims {
-		transport = "path-shims"
-	}
-	tryPreload := transport == "native" && (opts.Preload || !isPreloadUnsafeLauncher(launcherForSafety))
+	tryPreload := opts.Preload || !isPreloadUnsafeLauncher(launcherForSafety)
 	if tryPreload {
 		preloadLib, preloadErr := resolveSessionPreloadLib(opts.PreloadLib)
 		if preloadErr == nil {
@@ -146,32 +138,6 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 			transport = "preload"
 		} else if opts.Preload || opts.PreloadLib != "" {
 			return 0, preloadErr
-		}
-	}
-	if transport == "path-shims" {
-		var shimErr error
-		shimPath, shimErr = resolveSessionShim(opts.ShimPath)
-		if shimErr != nil {
-			if autoPathShims {
-				transport = "native"
-			} else {
-				return 0, shimErr
-			}
-		}
-	}
-	if transport == "path-shims" {
-		shimDir, err = os.MkdirTemp("", "squire-session-shims.")
-		if err != nil {
-			return 0, err
-		}
-		defer os.RemoveAll(shimDir)
-
-		env, linked, err = buildSessionEnvironment(cwd, shimDir, shimPath, env, opts.EnableWarmFileReplay)
-		if err != nil {
-			return 0, err
-		}
-		if linked == 0 {
-			return 0, fmt.Errorf("squire session could not create any scoped shims")
 		}
 	}
 
@@ -196,8 +162,6 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 	if !opts.Quiet {
 		if transport == "preload" {
 			fmt.Fprintf(os.Stderr, "squire session: scoped preload active, native fallback available\n")
-		} else if transport == "path-shims" {
-			fmt.Fprintf(os.Stderr, "squire session: scoped mmap shims active (%d), native fallback available\n", linked)
 		} else {
 			fmt.Fprintf(os.Stderr, "squire session: native execution active; preload not applied\n")
 		}
@@ -205,10 +169,7 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 
 	commandPath := opts.Command[0]
 	if !strings.ContainsRune(commandPath, os.PathSeparator) {
-		if transport == "path-shims" && isExecutableFile(filepath.Join(shimDir, commandPath)) {
-			shimCommand := filepath.Join(shimDir, commandPath)
-			commandPath = shimCommand
-		} else if resolved, ok := lookupExecutableInPath(commandPath, envValue(env, "PATH"), cwd); ok {
+		if resolved, ok := lookupExecutableInPath(commandPath, envValue(env, "PATH"), cwd); ok {
 			commandPath = resolved
 		}
 	}
@@ -364,34 +325,6 @@ func finishHotEventPipe(pipe *hotEventPipe) {
 	}
 }
 
-func resolveSessionShim(explicit string) (string, error) {
-	candidates := []string{}
-	if explicit != "" {
-		candidates = append(candidates, explicit)
-	}
-	if env := os.Getenv("SQUIRE_MMAP_SHIM"); env != "" {
-		candidates = append(candidates, env)
-	}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "squire-mmap-shim"))
-	}
-	if path, err := exec.LookPath("squire-mmap-shim"); err == nil {
-		candidates = append(candidates, path)
-	}
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if abs, err := filepath.Abs(candidate); err == nil {
-			candidate = abs
-		}
-		if isExecutableFile(candidate) {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("squire session could not find executable squire-mmap-shim; install Squire or pass --shim <path>")
-}
-
 func resolveSessionPreloadLib(explicit string) (string, error) {
 	candidates := []string{}
 	if explicit != "" {
@@ -473,54 +406,6 @@ func isPreloadUnsafeLauncher(command string) bool {
 	return false
 }
 
-func preferScopedPathShimsForLauncher(command string) bool {
-	if runtimeGOOS() != "darwin" {
-		return false
-	}
-	name := filepath.Base(command)
-	return name == "codex" || strings.HasPrefix(name, "codex-") || strings.Contains(command, "/codex/")
-}
-
-func buildSessionEnvironment(cwd, shimDir, shimPath string, base []string, includeWarmFileReplay bool) ([]string, int, error) {
-	basePath := envSliceValue(base, "PATH")
-	if basePath == "" {
-		basePath = os.Getenv("PATH")
-	}
-	overrides := map[string]string{
-		"PATH":                    shimDir + string(os.PathListSeparator) + basePath,
-		"SQUIRE_SHIM_REAL_PATH":   basePath,
-		"SQUIRE_SESSION_SHIM_DIR": shimDir,
-	}
-	linked := 0
-	for _, name := range sessionShimNames {
-		realPath := ""
-		if name != "command" {
-			var ok bool
-			realPath, ok = lookupExecutableInPath(name, basePath, cwd)
-			if !ok {
-				continue
-			}
-			if isWarmFileTool(name) && !includeWarmFileReplay {
-				if err := os.Symlink(realPath, filepath.Join(shimDir, name)); err != nil {
-					return nil, linked, fmt.Errorf("create scoped native passthrough %s: %w", name, err)
-				}
-				linked++
-				continue
-			}
-			overrides[realToolEnvKey(name)] = realPath
-		}
-		link := filepath.Join(shimDir, name)
-		if err := os.Symlink(shimPath, link); err != nil {
-			return nil, linked, fmt.Errorf("create scoped shim %s: %w", name, err)
-		}
-		linked++
-	}
-	if includeWarmFileReplay {
-		overrides["SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"] = "1"
-	}
-	return mergeEnv(base, overrides), linked, nil
-}
-
 func buildPreloadSessionEnvironment(cwd, preloadLib, preloadHelper string, base []string, includeWarmFileReplay bool) ([]string, error) {
 	basePath := envSliceValue(base, "PATH")
 	if basePath == "" {
@@ -547,7 +432,13 @@ func buildPreloadSessionEnvironment(cwd, preloadLib, preloadHelper string, base 
 		if !ok {
 			continue
 		}
-		overrides[realToolEnvKey(name)] = realPath
+		key := realToolEnvKey(name)
+		overrides[key] = realPath
+		if signal, ok := executablePreloadSignal(realPath); ok {
+			overrides[key+"_PATH_HASH"] = hashStringLocal(realPath)
+			overrides[key+"_FILE_HASH"] = signal.fileHash
+			overrides[key+"_STAT_SIGNAL"] = signal.statSignal
+		}
 	}
 	if includeWarmFileReplay {
 		overrides["SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"] = "1"
@@ -560,10 +451,6 @@ func prependPathList(value, existing string) string {
 		return value
 	}
 	return value + string(os.PathListSeparator) + existing
-}
-
-func isWarmFileTool(name string) bool {
-	return name == "cat" || name == "sed"
 }
 
 func lookupExecutableInPath(name, pathValue, cwd string) (string, bool) {
@@ -596,6 +483,49 @@ func isExecutableFile(path string) bool {
 func isRegularFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+type preloadExecutableSignal struct {
+	fileHash   string
+	statSignal string
+}
+
+func executablePreloadSignal(path string) (preloadExecutableSignal, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return preloadExecutableSignal{}, false
+	}
+	contentHash, ok := hashFileLocal(path)
+	if !ok {
+		return preloadExecutableSignal{}, false
+	}
+	statSignal, ok := preloadFileStatSignal(info)
+	if !ok {
+		return preloadExecutableSignal{}, false
+	}
+	signal := filepath.Base(path) + "|" + contentHash + "|" + statSignal
+	return preloadExecutableSignal{
+		fileHash:   hashStringLocal(signal),
+		statSignal: statSignal,
+	}, true
+}
+
+func hashFileLocal(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", false
+	}
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+func hashStringLocal(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func runtimeGOOS() string {

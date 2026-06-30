@@ -66,10 +66,18 @@ func ProofGatedReplayCandidates() []string {
 		"git diff / git diff --stat / git diff -- <path>",
 		"cat <bounded workspace source/config file>",
 		"sed -n <bounded-range>p <bounded workspace source/config file>",
+		"head -n <bounded-lines> <bounded workspace source/config file>",
+		"tail -n <bounded-lines> <bounded workspace source/config file>",
+		"file <bounded workspace source/config file>",
+		"grep -F <literal> <bounded workspace source/config file>",
+		"grep -q -F <literal> <bounded workspace source/config file>",
+		"ls / ls -p / ls -la for safe workspace directories",
 		"<tool> --version / <tool> version",
 		"pip/pip3 --version",
 		"which <common-tool>",
 		"command -v <common-tool> (external PATH executable only)",
+		"whoami / hostname / id / uname static environment probes",
+		"printenv <non-sensitive variable>",
 	}
 }
 

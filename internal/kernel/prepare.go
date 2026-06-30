@@ -443,8 +443,18 @@ func proofGatedPrewarmCandidates(ws WorldState) [][]string {
 		add([]string{"git", "diff"})
 		add([]string{"git", "diff", "--stat"})
 		add([]string{"rg", "--files"})
+		add([]string{"ls"})
+		add([]string{"ls", "-p"})
+		add([]string{"ls", "-la"})
+		for _, rel := range replayableDirectoryPrewarmTargets(ws.RepoRoot, 24) {
+			add([]string{"ls", rel})
+			add([]string{"ls", "-p", rel})
+		}
 		for _, rel := range replayableInspectionPrewarmFiles(ws.RepoRoot, proofGatedPrewarmCommandFileLimit) {
 			add([]string{"cat", rel})
+			add([]string{"file", rel})
+			add([]string{"head", "-n", "20", rel})
+			add([]string{"tail", "-n", "50", rel})
 			if isLikelySourceInspectionFile(rel) {
 				for _, expr := range commonSedPrewarmRanges() {
 					add([]string{"sed", "-n", expr, rel})
@@ -463,6 +473,16 @@ func proofGatedPrewarmCandidates(ws WorldState) [][]string {
 		{"python3", "--version"},
 		{"pip", "--version"},
 		{"pip3", "--version"},
+		{"whoami"},
+		{"hostname"},
+		{"id"},
+		{"uname", "-m"},
+		{"uname", "-s"},
+		{"printenv", "PATH"},
+		{"printenv", "HOME"},
+		{"printenv", "USER"},
+		{"printenv", "LANG"},
+		{"printenv", "SHELL"},
 	} {
 		add(argv)
 	}
@@ -483,9 +503,36 @@ func proofGatedOutputPrivacy(argv []string) string {
 		return "tool version stdout/stderr stored locally for exact replay"
 	case isCommandPathLookup(argv):
 		return "command path lookup output stored locally for exact replay"
+	case isStaticEnvironmentProbe(argv):
+		return "static environment probe output stored locally for exact session replay"
+	case isPrintenvProbe(argv):
+		return "selected non-sensitive environment variable output stored locally for exact session replay"
+	case isDirectoryListing(argv):
+		return "directory listing output stored locally for exact replay with directory/stat/env proof"
 	default:
 		return "proof-gated output bytes stored locally for exact replay"
 	}
+}
+
+func replayableDirectoryPrewarmTargets(root string, limit int) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var rels []string
+	for _, entry := range entries {
+		if len(rels) >= limit {
+			break
+		}
+		if !entry.IsDir() || shouldSkipPrewarmDir(entry.Name()) {
+			continue
+		}
+		if _, _, ok := parseDirectoryListing([]string{"ls", entry.Name()}); !ok {
+			continue
+		}
+		rels = append(rels, entry.Name())
+	}
+	return rels
 }
 
 func replayableInspectionPrewarmFiles(root string, limit int) []string {

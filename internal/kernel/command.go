@@ -125,7 +125,10 @@ func Classify(argv []string) OperatorFamily {
 		return FamilyShellUnknown
 	}
 	name := filepath.Base(argv[0])
-	if isToolVersionProbe(argv) || isCommandPathLookup(argv) {
+	if isToolVersionProbe(argv) || isCommandPathLookup(argv) || isStaticEnvironmentProbe(argv) {
+		return FamilyEnvironment
+	}
+	if isPrintenvProbe(argv) {
 		return FamilyEnvironment
 	}
 	if name == "git" {
@@ -147,6 +150,9 @@ func Classify(argv []string) OperatorFamily {
 		return FamilyShellUnknown
 	}
 	if (name == "rg" && len(argv) == 2 && argv[1] == "--files") || isLiteralRgContentSearch(argv) {
+		return FamilySearchList
+	}
+	if isDirectoryListing(argv) {
 		return FamilySearchList
 	}
 	if isReplayableFileInspection(argv) {
@@ -191,7 +197,10 @@ func IsProofGatedReplayCandidate(argv []string) bool {
 		isGitReadOnlyDiff(argv) ||
 		isReplayableFileInspection(argv) ||
 		isToolVersionProbe(argv) ||
-		isCommandPathLookup(argv)
+		isCommandPathLookup(argv) ||
+		isStaticEnvironmentProbe(argv) ||
+		isPrintenvProbe(argv) ||
+		isDirectoryListing(argv)
 }
 
 func IsReplayAllowed(argv []string) bool {
@@ -270,7 +279,11 @@ func isLiteralRgContentSearch(argv []string) bool {
 }
 
 func isReplayableFileInspection(argv []string) bool {
-	return isReplayableCatFileRead(argv) || isBoundedSedPrint(argv)
+	return isWarmFileBackedInspection(argv) || isReplayableFileType(argv)
+}
+
+func isWarmFileBackedInspection(argv []string) bool {
+	return isReplayableCatFileRead(argv) || isBoundedSedPrint(argv) || isBoundedHeadPrint(argv) || isBoundedTailPrint(argv) || isFixedGrepFileSearch(argv)
 }
 
 func isManifestFileRead(argv []string) bool {
@@ -288,6 +301,54 @@ func isReplayableCatFileRead(argv []string) bool {
 	return isReplayableInspectionName(filepath.Base(path))
 }
 
+func isReplayableFileType(argv []string) bool {
+	if len(argv) != 2 || filepath.Base(argv[0]) != "file" {
+		return false
+	}
+	path := filepath.Clean(argv[1])
+	if !safeRelativeInspectionPath(path) {
+		return false
+	}
+	return isReplayableInspectionName(filepath.Base(path))
+}
+
+func isFixedGrepFileSearch(argv []string) bool {
+	_, _, _, ok := parseFixedGrepArgs(argv)
+	return ok
+}
+
+func parseFixedGrepArgs(argv []string) (pattern, path string, quiet bool, ok bool) {
+	if len(argv) != 4 && len(argv) != 5 {
+		return "", "", false, false
+	}
+	if filepath.Base(argv[0]) != "grep" {
+		return "", "", false, false
+	}
+	switch {
+	case len(argv) == 4 && argv[1] == "-F":
+		pattern = argv[2]
+		path = argv[3]
+	case len(argv) == 5 && argv[1] == "-F" && argv[2] == "-q":
+		quiet = true
+		pattern = argv[3]
+		path = argv[4]
+	case len(argv) == 5 && argv[1] == "-q" && argv[2] == "-F":
+		quiet = true
+		pattern = argv[3]
+		path = argv[4]
+	default:
+		return "", "", false, false
+	}
+	if pattern == "" || strings.HasPrefix(pattern, "-") || strings.ContainsAny(pattern, "\x00\n\r") {
+		return "", "", false, false
+	}
+	clean := filepath.Clean(path)
+	if !safeRelativeInspectionPath(clean) || !isReplayableInspectionName(filepath.Base(clean)) {
+		return "", "", false, false
+	}
+	return pattern, clean, quiet, true
+}
+
 func isBoundedSedPrint(argv []string) bool {
 	if len(argv) != 4 || filepath.Base(argv[0]) != "sed" || argv[1] != "-n" {
 		return false
@@ -300,6 +361,143 @@ func isBoundedSedPrint(argv []string) bool {
 		return false
 	}
 	return isReplayableInspectionName(filepath.Base(path))
+}
+
+func isBoundedHeadPrint(argv []string) bool {
+	if filepath.Base(firstArg(argv)) != "head" {
+		return false
+	}
+	path, _, ok := parseHeadTailArgs(argv, false)
+	if !ok {
+		return false
+	}
+	return isReplayableInspectionName(filepath.Base(filepath.Clean(path)))
+}
+
+func isBoundedTailPrint(argv []string) bool {
+	if filepath.Base(firstArg(argv)) != "tail" {
+		return false
+	}
+	path, _, ok := parseHeadTailArgs(argv, true)
+	if !ok {
+		return false
+	}
+	return isReplayableInspectionName(filepath.Base(filepath.Clean(path)))
+}
+
+func firstArg(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	return argv[0]
+}
+
+func parseHeadTailArgs(argv []string, tail bool) (string, int, bool) {
+	if len(argv) < 2 || len(argv) > 4 {
+		return "", 0, false
+	}
+	count := 10
+	pathIndex := 1
+	if len(argv) >= 3 {
+		arg := argv[1]
+		switch {
+		case arg == "-n":
+			if len(argv) != 4 {
+				return "", 0, false
+			}
+			n, ok := parseHeadTailCount(argv[2], tail)
+			if !ok {
+				return "", 0, false
+			}
+			count = n
+			pathIndex = 3
+		case strings.HasPrefix(arg, "-n") && len(arg) > 2:
+			if len(argv) != 3 {
+				return "", 0, false
+			}
+			n, ok := parseHeadTailCount(arg[2:], tail)
+			if !ok {
+				return "", 0, false
+			}
+			count = n
+			pathIndex = 2
+		case strings.HasPrefix(arg, "-") && len(arg) > 1:
+			if len(argv) != 3 {
+				return "", 0, false
+			}
+			n, ok := parseHeadTailCount(arg[1:], tail)
+			if !ok {
+				return "", 0, false
+			}
+			count = n
+			pathIndex = 2
+		default:
+			return "", 0, false
+		}
+	}
+	if count < 1 || count > 1000 || pathIndex >= len(argv) {
+		return "", 0, false
+	}
+	path := filepath.Clean(argv[pathIndex])
+	if !safeRelativeInspectionPath(path) {
+		return "", 0, false
+	}
+	return path, count, true
+}
+
+func parseHeadTailCount(s string, tail bool) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	if tail && strings.HasPrefix(s, "+") {
+		return 0, false
+	}
+	return parsePositiveSmallLine(s)
+}
+
+func isDirectoryListing(argv []string) bool {
+	_, _, ok := parseDirectoryListing(argv)
+	return ok
+}
+
+func parseDirectoryListing(argv []string) (string, string, bool) {
+	if len(argv) < 1 || len(argv) > 3 || filepath.Base(argv[0]) != "ls" {
+		return "", "", false
+	}
+	flag := ""
+	path := "."
+	switch len(argv) {
+	case 1:
+	case 2:
+		if strings.HasPrefix(argv[1], "-") {
+			if !isSupportedLSFlag(argv[1]) {
+				return "", "", false
+			}
+			flag = argv[1]
+		} else {
+			path = argv[1]
+		}
+	case 3:
+		if !isSupportedLSFlag(argv[1]) || strings.HasPrefix(argv[2], "-") {
+			return "", "", false
+		}
+		flag = argv[1]
+		path = argv[2]
+	}
+	clean := filepath.Clean(path)
+	if clean == "" || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.IsAbs(clean) {
+		return "", "", false
+	}
+	return clean, flag, true
+}
+
+func isSupportedLSFlag(flag string) bool {
+	switch flag {
+	case "-p", "-la", "-al":
+		return true
+	default:
+		return false
+	}
 }
 
 func safeRelativeInspectionPath(path string) bool {
@@ -460,6 +658,76 @@ func isCommandPathLookup(argv []string) bool {
 		return false
 	}
 	return isCommonToolName(target)
+}
+
+func isStaticEnvironmentProbe(argv []string) bool {
+	if len(argv) == 0 || len(argv) > 2 {
+		return false
+	}
+	name := filepath.Base(argv[0])
+	switch name {
+	case "whoami", "hostname", "id":
+		return len(argv) == 1
+	case "uname":
+		if len(argv) == 1 {
+			return true
+		}
+		switch argv[1] {
+		case "-a", "-m", "-n", "-r", "-s", "-v":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func isPrintenvProbe(argv []string) bool {
+	if len(argv) != 2 || filepath.Base(argv[0]) != "printenv" {
+		return false
+	}
+	return safePrintenvName(argv[1])
+}
+
+func safePrintenvName(name string) bool {
+	if name == "" || len(name) > 128 || sensitiveEnvironmentName(name) {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 && (r >= '0' && r <= '9') {
+			return false
+		}
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func sensitiveEnvironmentName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{
+		"TOKEN",
+		"SECRET",
+		"PASSWORD",
+		"PASSWD",
+		"AUTH",
+		"CREDENTIAL",
+		"COOKIE",
+		"BEARER",
+		"PRIVATE",
+		"API_KEY",
+		"APIKEY",
+		"ACCESS_KEY",
+		"REFRESH_TOKEN",
+		"SESSION_TOKEN",
+	} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func commandPathLookupTarget(argv []string) string {

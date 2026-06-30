@@ -79,17 +79,25 @@ Hot-prepared proof-gated replay candidates:
 - `git diff -- <relative source/config path>`
 - `cat <bounded workspace source/config file>`
 - `sed -n <bounded-range>p <bounded workspace source/config file>`
+- `head -n <bounded-lines> <bounded workspace source/config file>`
+- `tail -n <bounded-lines> <bounded workspace source/config file>`
+- `file <bounded workspace source/config file>` from exact native warm output
+- `grep -F <literal> <bounded workspace source/config file>`
+- `grep -q -F <literal> <bounded workspace source/config file>`
+- `printenv <non-sensitive variable>`
+- `ls`, `ls -p`, and `ls -la` for safe workspace directories
 - `<tool> --version` and `<tool> version` for common local tools
 - `pip/pip3 --version`
 - `which <common-tool>`
 - `command -v <common-tool>` for external PATH executables only
+- `whoami`, `hostname`, `id`, and supported `uname` static environment probes
 
-Scoped product sessions may pass tiny file readers such as `cat` and `sed`
-directly through to native tools by default when native is faster than the
-foreground proof cost. Warm-file replay remains an explicit coverage and
-experiment mode through `squire session --enable-warm-file-replay -- ...`.
-Passing through an unprofitable operator is a native fallback choice, not a new
-agent-visible behavior.
+Scoped product sessions may replay tiny file readers such as `cat`, `sed`,
+`head`, and `tail` when warm-file replay is enabled and the bounded file proof
+is exact. If a file read is too large, unsupported, stale, or unprofitable for
+the current foreground path, native fallback wins. Passing through an
+unprofitable operator is a native fallback choice, not a new agent-visible
+behavior.
 
 Hot-prepared proof-gated candidates may replay only when the command key, cheap
 hot fingerprints, hot invalidation epoch, output hashes, and in-memory output
@@ -103,6 +111,24 @@ For Git status and diff outputs, relevant external Git inputs must be part of
 the invalidation proof. Changing a global ignore file, global attributes file,
 included config file, configured excludes file, or configured attributes file
 must force native fallback or a freshly prepared observation.
+For directory listings, the proof includes the requested cwd, target directory,
+immediate entry stat signals, symlink targets, selected locale/color/blocksize
+environment, `ls` executable identity, and local passwd/group/timezone files
+used by long-format rendering.
+For `file`, the output must come from an exact native warm observation and the
+proof includes the target file content hash, size, mode, canonical path,
+`file` executable identity, and selected `file(1)` environment inputs such as
+locale and `MAGIC`.
+For bounded literal `grep`, the proof includes the warmed file content hash,
+size, mode, canonical path, exact literal pattern, quiet/non-quiet mode, and
+exact argv shape. Regex grep, recursive grep, binary files, multiple input
+files, and unsupported flags remain native.
+For `printenv`, only a single explicitly safe variable name is eligible. Names
+that look like credentials, tokens, secrets, keys, auth values, cookies, or
+passwords are denied, and the proof includes the variable name, value/existence,
+PATH, and `printenv` executable identity.
+For static environment probes, the proof includes executable identity, PATH,
+selected session environment, hostname, and process uid/gid/group identity.
 
 The foreground CLI serving path first checks a daemon-published mmap hot
 snapshot before loading ledgers or touching daemon/socket paths. If that exact
@@ -153,10 +179,9 @@ shell limits. The Codex binary itself may be static and ignore preload, but the
 preload environment can still reach dynamic child shells if Codex and its
 sandbox preserve it. The preload transport must handle both direct tool exec
 and simple `execve("/bin/sh", "-c", <allowlisted command>)` shell launches
-before falling back to native shell execution. Scoped guest-local mmap shims are
-the fallback or diagnostic transport when preload assets are absent or explicitly
-requested.
-Both transports remain model-invisible and session-scoped: the agent emits the
+before falling back to native shell execution. Preload is the only accelerated
+session transport; when preload assets are absent, Squire runs native.
+The transport remains model-invisible and session-scoped: the agent emits the
 same commands, Squire reads only the local hot snapshot, and every miss or
 invalid proof falls back to the native executable.
 Replay accounting must not require sandboxed child commands to open the ledger
@@ -183,13 +208,35 @@ the interposed exec/spawn symbols; it must either use direct native exec, a
 guarded native spawn path, or a fork/exec fallback with the same tracked file
 actions.
 
-For tiny successful metadata outputs, preload may satisfy a compatible
+Composed shell commands are a separate proof tier. In production this tier runs
+only through the helper-owned `posix_spawn` path: the preload library swaps the
+shell child for `squire-preload-helper --shell-ir ...`, native file actions wire
+stdout/stderr exactly as they would for the shell, and the helper either emits
+the proven shell-plan result or execs the original shell path with the original
+`-c`/`-lc` command. A deterministic shell-plan engine may parse a tiny grammar
+of words, `|`, `&&`, `;`, grouping, and `/dev/null` redirects, then evaluate
+only proof-backed source commands and bounded in-memory filters. It must reject
+expansion, globbing, aliases, functions, arbitrary redirects, background jobs,
+unknown filters, and any node that lacks an exact replay proof. Direct
+in-process `execve("/bin/sh", "-c", ...)` shell-plan replacement remains
+compile-time disabled until it has separate lifecycle proof.
+The shell-plan parser must use small fixed command-specific limits, not generic
+process argv/path buffers. A command that exceeds the supported token, node,
+argv, or word-size limit must miss the shell-plan path and execute the original
+shell natively.
+
+For tiny successful direct outputs, preload may satisfy a compatible
 `posix_spawn*` call with a synthetic completed child instead of forking a real
 replay child. This is allowed only when stdout is small enough for a single
 pipe-safe write, stderr is empty, exit code is zero, the output comes from a
 valid hot-snapshot proof, and the caller's subsequent `wait`/`waitpid` status is
 byte-compatible with native success. Synthetic replay accounting is reported
 separately from prepared-child replay accounting.
+The synthetic-safe set is direct proof-gated reads only: local Git metadata and
+repo summaries, warm-file transforms, directory/file/env probes, command path
+lookups, and version probes. Unsupported output shapes continue through the
+prepared helper path or native fallback unless they receive separate lifecycle
+and exactness proof.
 
 Long-lived adapter integrations remain a compatibility path for host runtimes
 that already expose a command executor. A long-lived foreground may reuse the
@@ -218,8 +265,8 @@ exists to run the ordinary agent loop inside a Linux environment where
 instead of fighting host macOS protected shells and hardened runtimes. The
 agent-facing command text must still remain unchanged, and the guest must obey
 the same replay contract: exact stdout/stderr/exit-code or native fallback
-inside the guest. VM mode must not depend on host command shims, session-local
-host PATH tricks, or the macOS scoped C shim fallback.
+inside the guest. VM mode must not depend on host command shims,
+session-local host PATH tricks, or standalone C PATH shims.
 
 On Linux hosts, `squire vm session` may use the same scoped session path
 directly. On macOS, VM mode uses the built-in `squire-vm-darwin`
@@ -263,8 +310,9 @@ and source/config extensions or well-known project metadata files. It is
 invalidated by local file proof. Exact command observations include the exact
 argv in their proof. Warm-file entries are keyed by relative path, file content
 hash, size, mode, and OS change signal, and may materialize arbitrary eligible
-bounded `sed -n` windows or bounded `cat` output from those same proven bytes
-without precomputing every possible range.
+bounded `sed -n`, `head`, `tail`, and literal `grep -F` windows from those same
+proven bytes without precomputing every possible range. `file(1)` remains
+native-precomputed exact output, not guessed from extension.
 Tool discovery replay is invalidated by PATH, selected environment variables,
 and executable byte identity. `.env`, hidden paths, likely secret/token/key
 files, unknown binary reads, shell aliases, shell functions, and shell-specific
@@ -297,9 +345,10 @@ commands in a worker pool and may warm eligible workspace file bytes before the
 agent asks for them. These warmed file bytes form the production-safe Level 3
 read-only virtual workspace image. Exact warm observations replay through the
 exact output and hot prepared proof path. Warm-file observations replay only for
-eligible bounded `cat`/`sed -n` requests while the file proof still matches. If
-a command has no complete cheap hot proof, native execution wins on the
-foreground serving path.
+eligible bounded `cat`, `sed -n`, `head`, `tail`, and literal `grep -F`
+requests while the file proof still matches. `file(1)` observations replay only
+from native-precomputed exact output. If a command has no complete cheap hot
+proof, native execution wins on the foreground serving path.
 
 After an agent-chosen bounded file-inspection command, `squire kernel run` may
 launch a short-lived local helper process to prewarm adjacent read windows,
@@ -361,10 +410,12 @@ safety, auditability, and native fallback.
 - Level 3, Virtual Memory-Mapped Workspace: The production-safe subset is
   implemented as read-only workspace acceleration. Bounded eligible file bytes
   are warmed into a daemon-published mmap hot snapshot, and arbitrary bounded
-  `cat`/`sed -n` windows can be materialized from those proven bytes while the
-  file proof still matches. This improves repeated local reads without creating
-  a virtual write layer. There is no edit replay, no mutating CoW overlay, no
-  asynchronous write flush, and no production rollback layer in v1.
+  `cat`, `sed -n`, `head`, `tail`, and literal `grep -F` outputs can be
+  materialized from those proven bytes while the file proof still matches.
+  Native-precomputed `file(1)` outputs may replay from the same bounded path
+  proof. This improves repeated local reads without creating a virtual write
+  layer. There is no edit replay, no mutating CoW overlay, no asynchronous
+  write flush, and no production rollback layer in v1.
 
 - Level 4, Schema-Native IPC: The production-safe subset is structured internal
   diagnostics, binary hot-cache IPC, and mmap snapshot descriptors. Status

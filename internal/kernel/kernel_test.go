@@ -1662,6 +1662,88 @@ func TestProofGatedToolDiscoveryReplays(t *testing.T) {
 	}
 }
 
+func TestProofGatedStaticEnvironmentProbesReplay(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	storeRoot := DefaultStoreRoot(repo)
+	k := New(storeRoot)
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"whoami"},
+		{"hostname"},
+		{"id"},
+		{"uname", "-m"},
+		{"uname", "-s"},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			native := runNative(ctx, repo, argv)
+			if native.ExitCode != 0 {
+				t.Skipf("%s unavailable: %s", displayCommand(argv), native.Stderr)
+			}
+			if got := Classify(argv); got != FamilyEnvironment {
+				t.Fatalf("family = %s, want %s", got, FamilyEnvironment)
+			}
+			first := k.Run(ctx, "test", repo, argv)
+			if first.Mode != ModeReplay {
+				t.Fatalf("first mode = %s, want replay after warm; diagnostics=%v", first.Mode, first.Diagnostics)
+			}
+			assertSameResult(t, first.Stdout, first.Stderr, first.ExitCode, native)
+		})
+	}
+}
+
+func TestProofGatedDirectoryListingReplaysAndInvalidates(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.WriteFile(filepath.Join(repo, "alpha.txt"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "src", "app.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := DefaultStoreRoot(repo)
+	k := New(storeRoot)
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"ls"},
+		{"ls", "-p"},
+		{"ls", "-la"},
+		{"ls", "src"},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			native := runNative(ctx, repo, argv)
+			if native.ExitCode != 0 {
+				t.Skipf("%s unavailable: %s", displayCommand(argv), native.Stderr)
+			}
+			first := k.Run(ctx, "test", repo, argv)
+			if first.Mode != ModeReplay {
+				t.Fatalf("first mode = %s, want replay after warm; diagnostics=%v", first.Mode, first.Diagnostics)
+			}
+			assertSameResult(t, first.Stdout, first.Stderr, first.ExitCode, native)
+		})
+	}
+
+	before := k.Run(ctx, "test", repo, []string{"ls"})
+	if before.Mode != ModeReplay {
+		t.Fatalf("before mode = %s, want replay", before.Mode)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "zeta.txt"), []byte("zeta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after := k.Run(ctx, "test", repo, []string{"ls"})
+	if after.Mode == ModeReplay {
+		t.Fatalf("ls replayed after directory contents changed")
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, runNative(ctx, repo, []string{"ls"}))
+}
+
 func TestToolVersionDoesNotReplayAfterSameStatSignalExecutableChange(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)

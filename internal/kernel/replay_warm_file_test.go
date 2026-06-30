@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -49,6 +50,107 @@ func TestPrewarmedFileReplaysOtherSedRangesAndCat(t *testing.T) {
 		t.Fatalf("cat mode = %s, want replay; diagnostics=%v", resCat.Mode, resCat.Diagnostics)
 	}
 	assertSameResult(t, resCat.Stdout, resCat.Stderr, resCat.ExitCode, runNative(ctx, repo, argvCat))
+}
+
+func TestWarmFileFixedGrepReplayMatchesNative(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "grep.txt")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("alpha\nbeta\ngamma\nbetamax"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+
+	for _, argv := range [][]string{
+		{"grep", "-F", "beta", rel},
+		{"grep", "-q", "-F", "beta", rel},
+		{"grep", "-F", "-q", "beta", rel},
+		{"grep", "-q", "-F", "missing", rel},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			res := k.Run(ctx, "test", repo, argv)
+			if res.Mode != ModeReplay {
+				t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+			}
+			assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+		})
+	}
+}
+
+func TestFileTypeReplayMatchesNative(t *testing.T) {
+	if _, err := exec.LookPath("file"); err != nil {
+		t.Skip("file command unavailable")
+	}
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "component.ts")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("export const value = 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"file", rel}
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode != ModeReplay {
+		t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+}
+
+func TestPrintenvReplayInvalidatesOnValueChange(t *testing.T) {
+	if _, err := exec.LookPath("printenv"); err != nil {
+		t.Skip("printenv command unavailable")
+	}
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	t.Setenv("SQUIRE_TEST_PRINTENV", "one")
+
+	k := New(DefaultStoreRoot(repo))
+	if err := k.Store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := k.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := k.Oracle.ShadowSnapshot(ctx, repo)
+	var phases PhaseTimings
+	argv := []string{"printenv", "SQUIRE_TEST_PRINTENV"}
+	if !k.prewarmProofGatedCandidate(ctx, repo, "test", argv, ws, ledger, &phases, "test printenv warm") {
+		t.Fatalf("printenv candidate did not prewarm")
+	}
+	if err := k.Store.Save(ledger); err != nil {
+		t.Fatal(err)
+	}
+	k.hydratePreparedReplayCache(ledger, k.Store.Signal(), &phases)
+
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode != ModeReplay {
+		t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+
+	t.Setenv("SQUIRE_TEST_PRINTENV", "two")
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("printenv replayed after env value changed")
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, runNative(ctx, repo, argv))
 }
 
 func TestPrewarmSingleWindowThenDifferentWindowAndCat(t *testing.T) {
@@ -113,6 +215,85 @@ func TestWarmFileSedReplayMatchesNativeWithoutFinalNewline(t *testing.T) {
 		t.Fatalf("sed 3,3p mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
 	}
 	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+}
+
+func TestWarmFileHeadTailReplayMatchesNative(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fpath := filepath.Join("src", "window.ts")
+	content := []byte("one\ntwo\nthree\nfour\nfive\nsix\n")
+	if err := os.WriteFile(filepath.Join(repo, fpath), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noNewline := filepath.Join("src", "partial.ts")
+	if err := os.WriteFile(filepath.Join(repo, noNewline), []byte("alpha\nbeta\ngamma"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", fpath}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare any windows")
+	}
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", noNewline}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare partial file")
+	}
+
+	for _, argv := range [][]string{
+		{"head", fpath},
+		{"head", "-n", "3", fpath},
+		{"head", "-3", fpath},
+		{"tail", fpath},
+		{"tail", "-n", "3", fpath},
+		{"tail", "-3", fpath},
+		{"head", "-n", "2", noNewline},
+		{"tail", "-n", "2", noNewline},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			res := k.Run(ctx, "test", repo, argv)
+			if res.Mode != ModeReplay {
+				t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+			}
+			assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+		})
+	}
+}
+
+func TestWarmFileHeadTailDoNotReplayAfterFileChange(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "changing.ts")
+	path := filepath.Join(repo, rel)
+	if err := os.WriteFile(path, []byte("old1\nold2\nold3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+	before := k.Run(ctx, "test", repo, []string{"tail", "-n", "2", rel})
+	if before.Mode != ModeReplay {
+		t.Fatalf("before mode = %s, want replay", before.Mode)
+	}
+	if err := os.WriteFile(path, []byte("new1\nnew2\nnew3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after := k.Run(ctx, "test", repo, []string{"tail", "-n", "2", rel})
+	if after.Mode == ModeReplay {
+		t.Fatalf("tail replayed after file content changed")
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, runNative(ctx, repo, []string{"tail", "-n", "2", rel}))
 }
 
 func TestWarmFileDoesNotReplaySymlinkOutsideWorkspace(t *testing.T) {

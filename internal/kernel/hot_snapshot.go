@@ -500,7 +500,7 @@ func decodeHotSnapshotWarmFileResponse(data []byte, commandKey, epochHash string
 	if err != nil {
 		return hotCacheResponse{}, err
 	}
-	stdout, ok := warmFileCommandOutput(resp.Stdout, argv)
+	stdout, exitCode, ok := warmFileCommandOutput(resp.Stdout, argv)
 	if !ok || len(stdout) > maxFastPathOutputBytes {
 		return hotCacheResponse{}, errors.New("hot snapshot warm-file command output unavailable")
 	}
@@ -510,7 +510,7 @@ func decodeHotSnapshotWarmFileResponse(data []byte, commandKey, epochHash string
 		Hit:          true,
 		Stdout:       stdout,
 		Stderr:       stderr,
-		ExitCode:     0,
+		ExitCode:     exitCode,
 		NativeWallMS: resp.NativeWallMS,
 		StdoutHash:   hashBytes(stdout),
 		StderrHash:   hashBytes(stderr),

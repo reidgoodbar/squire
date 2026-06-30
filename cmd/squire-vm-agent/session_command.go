@@ -22,8 +22,6 @@ func guestSquireSessionCommand(squire string, argv []string) []string {
 	switch guestSessionTransport(argv) {
 	case "preload":
 		command = append(command, "--preload")
-	case "path-shims":
-		command = append(command, "--path-shims")
 	}
 	command = append(command, "--")
 	return append(command, argv...)
@@ -91,9 +89,7 @@ func guestSessionTransport(argv []string) string {
 	switch strings.ToLower(os.Getenv("SQUIRE_VM_GUEST_SESSION_TRANSPORT")) {
 	case "preload":
 		return "preload"
-	case "path-shims", "path_shims", "shims":
-		return "path-shims"
-	case "auto", "":
+	case "auto", "", "path-shims", "path_shims", "shims":
 	default:
 		return "auto"
 	}
@@ -103,7 +99,7 @@ func guestSessionTransport(argv []string) string {
 	if guestPreloadAvailable() {
 		return "preload"
 	}
-	return "path-shims"
+	return "auto"
 }
 
 func guestIsCodexLauncher(firstArg string) bool {

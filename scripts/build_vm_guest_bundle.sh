@@ -203,8 +203,7 @@ if [ -x /usr/bin/cc ] && [ -f /usr/local/share/squire/shims/squire_preload.c ]; 
     cd /usr/local/share/squire/shims
     cc -O3 -DNDEBUG -shared -fPIC -o /usr/local/bin/squire-preload.so squire_preload.c -ldl -lcrypto
     cc -O3 -DNDEBUG -o /usr/local/bin/squire-preload-helper squire_preload_helper.c -lcrypto
-    cc -O3 -DNDEBUG -o /usr/local/bin/squire-mmap-shim squire_mmap_shim.c -lcrypto
-    $BB chmod 0755 /usr/local/bin/squire-preload.so /usr/local/bin/squire-preload-helper /usr/local/bin/squire-mmap-shim
+    $BB chmod 0755 /usr/local/bin/squire-preload.so /usr/local/bin/squire-preload-helper
   ) >/tmp/squire-preload-build.log 2>&1 || {
     $BB cat /tmp/squire-preload-build.log >&2 || true
   }

@@ -283,6 +283,12 @@ func preparedHotProof(cwd string, argv []string) (map[string]string, string, boo
 		return toolVersionHotProof(cwd, argv)
 	case isCommandPathLookup(argv):
 		return commandPathHotProof(cwd, argv)
+	case isStaticEnvironmentProbe(argv):
+		return staticEnvironmentHotProof(cwd, argv)
+	case isPrintenvProbe(argv):
+		return printenvHotProof(cwd, argv)
+	case isDirectoryListing(argv):
+		return directoryListingHotProof(cwd, argv)
 	default:
 		return nil, "", false
 	}
@@ -290,7 +296,7 @@ func preparedHotProof(cwd string, argv []string) (map[string]string, string, boo
 
 func isHotPreparedReplayCandidate(argv []string) bool {
 	argv = normalizeArgvForPolicy(argv)
-	return IsFastPathAllowed(argv) || isRepoSummaryReplayCandidate(argv) || isReplayableFileInspection(argv) || isToolVersionProbe(argv) || isCommandPathLookup(argv)
+	return IsFastPathAllowed(argv) || isRepoSummaryReplayCandidate(argv) || isReplayableFileInspection(argv) || isToolVersionProbe(argv) || isCommandPathLookup(argv) || isStaticEnvironmentProbe(argv) || isPrintenvProbe(argv) || isDirectoryListing(argv)
 }
 
 func repoSummaryHotProof(cwd string, argv []string) (map[string]string, string, bool) {
@@ -428,27 +434,27 @@ func discoverGitDir(cwd string) (string, string, bool) {
 
 func fileInspectionHotProof(cwd string, argv []string) (map[string]string, string, bool) {
 	root := absPath(cwd)
-	argPath := ""
-	if isReplayableCatFileRead(argv) {
-		argPath = argv[1]
-	} else if isBoundedSedPrint(argv) {
-		argPath = argv[3]
-	}
+	argPath := replayableInspectionArgPath(argv)
 	if argPath == "" {
 		return nil, "", false
 	}
 	path := filepath.Clean(filepath.Join(root, argPath))
-	if !pathWithinRoot(path, root) || !isReplayableInspectionName(filepath.Base(path)) {
+	realRoot := root
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = resolvedRoot
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithinRoot(realPath, realRoot) || !isReplayableInspectionName(filepath.Base(path)) {
 		return nil, "", false
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(realPath)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Size() > maxReplayableInspectionFileBytes {
 		return nil, "", false
 	}
 	if isReplayableCatFileRead(argv) && info.Size() > maxFastPathOutputBytes {
 		return nil, "", false
 	}
-	contentHash, ok := hashFile(path)
+	contentHash, ok := hashFile(realPath)
 	if !ok {
 		return nil, "", false
 	}
@@ -470,7 +476,32 @@ func fileInspectionHotProof(cwd string, argv []string) (map[string]string, strin
 	if isBoundedSedPrint(argv) {
 		fp["sed_range"] = hashString(argv[2])
 	}
-	epoch := "hot-file-inspection:" + hashString(root+"|"+rel+"|"+contentHash+"|"+strconv.FormatInt(info.Size(), 10)+"|"+info.Mode().String()+"|"+normalizeArgv(argv))
+	if isBoundedHeadPrint(argv) {
+		_, n, _ := parseHeadTailArgs(argv, false)
+		fp["head_lines"] = hashString(strconv.Itoa(n))
+	}
+	if isBoundedTailPrint(argv) {
+		_, n, _ := parseHeadTailArgs(argv, true)
+		fp["tail_lines"] = hashString(strconv.Itoa(n))
+	}
+	epochInput := root + "|" + rel + "|" + contentHash + "|" + strconv.FormatInt(info.Size(), 10) + "|" + info.Mode().String() + "|" + normalizeArgv(argv)
+	if isFixedGrepFileSearch(argv) {
+		pattern, _, quiet, _ := parseFixedGrepArgs(argv)
+		fp["grep_pattern"] = hashString(pattern)
+		fp["grep_quiet"] = hashString(strconv.FormatBool(quiet))
+	}
+	if isReplayableFileType(argv) {
+		signal, ok := executableSignal(cwd, "file")
+		if !ok {
+			return nil, "", false
+		}
+		envHash := fileCommandEnvHash()
+		fp["tool_path"] = signal.PathHash
+		fp["tool_executable"] = signal.FileHash
+		fp["file_env"] = envHash
+		epochInput += "|" + signal.PathHash + "|" + signal.FileHash + "|" + envHash
+	}
+	epoch := "hot-file-inspection:" + hashString(epochInput)
 	return fp, epoch, true
 }
 
@@ -522,4 +553,49 @@ func commandPathHotProof(cwd string, argv []string) (map[string]string, string, 
 	}
 	epoch := "hot-command-path:" + hashString(fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s", target, whichSignal.PathHash, whichSignal.FileHash, targetSignal.PathHash, targetSignal.FileHash, fp["path_env"], fp["version_env"]))
 	return fp, epoch, true
+}
+
+func staticEnvironmentHotProof(cwd string, argv []string) (map[string]string, string, bool) {
+	fp, epoch, ok := staticEnvironmentProof(cwd, argv)
+	if !ok {
+		return nil, "", false
+	}
+	hot := map[string]string{
+		"hot_cwd":     hashString(absPath(cwd)),
+		"hot_command": preparedReplayLookupKey(cwd, argv),
+	}
+	for k, v := range fp {
+		hot[k] = v
+	}
+	return hot, "hot-" + epoch, true
+}
+
+func printenvHotProof(cwd string, argv []string) (map[string]string, string, bool) {
+	fp, epoch, ok := printenvProof(cwd, argv)
+	if !ok {
+		return nil, "", false
+	}
+	hot := map[string]string{
+		"hot_cwd":     hashString(absPath(cwd)),
+		"hot_command": preparedReplayLookupKey(cwd, argv),
+	}
+	for k, v := range fp {
+		hot[k] = v
+	}
+	return hot, "hot-" + epoch, true
+}
+
+func directoryListingHotProof(cwd string, argv []string) (map[string]string, string, bool) {
+	fp, epoch, ok := directoryListingProof(cwd, argv, WorldState{})
+	if !ok {
+		return nil, "", false
+	}
+	hot := map[string]string{
+		"hot_cwd":     hashString(absPath(cwd)),
+		"hot_command": preparedReplayLookupKey(cwd, argv),
+	}
+	for k, v := range fp {
+		hot[k] = v
+	}
+	return hot, "hot-" + epoch, true
 }

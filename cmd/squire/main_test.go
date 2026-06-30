@@ -95,11 +95,11 @@ func TestCodexVMOptionsForStatus(t *testing.T) {
 }
 
 func TestParseSessionOptions(t *testing.T) {
-	opts, err := parseSessionOptions([]string{"--quiet", "--metadata-only", "--no-maintainer", "--enable-warm-file-replay", "--preload", "--shim", "/tmp/shim", "--preload-lib", "/tmp/preload.dylib", "--", "sh", "-lc", "git status --short"})
+	opts, err := parseSessionOptions([]string{"--quiet", "--metadata-only", "--no-maintainer", "--enable-warm-file-replay", "--preload", "--preload-lib", "/tmp/preload.dylib", "--", "sh", "-lc", "git status --short"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !opts.Quiet || !opts.MetadataOnly || opts.NoWarm || !opts.NoMaintainer || !opts.EnableWarmFileReplay || !opts.Preload || opts.ShimPath != "/tmp/shim" || opts.PreloadLib != "/tmp/preload.dylib" {
+	if !opts.Quiet || !opts.MetadataOnly || opts.NoWarm || !opts.NoMaintainer || !opts.EnableWarmFileReplay || !opts.Preload || opts.PreloadLib != "/tmp/preload.dylib" {
 		t.Fatalf("unexpected opts: %+v", opts)
 	}
 	if !reflect.DeepEqual(opts.Command, []string{"sh", "-lc", "git status --short"}) {
@@ -112,8 +112,8 @@ func TestParseSessionOptions(t *testing.T) {
 	if _, err := parseSessionOptions([]string{"--metadata-only", "--no-warm", "--", "sh"}); err == nil {
 		t.Fatal("conflicting warm options should fail")
 	}
-	if _, err := parseSessionOptions([]string{"--preload", "--path-shims", "--", "sh"}); err == nil {
-		t.Fatal("conflicting transport options should fail")
+	if _, err := parseSessionOptions([]string{"--path-shims", "--", "sh"}); err == nil {
+		t.Fatal("removed path-shim transport should fail")
 	}
 }
 
@@ -323,6 +323,15 @@ func TestBuildPreloadSessionEnvironment(t *testing.T) {
 	if got := envSliceValue(env, "SQUIRE_REAL_GIT"); got != wantGit {
 		t.Fatalf("SQUIRE_REAL_GIT = %q, want %q", got, wantGit)
 	}
+	for _, key := range []string{
+		"SQUIRE_REAL_GIT_PATH_HASH",
+		"SQUIRE_REAL_GIT_FILE_HASH",
+		"SQUIRE_REAL_GIT_STAT_SIGNAL",
+	} {
+		if got := envSliceValue(env, key); got == "" {
+			t.Fatalf("%s should be precomputed for preload hot-path validation", key)
+		}
+	}
 	if got := envSliceValue(env, "SQUIRE_SHIM_REAL_PATH"); got != bin {
 		t.Fatalf("SQUIRE_SHIM_REAL_PATH = %q", got)
 	}
@@ -345,110 +354,6 @@ func TestIsPreloadUnsafeLauncher(t *testing.T) {
 		if isPreloadUnsafeLauncher(command) {
 			t.Fatalf("%s should not be treated as preload unsafe", command)
 		}
-	}
-}
-
-func TestPreferScopedPathShimsForCodexOnDarwin(t *testing.T) {
-	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "darwin")
-	for _, command := range []string{"codex", "/opt/homebrew/bin/codex", "/opt/homebrew/Caskroom/codex/0.140.0/codex-aarch64-apple-darwin"} {
-		if !preferScopedPathShimsForLauncher(command) {
-			t.Fatalf("%s should prefer scoped path shims on darwin", command)
-		}
-	}
-	for _, command := range []string{"node", "claude", "/opt/homebrew/bin/zsh"} {
-		if preferScopedPathShimsForLauncher(command) {
-			t.Fatalf("%s should not prefer scoped path shims on darwin", command)
-		}
-	}
-	t.Setenv("GOOS_OVERRIDE_FOR_TEST", "linux")
-	if preferScopedPathShimsForLauncher("codex") {
-		t.Fatal("codex should not prefer scoped path shims on linux")
-	}
-}
-
-func TestBuildSessionEnvironmentCreatesScopedFallbacks(t *testing.T) {
-	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "bin")
-	shimDir := filepath.Join(tmp, "shimdir")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(shimDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	shim := filepath.Join(tmp, "squire-mmap-shim")
-	writeExecutable(t, shim)
-	for _, name := range []string{"git", "cat", "sed", "which", "python3"} {
-		writeExecutable(t, filepath.Join(bin, name))
-	}
-
-	env, linked, err := buildSessionEnvironment(tmp, shimDir, shim, []string{"PATH=" + bin, "KEEP=1"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if linked < 5 {
-		t.Fatalf("linked = %d, want at least native tools plus command", linked)
-	}
-	pathValue := envSliceValue(env, "PATH")
-	if !strings.HasPrefix(pathValue, shimDir+string(os.PathListSeparator)) {
-		t.Fatalf("PATH was not scoped through shim dir: %q", pathValue)
-	}
-	if got := envSliceValue(env, "SQUIRE_SHIM_REAL_PATH"); got != bin {
-		t.Fatalf("SQUIRE_SHIM_REAL_PATH = %q, want %q", got, bin)
-	}
-	wantGit, err := filepath.EvalSymlinks(filepath.Join(bin, "git"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := envSliceValue(env, "SQUIRE_REAL_GIT"); got != wantGit {
-		t.Fatalf("SQUIRE_REAL_GIT = %q, want %q", got, wantGit)
-	}
-	if !isExecutableFile(filepath.Join(shimDir, "git")) {
-		t.Fatal("git shim was not created")
-	}
-	if !isExecutableFile(filepath.Join(shimDir, "command")) {
-		t.Fatal("external command compatibility shim was not created")
-	}
-}
-
-func TestBuildSessionEnvironmentPassesWarmFileToolsThroughByDefault(t *testing.T) {
-	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "bin")
-	shimDir := filepath.Join(tmp, "shimdir")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(shimDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	shim := filepath.Join(tmp, "squire-mmap-shim")
-	writeExecutable(t, shim)
-	for _, name := range []string{"git", "cat", "sed"} {
-		writeExecutable(t, filepath.Join(bin, name))
-	}
-
-	env, _, err := buildSessionEnvironment(tmp, shimDir, shim, []string{"PATH=" + bin}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"cat", "sed"} {
-		target, err := filepath.EvalSymlinks(filepath.Join(shimDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		want, err := filepath.EvalSymlinks(filepath.Join(bin, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if target != want {
-			t.Fatalf("%s passthrough = %q, want %q", name, target, want)
-		}
-	}
-	if got := envSliceValue(env, "SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"); got != "" {
-		t.Fatalf("warm file replay env = %q, want unset", got)
-	}
-	if !isExecutableFile(filepath.Join(shimDir, "git")) {
-		t.Fatal("git shim should still be created")
 	}
 }
 

@@ -56,43 +56,6 @@ compile_preload() {
   esac
 }
 
-compile_mmap_shim() {
-  stage="$1"
-  shim_src="$stage/shims/squire_mmap_shim.c"
-  shim_out="$install_dir/squire-mmap-shim"
-  if [ ! -f "$shim_src" ]; then
-    echo "squire install: mmap shim source not present in archive"
-    return 0
-  fi
-  if ! have cc; then
-    echo "squire install: cc not found; skipped optional scoped mmap shim"
-    return 0
-  fi
-  tmp_shim="$install_dir/.squire-mmap-shim.tmp.$$"
-  case "$os" in
-    darwin)
-      if cc -O3 -DNDEBUG -o "$tmp_shim" "$shim_src"; then
-        chmod 0755 "$tmp_shim"
-        mv "$tmp_shim" "$shim_out"
-        echo "squire install: installed $shim_out"
-      else
-        rm -f "$tmp_shim"
-        echo "squire install: optional scoped mmap shim build failed; hardened launchers run native"
-      fi
-      ;;
-    linux)
-      if cc -O3 -DNDEBUG -o "$tmp_shim" "$shim_src" -lcrypto; then
-        chmod 0755 "$tmp_shim"
-        mv "$tmp_shim" "$shim_out"
-        echo "squire install: installed $shim_out"
-      else
-        rm -f "$tmp_shim"
-        echo "squire install: optional scoped mmap shim build failed; install libssl headers to enable it"
-      fi
-      ;;
-  esac
-}
-
 compile_preload_helper() {
   stage="$1"
   helper_src="$stage/shims/squire_preload_helper.c"
@@ -176,19 +139,17 @@ print_macos_shell_note() {
 
   if [ -x /opt/homebrew/bin/zsh ]; then
     echo "squire install: macOS note: Homebrew zsh detected at /opt/homebrew/bin/zsh"
-    echo "squire install: shell preload is release-gated; Codex uses scoped mmap shim fallback"
+    echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
     return 0
   fi
   if [ -x /usr/local/bin/zsh ]; then
     echo "squire install: macOS note: Homebrew zsh detected at /usr/local/bin/zsh"
-    echo "squire install: shell preload is release-gated; Codex uses scoped mmap shim fallback"
+    echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
     return 0
   fi
 
   echo "squire install: macOS note: Apple /bin/zsh ignores DYLD_INSERT_LIBRARIES"
-  echo "squire install: Homebrew zsh is optional for future preload-safe shell integrations:"
-  echo "  brew install zsh"
-  echo "squire install: Squire works without it; Codex uses scoped mmap shim fallback"
+  echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
 }
 
 fetch_stdout() {
@@ -301,7 +262,6 @@ mv "$tmp_binary" "$install_dir/squire"
 echo "squire install: installed $install_dir/squire"
 "$install_dir/squire" version --short || true
 compile_preload "$stage"
-compile_mmap_shim "$stage"
 compile_preload_helper "$stage"
 compile_vm_darwin "$stage"
 print_macos_shell_note

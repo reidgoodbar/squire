@@ -1,4 +1,4 @@
-// Experimental generic scoped PATH shim backed by Squire's mmap hot snapshot.
+// Internal mmap proof engine used by Squire's preload transport.
 //
 // The shim is intentionally local and fault-open. It serves only entries whose
 // current invalidation proof can be recomputed in this process. Everything else
@@ -7,8 +7,10 @@
 // Supported direct-mmap surfaces:
 //   - enabled Git metadata fast paths
 //   - proof-gated Git repo summaries: ls-files, status, diff
-//   - warmed bounded file inspection: cat <file>, sed -n <range>p <file>
+//   - warmed bounded file inspection: cat/head/tail <file>, sed -n <range>p <file>
+//   - warmed literal grep checks and native-precomputed file(1) type inspection
 //   - common tool version probes and command path lookups
+//   - static environment probes, printenv <safe-var>, and tight directory listings
 //
 // Required/optional launcher environment:
 //   SQUIRE_STORE_ROOT       optional; otherwise discovered as <gitdir>/squire/kernel
@@ -57,6 +59,7 @@
 #define HOT_CLIENT_STATS_MAX_BYTES (1024 * 1024)
 #define MAX_FAST_OUTPUT_BYTES (64 * 1024)
 #define MAX_WARM_FILE_BYTES (256 * 1024)
+#define MAX_EXECUTABLE_HASH_BYTES (64 * 1024 * 1024)
 #define MAX_ARGC 64
 #define PATH_BUF 4096
 #define HASH_HEX 65
@@ -377,7 +380,7 @@ static void exec_real_command(int argc, char **argv) {
 	}
 	argv[0] = (char *)tool;
 	execvp(tool, argv);
-	fprintf(stderr, "squire mmap shim: exec native %s failed: %s\n", tool, strerror(errno));
+	fprintf(stderr, "squire mmap proof: exec native %s failed: %s\n", tool, strerror(errno));
 	_exit(127);
 }
 #endif
@@ -754,6 +757,45 @@ static int read_file_hash(const char *path, char out[HASH_HEX], unsigned char **
 	return 1;
 }
 
+static int read_executable_hash(const char *path, char out[HASH_HEX]) {
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+	struct stat st;
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > MAX_EXECUTABLE_HASH_BYTES) {
+		close(fd);
+		return 0;
+	}
+	unsigned char digest[32];
+	static const char hex[] = "0123456789abcdef";
+	unsigned char buf[16384];
+	SQUIRE_SHA256_CTX ctx;
+	SQUIRE_SHA256_Init(&ctx);
+	for (;;) {
+		ssize_t n = read(fd, buf, sizeof(buf));
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			close(fd);
+			return 0;
+		}
+		if (n == 0) {
+			break;
+		}
+		SQUIRE_SHA256_Update(&ctx, buf, (size_t)n);
+	}
+	close(fd);
+	SQUIRE_SHA256_Final(digest, &ctx);
+	for (int i = 0; i < 32; i++) {
+		out[i * 2] = hex[digest[i] >> 4];
+		out[i * 2 + 1] = hex[digest[i] & 0x0f];
+	}
+	out[64] = '\0';
+	return 1;
+}
+
 static int read_packed_ref(const char *git_dir, const char *ref, char out[128]) {
 	char packed_path[PATH_BUF];
 	if (!join_path(packed_path, sizeof(packed_path), git_dir, "packed-refs")) {
@@ -942,6 +984,9 @@ static int resolve_executable(const char *cwd, const char *name, char out[PATH_B
 	}
 	char path_copy[PATH_BUF * 4];
 	snprintf(path_copy, sizeof(path_copy), "%s", proof_path_env());
+	if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+		fprintf(stderr, "squire mmap proof debug: resolve file path_env=%s\n", path_copy);
+	}
 	char *save = NULL;
 	for (char *dir = strtok_r(path_copy, ":", &save); dir != NULL; dir = strtok_r(NULL, ":", &save)) {
 		char absdir[PATH_BUF];
@@ -958,6 +1003,9 @@ static int resolve_executable(const char *cwd, const char *name, char out[PATH_B
 		}
 		struct stat st;
 		if (stat(candidate, &st) != 0 || S_ISDIR(st.st_mode) || (st.st_mode & 0111) == 0) {
+			if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+				fprintf(stderr, "squire mmap proof debug: resolve file reject candidate=%s errno=%d\n", candidate, errno);
+			}
 			continue;
 		}
 		char resolved[PATH_BUF];
@@ -966,7 +1014,13 @@ static int resolve_executable(const char *cwd, const char *name, char out[PATH_B
 		} else {
 			snprintf(out, PATH_BUF, "%s", candidate);
 		}
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+			fprintf(stderr, "squire mmap proof debug: resolve file accept candidate=%s resolved=%s\n", candidate, out);
+		}
 		return 1;
+	}
+	if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+		fprintf(stderr, "squire mmap proof debug: resolve file exhausted\n");
 	}
 	return 0;
 }
@@ -978,21 +1032,48 @@ static int executable_signal_for(const char *cwd, const char *name, executable_s
 	}
 	struct stat st;
 	if (stat(path, &st) != 0 || S_ISDIR(st.st_mode) || (st.st_mode & 0111) == 0) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+			fprintf(stderr, "squire mmap proof debug: executable file stat reject path=%s errno=%d\n", path, errno);
+		}
 		return 0;
 	}
 	char mode[32];
 	if (!mode_string(st.st_mode, mode)) {
-		return 0;
-	}
-	char content_hash[HASH_HEX];
-	if (!read_file_hash(path, content_hash, NULL, NULL)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+			fprintf(stderr, "squire mmap proof debug: executable file mode reject path=%s\n", path);
+		}
 		return 0;
 	}
 	char stat_signal[256];
 	if (!file_stat_signal(&st, mode, stat_signal, sizeof(stat_signal))) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+			fprintf(stderr, "squire mmap proof debug: executable file stat-signal reject path=%s\n", path);
+		}
 		return 0;
 	}
 	sha256_hex_str(path, sig->path_hash);
+	char env_key[128], path_hash_key[160], file_hash_key[160], stat_signal_key[160];
+	env_key_for_tool(name, env_key);
+	snprintf(path_hash_key, sizeof(path_hash_key), "%s_PATH_HASH", env_key);
+	snprintf(file_hash_key, sizeof(file_hash_key), "%s_FILE_HASH", env_key);
+	snprintf(stat_signal_key, sizeof(stat_signal_key), "%s_STAT_SIGNAL", env_key);
+	const char *cached_path_hash = getenv(path_hash_key);
+	const char *cached_file_hash = getenv(file_hash_key);
+	const char *cached_stat_signal = getenv(stat_signal_key);
+	if (cached_path_hash != NULL && cached_file_hash != NULL && cached_stat_signal != NULL &&
+	    strcmp(cached_path_hash, sig->path_hash) == 0 &&
+	    strcmp(cached_stat_signal, stat_signal) == 0 &&
+	    strlen(cached_file_hash) == HASH_HEX - 1) {
+		snprintf(sig->file_hash, HASH_HEX, "%s", cached_file_hash);
+		return 1;
+	}
+	char content_hash[HASH_HEX];
+	if (!read_executable_hash(path, content_hash)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
+			fprintf(stderr, "squire mmap proof debug: executable file hash reject path=%s errno=%d\n", path, errno);
+		}
+		return 0;
+	}
 	char signal[PATH_BUF + HASH_HEX + 256];
 	snprintf(signal, sizeof(signal), "%s|%s|%s", base_name(path), content_hash, stat_signal);
 	sha256_hex_str(signal, sig->file_hash);
@@ -1026,6 +1107,131 @@ static int deterministic_version_env_hash(char out[HASH_HEX]) {
 	sha256_hex_buf(&b, out);
 	bytes_free(&b);
 	return 1;
+}
+
+static int hash_selected_environment(const char **keys, size_t key_count, char out[HASH_HEX]) {
+	byte_buf b = {0};
+	for (size_t i = 0; i < key_count; i++) {
+		if (i > 0 && !bytes_append_byte(&b, '\n')) {
+			bytes_free(&b);
+			return 0;
+		}
+		const char *value = getenv(keys[i]);
+		if (value == NULL) {
+			value = "";
+		}
+		char h[HASH_HEX];
+		sha256_hex_str(value, h);
+		if (!bytes_append_str(&b, keys[i]) || !bytes_append_byte(&b, '=') || !bytes_append_str(&b, h)) {
+			bytes_free(&b);
+			return 0;
+		}
+	}
+	sha256_hex_buf(&b, out);
+	bytes_free(&b);
+	return 1;
+}
+
+static int deterministic_static_env_hash(char out[HASH_HEX]) {
+	static const char *keys[] = {
+		"USER", "LOGNAME", "HOME", "SHELL", "HOSTNAME", "LANG", "LC_ALL", "TZ",
+	};
+	return hash_selected_environment(keys, sizeof(keys) / sizeof(keys[0]), out);
+}
+
+static int file_command_env_hash(char out[HASH_HEX]) {
+	static const char *keys[] = {
+		"LC_ALL", "LC_CTYPE", "LANG", "MAGIC",
+	};
+	return hash_selected_environment(keys, sizeof(keys) / sizeof(keys[0]), out);
+}
+
+static int sensitive_env_name(const char *name) {
+	if (name == NULL || name[0] == '\0') {
+		return 1;
+	}
+	char upper[160];
+	size_t n = strlen(name);
+	if (n >= sizeof(upper)) {
+		return 1;
+	}
+	for (size_t i = 0; i <= n; i++) {
+		upper[i] = (char)toupper((unsigned char)name[i]);
+	}
+	static const char *markers[] = {
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "CREDENTIAL", "COOKIE", "BEARER",
+		"PRIVATE", "API_KEY", "APIKEY", "ACCESS_KEY", "REFRESH_TOKEN", "SESSION_TOKEN",
+	};
+	for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+		if (strstr(upper, markers[i]) != NULL) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int safe_printenv_name(const char *name) {
+	if (name == NULL || name[0] == '\0' || strlen(name) > 128 || sensitive_env_name(name)) {
+		return 0;
+	}
+	for (size_t i = 0; name[i] != '\0'; i++) {
+		unsigned char c = (unsigned char)name[i];
+		if (i == 0 && isdigit(c)) {
+			return 0;
+		}
+		if (!(isalnum(c) || c == '_')) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int compare_gids(const void *a, const void *b) {
+	gid_t ia = *(const gid_t *)a;
+	gid_t ib = *(const gid_t *)b;
+	return (ia > ib) - (ia < ib);
+}
+
+static int process_identity_signal(char out[HASH_HEX]) {
+	int group_count = getgroups(0, NULL);
+	if (group_count < 0 || group_count > 4096) {
+		group_count = 0;
+	}
+	gid_t *groups = NULL;
+	if (group_count > 0) {
+		groups = (gid_t *)calloc((size_t)group_count, sizeof(gid_t));
+		if (groups == NULL) {
+			return 0;
+		}
+		if (getgroups(group_count, groups) < 0) {
+			free(groups);
+			groups = NULL;
+			group_count = 0;
+		}
+	}
+	if (groups != NULL && group_count > 1) {
+		qsort(groups, (size_t)group_count, sizeof(gid_t), compare_gids);
+	}
+	byte_buf b = {0};
+	char line[128];
+	snprintf(line, sizeof(line), "uid=%lld", (long long)getuid());
+	int ok = bytes_append_str(&b, line) && bytes_append_byte(&b, '\n');
+	snprintf(line, sizeof(line), "euid=%lld", (long long)geteuid());
+	ok = ok && bytes_append_str(&b, line) && bytes_append_byte(&b, '\n');
+	snprintf(line, sizeof(line), "gid=%lld", (long long)getgid());
+	ok = ok && bytes_append_str(&b, line) && bytes_append_byte(&b, '\n');
+	snprintf(line, sizeof(line), "egid=%lld", (long long)getegid());
+	ok = ok && bytes_append_str(&b, line);
+	for (int i = 0; ok && i < group_count; i++) {
+		snprintf(line, sizeof(line), "\ngroup=%lld", (long long)groups[i]);
+		ok = bytes_append_str(&b, line);
+	}
+	if (ok) {
+		sha256_hex_buf(&b, out);
+	}
+	bytes_free(&b);
+	free(groups);
+	return ok;
 }
 
 static void file_hash_or_missing(const char *path, char out[HASH_HEX + 16]) {
@@ -1835,6 +2041,10 @@ static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
 	if (getcwd(out->cwd, sizeof(out->cwd)) == NULL) {
 		return 0;
 	}
+	char cwd_real[PATH_BUF];
+	if (realpath(out->cwd, cwd_real) != NULL) {
+		snprintf(out->cwd, sizeof(out->cwd), "%s", cwd_real);
+	}
 	out->argc = 0;
 	const char *tool = base_name(argv[0]);
 	snprintf(out->storage[out->argc], PATH_BUF, "%s", tool);
@@ -1872,7 +2082,11 @@ static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
 			if (!absolute_path(argv[i + 1], out->cwd, resolved)) {
 				return 0;
 			}
-			snprintf(out->cwd, sizeof(out->cwd), "%s", resolved);
+			if (realpath(resolved, cwd_real) != NULL) {
+				snprintf(out->cwd, sizeof(out->cwd), "%s", cwd_real);
+			} else {
+				snprintf(out->cwd, sizeof(out->cwd), "%s", resolved);
+			}
 			i += 2;
 			changed = 1;
 			continue;
@@ -1882,7 +2096,11 @@ static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
 			if (!absolute_path(arg + 2, out->cwd, resolved)) {
 				return 0;
 			}
-			snprintf(out->cwd, sizeof(out->cwd), "%s", resolved);
+			if (realpath(resolved, cwd_real) != NULL) {
+				snprintf(out->cwd, sizeof(out->cwd), "%s", cwd_real);
+			} else {
+				snprintf(out->cwd, sizeof(out->cwd), "%s", resolved);
+			}
 			i++;
 			changed = 1;
 			continue;
@@ -2064,7 +2282,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 	int ok = 0;
 	if (is_git_ls_files(inv)) {
 		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
-			fprintf(stderr, "squire mmap shim debug: ls-files index=%s config=%s tool=%s\n", index_fp, config_fp, tool.file_hash);
+			fprintf(stderr, "squire mmap proof debug: ls-files index=%s config=%s tool=%s\n", index_fp, config_fp, tool.file_hash);
 		}
 		ok = bytes_append_str(&b, repo_root) &&
 		     bytes_append_byte(&b, '|') &&
@@ -2093,7 +2311,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 			return 0;
 		}
 		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
-			fprintf(stderr, "squire mmap shim debug: status head=%s branch=%s index=%s config=%s ignore=%s tree=%s content=%s tool=%s\n", head, branch, index_fp, config_fp, ignore_fp, tree, content, tool.file_hash);
+			fprintf(stderr, "squire mmap proof debug: status head=%s branch=%s index=%s config=%s ignore=%s tree=%s content=%s tool=%s\n", head, branch, index_fp, config_fp, ignore_fp, tree, content, tool.file_hash);
 		}
 		ok = bytes_append_str(&b, repo_root) &&
 		     bytes_append_byte(&b, '|') &&
@@ -2128,7 +2346,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 			return 0;
 		}
 		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
-			fprintf(stderr, "squire mmap shim debug: diff index=%s config=%s attr=%s tree=%s content=%s tool=%s\n", index_fp, config_fp, attr_fp, tree, content, tool.file_hash);
+			fprintf(stderr, "squire mmap proof debug: diff index=%s config=%s attr=%s tree=%s content=%s tool=%s\n", index_fp, config_fp, attr_fp, tree, content, tool.file_hash);
 		}
 		ok = bytes_append_str(&b, repo_root) &&
 		     bytes_append_byte(&b, '|') &&
@@ -2278,6 +2496,327 @@ static int command_path_epoch(policy_invocation *inv, char epoch[256]) {
 	return ok;
 }
 
+static int is_static_environment_probe(policy_invocation *inv) {
+	if (inv->argc < 1 || inv->argc > 2) {
+		return 0;
+	}
+	const char *name = inv->argv[0];
+	if (strcmp(name, "whoami") == 0 || strcmp(name, "hostname") == 0 || strcmp(name, "id") == 0) {
+		return inv->argc == 1;
+	}
+	if (strcmp(name, "uname") == 0) {
+		if (inv->argc == 1) {
+			return 1;
+		}
+		const char *arg = inv->argv[1];
+		return strcmp(arg, "-a") == 0 || strcmp(arg, "-m") == 0 || strcmp(arg, "-n") == 0 ||
+		       strcmp(arg, "-r") == 0 || strcmp(arg, "-s") == 0 || strcmp(arg, "-v") == 0;
+	}
+	return 0;
+}
+
+static int static_environment_epoch(policy_invocation *inv, char epoch[256]) {
+	if (!is_static_environment_probe(inv)) {
+		return 0;
+	}
+	executable_signal sig;
+	if (!executable_signal_for(inv->cwd, inv->argv[0], &sig)) {
+		return 0;
+	}
+	char path_hash[HASH_HEX], env_hash[HASH_HEX], identity_hash[HASH_HEX], input_hash[HASH_HEX];
+	sha256_hex_str(proof_path_env(), path_hash);
+	if (!deterministic_static_env_hash(env_hash) || !process_identity_signal(identity_hash)) {
+		return 0;
+	}
+	char hostname[256];
+	if (gethostname(hostname, sizeof(hostname)) != 0) {
+		hostname[0] = '\0';
+	}
+	hostname[sizeof(hostname) - 1] = '\0';
+	byte_buf b = {0};
+	int ok = bytes_append_str(&b, inv->argv[0]) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_argv_norm(&b, inv) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.path_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.file_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, path_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, env_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, hostname) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, identity_hash);
+	if (ok) {
+		sha256_hex_buf(&b, input_hash);
+		snprintf(epoch, 256, "hot-static-env:%s", input_hash);
+	}
+	bytes_free(&b);
+	return ok;
+}
+
+static int is_printenv_probe(policy_invocation *inv) {
+	return inv->argc == 2 && strcmp(inv->argv[0], "printenv") == 0 && safe_printenv_name(inv->argv[1]);
+}
+
+static int printenv_epoch(policy_invocation *inv, char epoch[256]) {
+	if (!is_printenv_probe(inv)) {
+		return 0;
+	}
+	executable_signal sig;
+	if (!executable_signal_for(inv->cwd, "printenv", &sig)) {
+		return 0;
+	}
+	const char *name = inv->argv[1];
+	const char *value = getenv(name);
+	const char *exists = value == NULL ? "false" : "true";
+	if (value == NULL) {
+		value = "";
+	}
+	char path_hash[HASH_HEX], input_hash[HASH_HEX];
+	sha256_hex_str(proof_path_env(), path_hash);
+	byte_buf b = {0};
+	int ok = bytes_append_str(&b, name) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, exists) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, value) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.path_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.file_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, path_hash);
+	if (ok) {
+		sha256_hex_buf(&b, input_hash);
+		snprintf(epoch, 256, "hot-printenv:%s", input_hash);
+	}
+	bytes_free(&b);
+	return ok;
+}
+
+static int supported_ls_flag(const char *flag) {
+	return strcmp(flag, "-p") == 0 || strcmp(flag, "-la") == 0 || strcmp(flag, "-al") == 0;
+}
+
+static int clean_ls_relative_path(const char *input, char out[PATH_BUF]) {
+	if (input == NULL || input[0] == '\0' || input[0] == '/') {
+		return 0;
+	}
+	char tmp[PATH_BUF];
+	snprintf(tmp, sizeof(tmp), "%s", input);
+	char *parts[256];
+	int count = 0;
+	char *save = NULL;
+	for (char *part = strtok_r(tmp, "/", &save); part != NULL; part = strtok_r(NULL, "/", &save)) {
+		if (part[0] == '\0' || strcmp(part, ".") == 0) {
+			continue;
+		}
+		if (strcmp(part, "..") == 0) {
+			return 0;
+		}
+		if (count >= 256) {
+			return 0;
+		}
+		parts[count++] = part;
+	}
+	if (count == 0) {
+		snprintf(out, PATH_BUF, ".");
+		return 1;
+	}
+	out[0] = '\0';
+	for (int i = 0; i < count; i++) {
+		size_t used = strlen(out);
+		int n = snprintf(out + used, PATH_BUF - used, "%s%s", i > 0 ? "/" : "", parts[i]);
+		if (n < 0 || (size_t)n >= PATH_BUF - used) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int parse_directory_listing(policy_invocation *inv, char target[PATH_BUF], char flag[16]) {
+	if (inv->argc < 1 || inv->argc > 3 || strcmp(inv->argv[0], "ls") != 0) {
+		return 0;
+	}
+	const char *path = ".";
+	flag[0] = '\0';
+	if (inv->argc == 2) {
+		if (inv->argv[1][0] == '-') {
+			if (!supported_ls_flag(inv->argv[1])) {
+				return 0;
+			}
+			snprintf(flag, 16, "%s", inv->argv[1]);
+		} else {
+			path = inv->argv[1];
+		}
+	} else if (inv->argc == 3) {
+		if (!supported_ls_flag(inv->argv[1]) || inv->argv[2][0] == '-') {
+			return 0;
+		}
+		snprintf(flag, 16, "%s", inv->argv[1]);
+		path = inv->argv[2];
+	}
+	return clean_ls_relative_path(path, target);
+}
+
+static int directory_listing_env_hash(char out[HASH_HEX]) {
+	static const char *keys[] = {
+		"LC_ALL", "LC_COLLATE", "LC_CTYPE", "LANG", "TZ", "COLUMNS", "CLICOLOR", "CLICOLOR_FORCE",
+		"LSCOLORS", "LS_COLORS", "BLOCKSIZE",
+	};
+	return hash_selected_environment(keys, sizeof(keys) / sizeof(keys[0]), out);
+}
+
+static int path_within_root_c(const char *path, const char *root) {
+	size_t root_len = strlen(root);
+	return strcmp(path, root) == 0 || (strncmp(path, root, root_len) == 0 && path[root_len] == '/');
+}
+
+static int directory_entry_epoch(const char *dir, char out[HASH_HEX]) {
+	struct stat st;
+	if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		return 0;
+	}
+	char mode[32], stat_signal[256];
+	if (!mode_string(st.st_mode, mode) || !file_stat_signal(&st, mode, stat_signal, sizeof(stat_signal))) {
+		return 0;
+	}
+	string_list parts = {0};
+	byte_buf self = {0};
+	int ok = bytes_append_str(&self, "self") && bytes_append_byte(&self, 0) && bytes_append_str(&self, stat_signal);
+	if (ok) {
+		ok = list_add_bytes(&parts, self.data, self.len);
+	}
+	bytes_free(&self);
+	DIR *d = opendir(dir);
+	if (!ok || d == NULL) {
+		list_free(&parts);
+		return 0;
+	}
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		if (parts.len > 2000) {
+			closedir(d);
+			list_free(&parts);
+			return 0;
+		}
+		char path[PATH_BUF];
+		if (!join_path(path, sizeof(path), dir, de->d_name)) {
+			closedir(d);
+			list_free(&parts);
+			return 0;
+		}
+		struct stat entry_st;
+		if (lstat(path, &entry_st) != 0 || !mode_string(entry_st.st_mode, mode) ||
+		    !file_stat_signal(&entry_st, mode, stat_signal, sizeof(stat_signal))) {
+			closedir(d);
+			list_free(&parts);
+			return 0;
+		}
+		char link_target[PATH_BUF] = "";
+		if (S_ISLNK(entry_st.st_mode)) {
+			ssize_t n = readlink(path, link_target, sizeof(link_target) - 1);
+			if (n >= 0) {
+				link_target[n] = '\0';
+			} else {
+				link_target[0] = '\0';
+			}
+		}
+		char size_buf[64];
+		snprintf(size_buf, sizeof(size_buf), "%lld", (long long)entry_st.st_size);
+		byte_buf line = {0};
+		ok = bytes_append_str(&line, de->d_name) &&
+		     bytes_append_byte(&line, 0) &&
+		     bytes_append_str(&line, S_ISDIR(entry_st.st_mode) ? "true" : "false") &&
+		     bytes_append_byte(&line, 0) &&
+		     bytes_append_str(&line, size_buf) &&
+		     bytes_append_byte(&line, 0) &&
+		     bytes_append_str(&line, mode) &&
+		     bytes_append_byte(&line, 0) &&
+		     bytes_append_str(&line, stat_signal) &&
+		     bytes_append_byte(&line, 0) &&
+		     bytes_append_str(&line, link_target);
+		if (ok) {
+			ok = list_add_bytes(&parts, line.data, line.len);
+		}
+		bytes_free(&line);
+		if (!ok) {
+			closedir(d);
+			list_free(&parts);
+			return 0;
+		}
+	}
+	closedir(d);
+	ok = hash_joined_lines(&parts, out);
+	list_free(&parts);
+	return ok;
+}
+
+static int directory_listing_epoch(policy_invocation *inv, char epoch[256]) {
+	char target[PATH_BUF], flag[16];
+	if (!parse_directory_listing(inv, target, flag)) {
+		return 0;
+	}
+	char repo_root[PATH_BUF], git_dir[PATH_BUF];
+	if (!discover_git_dir(inv->cwd, repo_root, git_dir)) {
+		return 0;
+	}
+	char root_real[PATH_BUF];
+	if (realpath(repo_root, root_real) == NULL) {
+		snprintf(root_real, sizeof(root_real), "%s", repo_root);
+	}
+	char target_joined[PATH_BUF], target_real[PATH_BUF];
+	if (!join_path(target_joined, sizeof(target_joined), inv->cwd, target) || realpath(target_joined, target_real) == NULL) {
+		return 0;
+	}
+	if (!path_within_root_c(target_real, root_real)) {
+		return 0;
+	}
+	struct stat st;
+	if (stat(target_real, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		return 0;
+	}
+	executable_signal sig;
+	if (!executable_signal_for(inv->cwd, "ls", &sig)) {
+		return 0;
+	}
+	char dir_epoch[HASH_HEX], env_hash[HASH_HEX], passwd_fp[HASH_HEX + 16], group_fp[HASH_HEX + 16], localtime_fp[HASH_HEX + 16], input_hash[HASH_HEX];
+	if (!directory_entry_epoch(target_real, dir_epoch) || !directory_listing_env_hash(env_hash)) {
+		return 0;
+	}
+	file_hash_or_missing("/etc/passwd", passwd_fp);
+	file_hash_or_missing("/etc/group", group_fp);
+	file_hash_or_missing("/etc/localtime", localtime_fp);
+	byte_buf b = {0};
+	int ok = bytes_append_str(&b, target_real) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_argv_norm(&b, inv) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, dir_epoch) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, env_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.file_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, passwd_fp) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, group_fp) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, localtime_fp);
+	if (ok) {
+		sha256_hex_buf(&b, input_hash);
+		snprintf(epoch, 256, "hot-directory-listing:%s", input_hash);
+	}
+	bytes_free(&b);
+	return ok;
+}
+
 static int is_sensitive_name(const char *name) {
 	char lower[PATH_BUF];
 	size_t n = strlen(name);
@@ -2362,6 +2901,183 @@ static int parse_sed_range(const char *expr, int *start, int *end) {
 	return *start > 0 && *end >= *start && *end - *start <= 500 && *end <= 10000;
 }
 
+static int parse_head_tail_count(const char *s, int tail, int *count) {
+	if (s == NULL || s[0] == '\0') {
+		return 0;
+	}
+	if (tail && s[0] == '+') {
+		return 0;
+	}
+	int n = 0;
+	for (const char *p = s; *p != '\0'; p++) {
+		if (!isdigit((unsigned char)*p)) {
+			return 0;
+		}
+		n = n * 10 + (*p - '0');
+		if (n > 1000) {
+			return 0;
+		}
+	}
+	*count = n;
+	return n > 0;
+}
+
+static int parse_head_tail_args(policy_invocation *inv, int tail, const char **path, int *count) {
+	if (inv->argc < 2 || inv->argc > 4) {
+		return 0;
+	}
+	*count = 10;
+	int path_index = 1;
+	if (inv->argc >= 3) {
+		const char *arg = inv->argv[1];
+		if (strcmp(arg, "-n") == 0) {
+			if (inv->argc != 4 || !parse_head_tail_count(inv->argv[2], tail, count)) {
+				return 0;
+			}
+			path_index = 3;
+		} else if (strncmp(arg, "-n", 2) == 0 && strlen(arg) > 2) {
+			if (inv->argc != 3 || !parse_head_tail_count(arg + 2, tail, count)) {
+				return 0;
+			}
+			path_index = 2;
+		} else if (arg[0] == '-' && arg[1] != '\0') {
+			if (inv->argc != 3 || !parse_head_tail_count(arg + 1, tail, count)) {
+				return 0;
+			}
+			path_index = 2;
+		} else {
+			return 0;
+		}
+	}
+	if (path_index >= inv->argc) {
+		return 0;
+	}
+	*path = inv->argv[path_index];
+	return 1;
+}
+
+static int is_file_type_candidate(policy_invocation *inv) {
+	if (inv->argc != 2 || strcmp(inv->argv[0], "file") != 0) {
+		return 0;
+	}
+	char rel[PATH_BUF];
+	if (!clean_relative_path(inv->argv[1], rel)) {
+		return 0;
+	}
+	return is_replayable_name(base_name(rel));
+}
+
+static int file_type_epoch(policy_invocation *inv, char epoch[256]) {
+	if (!is_file_type_candidate(inv)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip candidate argc=%d argv0=%s\n",
+			        inv != NULL ? inv->argc : -1,
+			        (inv != NULL && inv->argc > 0) ? inv->argv[0] : "");
+		}
+		return 0;
+	}
+	char rel[PATH_BUF];
+	if (!clean_relative_path(inv->argv[1], rel)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip rel path=%s\n", inv->argv[1]);
+		}
+		return 0;
+	}
+	char root_real[PATH_BUF], path_joined[PATH_BUF], path_real[PATH_BUF];
+	if (realpath(inv->cwd, root_real) == NULL ||
+	    !join_path(path_joined, sizeof(path_joined), inv->cwd, rel) ||
+	    realpath(path_joined, path_real) == NULL ||
+	    !path_within_root_c(path_real, root_real)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip path cwd=%s rel=%s\n", inv->cwd, rel);
+		}
+		return 0;
+	}
+	struct stat st;
+	if (stat(path_real, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > MAX_WARM_FILE_BYTES) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip stat path=%s\n", path_real);
+		}
+		return 0;
+	}
+	char content_hash[HASH_HEX], mode[32], env_hash[HASH_HEX], input_hash[HASH_HEX];
+	if (!read_file_hash(path_real, content_hash, NULL, NULL) || !mode_string(st.st_mode, mode) || !file_command_env_hash(env_hash)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip local-proof path=%s\n", path_real);
+		}
+		return 0;
+	}
+	executable_signal sig;
+	if (!executable_signal_for(inv->cwd, "file", &sig)) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file skip tool cwd=%s\n", inv->cwd);
+		}
+		return 0;
+	}
+	char size_buf[64];
+	snprintf(size_buf, sizeof(size_buf), "%lld", (long long)st.st_size);
+	byte_buf b = {0};
+	int ok = bytes_append_str(&b, inv->cwd) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, rel) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, content_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, size_buf) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, mode) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_argv_norm(&b, inv) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.path_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, sig.file_hash) &&
+	         bytes_append_byte(&b, '|') &&
+	         bytes_append_str(&b, env_hash);
+	if (ok) {
+		sha256_hex_buf(&b, input_hash);
+		snprintf(epoch, 256, "hot-file-inspection:%s", input_hash);
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: file path=%s rel=%s content=%s size=%s mode=%s tool_path=%s tool=%s env=%s epoch=%s\n",
+			        path_real, rel, content_hash, size_buf, mode, sig.path_hash, sig.file_hash, env_hash, epoch);
+		}
+	}
+	bytes_free(&b);
+	return ok;
+}
+
+static int parse_fixed_grep_args(policy_invocation *inv, const char **pattern, const char **path, int *quiet) {
+	if (inv->argc != 4 && inv->argc != 5) {
+		return 0;
+	}
+	if (strcmp(inv->argv[0], "grep") != 0) {
+		return 0;
+	}
+	*quiet = 0;
+	if (inv->argc == 4 && strcmp(inv->argv[1], "-F") == 0) {
+		*pattern = inv->argv[2];
+		*path = inv->argv[3];
+	} else if (inv->argc == 5 && strcmp(inv->argv[1], "-F") == 0 && strcmp(inv->argv[2], "-q") == 0) {
+		*quiet = 1;
+		*pattern = inv->argv[3];
+		*path = inv->argv[4];
+	} else if (inv->argc == 5 && strcmp(inv->argv[1], "-q") == 0 && strcmp(inv->argv[2], "-F") == 0) {
+		*quiet = 1;
+		*pattern = inv->argv[3];
+		*path = inv->argv[4];
+	} else {
+		return 0;
+	}
+	if (*pattern == NULL || (*pattern)[0] == '\0' || (*pattern)[0] == '-' || strchr(*pattern, '\n') != NULL || strchr(*pattern, '\r') != NULL) {
+		return 0;
+	}
+	char rel[PATH_BUF];
+	if (!clean_relative_path(*path, rel) || !is_replayable_name(base_name(rel))) {
+		return 0;
+	}
+	return 1;
+}
+
 static int warm_file_replay_enabled(void) {
 	return env_truthy("SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY") || env_truthy("SQUIRE_SHIM_REQUIRE_HIT");
 }
@@ -2374,13 +3090,25 @@ static int is_warm_file_candidate(policy_invocation *inv) {
 		int start, end;
 		return parse_sed_range(inv->argv[2], &start, &end);
 	}
+	if (strcmp(inv->argv[0], "head") == 0 || strcmp(inv->argv[0], "tail") == 0) {
+		const char *path = NULL;
+		int count = 0;
+		return parse_head_tail_args(inv, strcmp(inv->argv[0], "tail") == 0, &path, &count);
+	}
+	if (strcmp(inv->argv[0], "grep") == 0) {
+		const char *pattern = NULL;
+		const char *path = NULL;
+		int quiet = 0;
+		return parse_fixed_grep_args(inv, &pattern, &path, &quiet);
+	}
 	return 0;
 }
 
-static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoch[256], char path[PATH_BUF], int *sed_start, int *sed_end) {
+static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoch[256], char path[PATH_BUF], int *sed_start, int *sed_end, int *line_count) {
 	const char *arg_path = NULL;
 	*sed_start = 0;
 	*sed_end = 0;
+	*line_count = 0;
 	if (inv->argc == 2 && strcmp(inv->argv[0], "cat") == 0) {
 		arg_path = inv->argv[1];
 	} else if (inv->argc == 4 && strcmp(inv->argv[0], "sed") == 0 && strcmp(inv->argv[1], "-n") == 0) {
@@ -2388,6 +3116,16 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 			return 0;
 		}
 		arg_path = inv->argv[3];
+	} else if (strcmp(inv->argv[0], "head") == 0 || strcmp(inv->argv[0], "tail") == 0) {
+		if (!parse_head_tail_args(inv, strcmp(inv->argv[0], "tail") == 0, &arg_path, line_count)) {
+			return 0;
+		}
+	} else if (strcmp(inv->argv[0], "grep") == 0) {
+		const char *pattern = NULL;
+		int quiet = 0;
+		if (!parse_fixed_grep_args(inv, &pattern, &arg_path, &quiet)) {
+			return 0;
+		}
 	} else {
 		return 0;
 	}
@@ -2402,6 +3140,11 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 	if (!join_path(path, PATH_BUF, inv->cwd, rel)) {
 		return 0;
 	}
+	char root_real[PATH_BUF], path_real[PATH_BUF];
+	if (realpath(inv->cwd, root_real) == NULL || realpath(path, path_real) == NULL || !path_within_root_c(path_real, root_real)) {
+		return 0;
+	}
+	snprintf(path, PATH_BUF, "%s", path_real);
 	struct stat st;
 	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > MAX_WARM_FILE_BYTES) {
 		return 0;
@@ -2634,6 +3377,86 @@ static int output_sed_range(const unsigned char *content, uint32_t len, int star
 	return 1;
 }
 
+static int count_lines(const unsigned char *content, uint32_t len) {
+	int lines = 0;
+	uint32_t offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		if (line_end < len && content[line_end] == '\n') {
+			line_end++;
+		}
+		offset = line_end;
+		lines++;
+	}
+	return lines;
+}
+
+static int output_tail_lines(const unsigned char *content, uint32_t len, int count) {
+	if (count < 1 || len == 0) {
+		return 1;
+	}
+	int total = count_lines(content, len);
+	int start = total - count + 1;
+	if (start < 1) {
+		start = 1;
+	}
+	return output_sed_range(content, len, start, total);
+}
+
+static int mem_contains_bytes(const unsigned char *haystack, uint32_t haystack_len, const unsigned char *needle, size_t needle_len) {
+	if (needle_len == 0 || haystack_len < needle_len) {
+		return 0;
+	}
+	for (uint32_t i = 0; i + needle_len <= haystack_len; i++) {
+		if (memcmp(haystack + i, needle, needle_len) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int output_fixed_grep(const unsigned char *content, uint32_t len, const char *pattern, int quiet, int *matched) {
+	*matched = 0;
+	size_t pattern_len = strlen(pattern);
+	if (pattern_len == 0) {
+		return 0;
+	}
+	for (uint32_t i = 0; i < len; i++) {
+		if (content[i] == '\0') {
+			return 0;
+		}
+	}
+	uint32_t offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		uint32_t line_match_len = line_end - offset;
+		uint32_t line_write_len = line_match_len;
+		if (mem_contains_bytes(content + offset, line_match_len, (const unsigned char *)pattern, pattern_len)) {
+			*matched = 1;
+			if (quiet) {
+				return 1;
+			}
+			if (line_write_len > 0 && !write_all(STDOUT_FILENO, content + offset, line_write_len)) {
+				return 0;
+			}
+			if (!write_all(STDOUT_FILENO, "\n", 1)) {
+				return 0;
+			}
+		}
+		if (line_end < len && content[line_end] == '\n') {
+			line_end++;
+		}
+		offset = line_end;
+	}
+	return 1;
+}
+
 static int discover_store_root(const char *cwd, char store_root[PATH_BUF]) {
 	const char *env = getenv("SQUIRE_KERNEL_STORE_ROOT");
 	if (env != NULL && env[0] != '\0') {
@@ -2658,7 +3481,7 @@ static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const cha
 	if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
 		char epoch_hash[HASH_HEX];
 		sha256_hex_str(epoch, epoch_hash);
-		fprintf(stderr, "squire mmap shim debug: key=%s epoch=%s epoch_hash=%s\n", key, epoch, epoch_hash);
+		fprintf(stderr, "squire mmap proof debug: key=%s epoch=%s epoch_hash=%s\n", key, epoch, epoch_hash);
 	}
 	const unsigned char *out, *err;
 	uint32_t out_len, err_len;
@@ -2682,8 +3505,8 @@ static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const cha
 
 static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const char *store_root, long long replay_start_ns) {
 	char key[HASH_HEX], epoch[256], path[PATH_BUF];
-	int sed_start, sed_end;
-	if (!warm_file_proof(inv, key, epoch, path, &sed_start, &sed_end)) {
+	int sed_start, sed_end, line_count;
+	if (!warm_file_proof(inv, key, epoch, path, &sed_start, &sed_end, &line_count)) {
 		return 0;
 	}
 	char command_hash[HASH_HEX];
@@ -2716,6 +3539,34 @@ static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(0);
+	}
+	if (strcmp(inv->argv[0], "head") == 0) {
+		if (!output_sed_range(content, content_len, 1, line_count)) {
+			return 0;
+		}
+		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
+		_exit(0);
+	}
+	if (strcmp(inv->argv[0], "tail") == 0) {
+		if (!output_tail_lines(content, content_len, line_count)) {
+			return 0;
+		}
+		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
+		_exit(0);
+	}
+	if (strcmp(inv->argv[0], "grep") == 0) {
+		const char *pattern = NULL;
+		const char *path = NULL;
+		int quiet = 0;
+		if (!parse_fixed_grep_args(inv, &pattern, &path, &quiet)) {
+			return 0;
+		}
+		int matched = 0;
+		if (!output_fixed_grep(content, content_len, pattern, quiet, &matched)) {
+			return 0;
+		}
+		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
+		_exit(matched ? 0 : 1);
 	}
 	return 0;
 }
@@ -2764,12 +3615,31 @@ static int prepare_exact_replay(int argc, char **argv, prepared_exact_replay *pr
 		return 1;
 	}
 	if (repo_summary_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
 		return 1;
 	}
 	if (tool_version_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
 		return 1;
 	}
 	if (command_path_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
+		return 1;
+	}
+	if (static_environment_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
+		return 1;
+	}
+	if (printenv_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
+		return 1;
+	}
+	if (directory_listing_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
+		return 1;
+	}
+	if (file_type_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+		prepared->synthetic_safe = 1;
 		return 1;
 	}
 	unmap_snapshot(&prepared->snap);
@@ -2830,6 +3700,18 @@ static int try_replay(int argc, char **argv) {
 	if (!ok && command_path_epoch(&inv, epoch)) {
 		ok = replay_exact(&snap, &inv, epoch, store_root, replay_start_ns);
 	}
+	if (!ok && static_environment_epoch(&inv, epoch)) {
+		ok = replay_exact(&snap, &inv, epoch, store_root, replay_start_ns);
+	}
+	if (!ok && printenv_epoch(&inv, epoch)) {
+		ok = replay_exact(&snap, &inv, epoch, store_root, replay_start_ns);
+	}
+	if (!ok && directory_listing_epoch(&inv, epoch)) {
+		ok = replay_exact(&snap, &inv, epoch, store_root, replay_start_ns);
+	}
+	if (!ok && file_type_epoch(&inv, epoch)) {
+		ok = replay_exact(&snap, &inv, epoch, store_root, replay_start_ns);
+	}
 	if (!ok) {
 		ok = replay_warm_file(&snap, &inv, store_root, replay_start_ns);
 	}
@@ -2837,11 +3719,11 @@ static int try_replay(int argc, char **argv) {
 	return ok;
 }
 
-#if !defined(SQUIRE_MMAP_EMBEDDED) && !defined(SQUIRE_MMAP_NO_MAIN)
+#if defined(SQUIRE_MMAP_STANDALONE) && !defined(SQUIRE_MMAP_EMBEDDED) && !defined(SQUIRE_MMAP_NO_MAIN)
 int main(int argc, char **argv) {
 	if (!try_replay(argc, argv)) {
 		if (getenv("SQUIRE_SHIM_REQUIRE_HIT") != NULL) {
-			fprintf(stderr, "squire mmap shim: hot snapshot miss\n");
+			fprintf(stderr, "squire mmap proof: hot snapshot miss\n");
 			return 91;
 		}
 		exec_real_command(argc, argv);

@@ -24,7 +24,7 @@ func (k *Kernel) prewarmWarmFiles(ctx context.Context, cwd string, ws WorldState
 	var reports []WarmPreparedReport
 	for _, rel := range replayableInspectionPrewarmFiles(ws.RepoRoot, workspaceImagePrewarmFileLimit) {
 		argv := []string{"sed", "-n", "1,1p", rel}
-		if k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "Level 3 workspace image bytes prepared for arbitrary bounded sed/cat replay; native fallback still available") {
+		if k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "Level 3 workspace image bytes prepared for arbitrary bounded sed/cat/head/tail replay; native fallback still available") {
 			count++
 			reports = append(reports, WarmPreparedReport{
 				Kind:              PreparedKindWarmFile,
@@ -32,7 +32,7 @@ func (k *Kernel) prewarmWarmFiles(ctx context.Context, cwd string, ws WorldState
 				NormalizedCommand: "warm eligible workspace file",
 				ReplayEligible:    true,
 				EvidenceQuality:   ws.EvidenceQuality,
-				Privacy:           "eligible local workspace file bytes stored locally for exact bounded cat/sed replay",
+				Privacy:           "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail replay",
 			})
 		}
 	}
@@ -40,7 +40,7 @@ func (k *Kernel) prewarmWarmFiles(ctx context.Context, cwd string, ws WorldState
 }
 
 func (k *Kernel) prepareWarmFileFromCommand(cwd string, argv []string, ws WorldState, ledger *ValidityLedger, phases *PhaseTimings, note string) bool {
-	if k.Store == nil || ledger == nil || !isReplayableFileInspection(argv) {
+	if k.Store == nil || ledger == nil || !isWarmFileBackedInspection(argv) {
 		return false
 	}
 	key, hotFPS, hotEpoch, path, ok := warmFileHotProof(cwd, argv)
@@ -75,7 +75,7 @@ func (k *Kernel) prepareWarmFileFromCommand(cwd string, argv []string, ws WorldS
 		EvidenceQuality:      ws.EvidenceQuality,
 		ReplayEligible:       true,
 		OutputRef:            ref,
-		Privacy:              "eligible local workspace file bytes stored locally for exact bounded cat/sed replay",
+		Privacy:              "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail replay",
 		PreparedAt:           time.Now(),
 		Notes:                []string{note},
 	})
@@ -96,7 +96,7 @@ func (k *Kernel) findPreparedWarmFileReplay(inv CommandInvocation, diagnostics [
 		if candidate.Entry.HotInvalidationEpoch != hotEpoch || !mapsEqual(candidate.Entry.HotFingerprints, hotFPS) {
 			continue
 		}
-		stdout, ok := warmFileCommandOutput(candidate.Content, inv.PolicyArgv)
+		stdout, exitCode, ok := warmFileCommandOutput(candidate.Content, inv.PolicyArgv)
 		if !ok || len(stdout) > maxFastPathOutputBytes {
 			return preparedReplay{}, diagnostics, false
 		}
@@ -107,7 +107,7 @@ func (k *Kernel) findPreparedWarmFileReplay(inv CommandInvocation, diagnostics [
 			StderrHash:   hashBytes(stderr),
 			StdoutSize:   len(stdout),
 			StderrSize:   len(stderr),
-			ExitCode:     0,
+			ExitCode:     exitCode,
 			NativeWallMS: candidate.NativeWallMS,
 			Timestamp:    candidate.Entry.PreparedAt,
 			OutputRef:    candidate.Entry.OutputRef,
@@ -117,7 +117,7 @@ func (k *Kernel) findPreparedWarmFileReplay(inv CommandInvocation, diagnostics [
 			Observation:   obs,
 			Stdout:        stdout,
 			Stderr:        stderr,
-			HotCacheFrame: encodeHotCacheHitFrame(stdout, stderr, 0),
+			HotCacheFrame: encodeHotCacheHitFrame(stdout, stderr, exitCode),
 		}, diagnostics, true
 	}
 	return preparedReplay{}, diagnostics, false
@@ -139,7 +139,7 @@ func (k *Kernel) residentPreparedWarmFileCandidates(key string, phases *PhaseTim
 
 func warmFileHotProof(cwd string, argv []string) (string, map[string]string, string, string, bool) {
 	argv = normalizeArgvForPolicy(argv)
-	if !isReplayableFileInspection(argv) {
+	if !isWarmFileBackedInspection(argv) {
 		return "", nil, "", "", false
 	}
 	root := absPath(cwd)
@@ -148,17 +148,22 @@ func warmFileHotProof(cwd string, argv []string) (string, map[string]string, str
 		return "", nil, "", "", false
 	}
 	path := filepath.Clean(filepath.Join(root, argPath))
-	if !pathWithinRoot(path, root) || !isReplayableInspectionName(filepath.Base(path)) {
+	realRoot := root
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = resolvedRoot
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithinRoot(realPath, realRoot) || !isReplayableInspectionName(filepath.Base(path)) {
 		return "", nil, "", "", false
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(realPath)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Size() > maxReplayableInspectionFileBytes {
 		return "", nil, "", "", false
 	}
 	if isReplayableCatFileRead(argv) && info.Size() > maxFastPathOutputBytes {
 		return "", nil, "", "", false
 	}
-	contentHash, ok := hashFile(path)
+	contentHash, ok := hashFile(realPath)
 	if !ok {
 		return "", nil, "", "", false
 	}
@@ -178,7 +183,7 @@ func warmFileHotProof(cwd string, argv []string) (string, map[string]string, str
 		"file_mode":    hashString(info.Mode().String()),
 	}
 	epoch := "hot-warm-file:" + hashString(root+"|"+rel+"|"+contentHash+"|"+strconv.FormatInt(info.Size(), 10)+"|"+info.Mode().String())
-	return key, fp, epoch, path, true
+	return key, fp, epoch, realPath, true
 }
 
 func replayableInspectionArgPath(argv []string) string {
@@ -188,22 +193,68 @@ func replayableInspectionArgPath(argv []string) string {
 	if isBoundedSedPrint(argv) {
 		return argv[3]
 	}
+	if isBoundedHeadPrint(argv) {
+		path, _, ok := parseHeadTailArgs(argv, false)
+		if ok {
+			return path
+		}
+	}
+	if isBoundedTailPrint(argv) {
+		path, _, ok := parseHeadTailArgs(argv, true)
+		if ok {
+			return path
+		}
+	}
+	if isReplayableFileType(argv) {
+		return argv[1]
+	}
+	if isFixedGrepFileSearch(argv) {
+		_, path, _, ok := parseFixedGrepArgs(argv)
+		if ok {
+			return path
+		}
+	}
 	return ""
 }
 
-func warmFileCommandOutput(content []byte, argv []string) ([]byte, bool) {
+func warmFileCommandOutput(content []byte, argv []string) ([]byte, int, bool) {
 	argv = normalizeArgvForPolicy(argv)
 	if isReplayableCatFileRead(argv) {
-		return append([]byte(nil), content...), true
+		return append([]byte(nil), content...), 0, true
 	}
-	if !isBoundedSedPrint(argv) {
-		return nil, false
+	if isBoundedSedPrint(argv) {
+		start, end, ok := parseSedPrintRange(argv[2])
+		if !ok {
+			return nil, 0, false
+		}
+		return sedPrintRangeBytes(content, start, end), 0, true
 	}
-	start, end, ok := parseSedPrintRange(argv[2])
-	if !ok {
-		return nil, false
+	if isBoundedHeadPrint(argv) {
+		_, n, ok := parseHeadTailArgs(argv, false)
+		if !ok {
+			return nil, 0, false
+		}
+		return sedPrintRangeBytes(content, 1, n), 0, true
 	}
-	return sedPrintRangeBytes(content, start, end), true
+	if isBoundedTailPrint(argv) {
+		_, n, ok := parseHeadTailArgs(argv, true)
+		if !ok {
+			return nil, 0, false
+		}
+		return tailLineBytes(content, n), 0, true
+	}
+	if isFixedGrepFileSearch(argv) {
+		pattern, _, quiet, ok := parseFixedGrepArgs(argv)
+		if !ok || bytes.IndexByte(content, 0) >= 0 {
+			return nil, 0, false
+		}
+		stdout, matched := fixedGrepOutput(content, []byte(pattern), quiet)
+		if !matched {
+			return nil, 1, true
+		}
+		return stdout, 0, true
+	}
+	return nil, 0, false
 }
 
 func sedPrintRangeBytes(content []byte, start, end int) []byte {
@@ -226,4 +277,67 @@ func sedPrintRangeBytes(content []byte, start, end int) []byte {
 		lineNo++
 	}
 	return out.Bytes()
+}
+
+func tailLineBytes(content []byte, count int) []byte {
+	if count < 1 || len(content) == 0 {
+		return nil
+	}
+	type lineRange struct {
+		start int
+		end   int
+	}
+	lines := make([]lineRange, 0, count)
+	offset := 0
+	for offset < len(content) {
+		next := bytes.IndexByte(content[offset:], '\n')
+		lineEnd := len(content)
+		if next >= 0 {
+			lineEnd = offset + next + 1
+		}
+		lines = append(lines, lineRange{start: offset, end: lineEnd})
+		offset = lineEnd
+	}
+	start := len(lines) - count
+	if start < 0 {
+		start = 0
+	}
+	var out bytes.Buffer
+	for _, line := range lines[start:] {
+		out.Write(content[line.start:line.end])
+	}
+	return out.Bytes()
+}
+
+func fixedGrepOutput(content, pattern []byte, quiet bool) ([]byte, bool) {
+	if len(pattern) == 0 {
+		return nil, false
+	}
+	var out bytes.Buffer
+	matched := false
+	offset := 0
+	for offset < len(content) {
+		next := bytes.IndexByte(content[offset:], '\n')
+		lineEnd := len(content)
+		hasNewline := false
+		if next >= 0 {
+			lineEnd = offset + next + 1
+			hasNewline = true
+		}
+		line := content[offset:lineEnd]
+		lineForMatch := line
+		if hasNewline {
+			lineForMatch = line[:len(line)-1]
+		}
+		if bytes.Contains(lineForMatch, pattern) {
+			matched = true
+			if quiet {
+				return nil, true
+			}
+			out.Write(lineForMatch)
+			out.WriteByte('\n')
+		}
+		offset = lineEnd
+	}
+	return out.Bytes(), matched
 }

@@ -22,11 +22,11 @@ func TestGuestSquireSessionCommandCodexPreloadFirst(t *testing.T) {
 	}
 }
 
-func TestGuestSquireSessionCommandCodexFallsBackToPathShimsWithoutPreload(t *testing.T) {
+func TestGuestSquireSessionCommandCodexUsesAutoWithoutPreload(t *testing.T) {
 	t.Setenv("SQUIRE_VM_GUEST_PRELOAD_LIB", filepath.Join(t.TempDir(), "missing.so"))
 
 	got := guestSquireSessionCommand("/usr/local/bin/squire", []string{"/usr/local/bin/codex"})
-	want := []string{"/usr/local/bin/squire", "session", "--quiet", "--path-shims", "--", "/usr/local/bin/codex"}
+	want := []string{"/usr/local/bin/squire", "session", "--quiet", "--", "/usr/local/bin/codex"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
@@ -39,19 +39,18 @@ func TestGuestSquireSessionCommandTransportOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SQUIRE_VM_GUEST_PRELOAD_LIB", preload)
-	t.Setenv("SQUIRE_VM_GUEST_SESSION_TRANSPORT", "path-shims")
-
+	t.Setenv("SQUIRE_VM_GUEST_SESSION_TRANSPORT", "preload")
 	got := guestSquireSessionCommand("/squire", []string{"codex"})
-	want := []string{"/squire", "session", "--quiet", "--path-shims", "--", "codex"}
+	want := []string{"/squire", "session", "--quiet", "--preload", "--", "codex"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("path-shim override command = %#v, want %#v", got, want)
+		t.Fatalf("preload override command = %#v, want %#v", got, want)
 	}
 
-	t.Setenv("SQUIRE_VM_GUEST_SESSION_TRANSPORT", "preload")
+	t.Setenv("SQUIRE_VM_GUEST_SESSION_TRANSPORT", "path-shims")
 	got = guestSquireSessionCommand("/squire", []string{"codex"})
 	want = []string{"/squire", "session", "--quiet", "--preload", "--", "codex"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("preload override command = %#v, want %#v", got, want)
+		t.Fatalf("removed path-shim override should fall back to preload when available: %#v", got)
 	}
 }
 

@@ -484,6 +484,15 @@ func proofGatedFingerprints(op Operation, ws WorldState) map[string]string {
 	if fp, _, ok := toolDiscoveryProof(op); ok {
 		return fp
 	}
+	if fp, _, ok := staticEnvironmentProof(op.CWD, op.Argv); ok {
+		return fp
+	}
+	if fp, _, ok := printenvProof(op.CWD, op.Argv); ok {
+		return fp
+	}
+	if fp, _, ok := directoryListingProof(op.CWD, op.Argv, ws); ok {
+		return fp
+	}
 	return map[string]string{"proof": "missing"}
 }
 
@@ -495,6 +504,15 @@ func proofGatedEpoch(op Operation, ws WorldState) (string, bool) {
 		return epoch, true
 	}
 	if _, epoch, ok := toolDiscoveryProof(op); ok {
+		return epoch, true
+	}
+	if _, epoch, ok := staticEnvironmentProof(op.CWD, op.Argv); ok {
+		return epoch, true
+	}
+	if _, epoch, ok := printenvProof(op.CWD, op.Argv); ok {
+		return epoch, true
+	}
+	if _, epoch, ok := directoryListingProof(op.CWD, op.Argv, ws); ok {
 		return epoch, true
 	}
 	return "", false
@@ -636,7 +654,32 @@ func fileInspectionProof(op Operation, ws WorldState) (map[string]string, string
 	if isBoundedSedPrint(op.Argv) {
 		fp["sed_range"] = hashString(op.Argv[2])
 	}
-	epoch := "file-inspection:" + hashString(rel+"|"+contentHash+"|"+strconv.FormatInt(info.Size(), 10)+"|"+info.Mode().String()+"|"+normalizeArgv(op.Argv))
+	if isBoundedHeadPrint(op.Argv) {
+		_, n, _ := parseHeadTailArgs(op.Argv, false)
+		fp["head_lines"] = hashString(strconv.Itoa(n))
+	}
+	if isBoundedTailPrint(op.Argv) {
+		_, n, _ := parseHeadTailArgs(op.Argv, true)
+		fp["tail_lines"] = hashString(strconv.Itoa(n))
+	}
+	epochInput := rel + "|" + contentHash + "|" + strconv.FormatInt(info.Size(), 10) + "|" + info.Mode().String() + "|" + normalizeArgv(op.Argv)
+	if isFixedGrepFileSearch(op.Argv) {
+		pattern, _, quiet, _ := parseFixedGrepArgs(op.Argv)
+		fp["grep_pattern"] = hashString(pattern)
+		fp["grep_quiet"] = hashString(strconv.FormatBool(quiet))
+	}
+	if isReplayableFileType(op.Argv) {
+		signal, ok := executableSignal(op.CWD, "file")
+		if !ok {
+			return nil, "", false
+		}
+		envHash := fileCommandEnvHash()
+		fp["tool_path"] = signal.PathHash
+		fp["tool_executable"] = signal.FileHash
+		fp["file_env"] = envHash
+		epochInput += "|" + signal.PathHash + "|" + signal.FileHash + "|" + envHash
+	}
+	epoch := "file-inspection:" + hashString(epochInput)
 	return fp, epoch, true
 }
 
@@ -649,22 +692,23 @@ func replayableInspectionPath(cwd string, argv []string, ws WorldState) (string,
 		root = cwd
 	}
 	argPath := ""
-	if isReplayableCatFileRead(argv) {
-		argPath = argv[1]
-	} else if isBoundedSedPrint(argv) {
-		argPath = argv[3]
-	}
+	argPath = replayableInspectionArgPath(argv)
 	if argPath == "" {
 		return "", false
 	}
 	path := filepath.Clean(filepath.Join(cwd, argPath))
-	if !pathWithinRoot(path, root) {
+	realRoot := root
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = resolvedRoot
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithinRoot(realPath, realRoot) {
 		return "", false
 	}
 	if !isReplayableInspectionName(filepath.Base(path)) {
 		return "", false
 	}
-	return absPath(path), true
+	return absPath(realPath), true
 }
 
 func toolDiscoveryProof(op Operation) (map[string]string, string, bool) {
