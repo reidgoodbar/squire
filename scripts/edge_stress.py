@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process-level Squire Kernel edge stress tests.
+"""Process-level Squire edge stress tests.
 
 This script intentionally uses fresh temporary Git repositories and the public
 Squire CLI. It is not a unit test harness: it stresses process boundaries,

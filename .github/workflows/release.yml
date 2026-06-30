@@ -42,6 +42,11 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+      - name: Cache validity regressions
+        run: |
+          tests='TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges'
+          go test ./internal/kernel -run "$tests" -count=1
+
       - name: Build release candidate binary
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
@@ -169,7 +174,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: squire-kernel-release-artifacts
+          name: squire-release-artifacts
           path: .tmp/release
 
   publish:
@@ -182,7 +187,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: squire-kernel-release-artifacts
+          name: squire-release-artifacts
           path: release
 
       - name: Publish GitHub release
@@ -216,7 +221,7 @@ jobs:
             gh release create "$version" release/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "Squire Kernel $version" \
+              --title "Squire $version" \
               --notes-file release/RELEASE_MANIFEST.txt \
               $flags
           fi

@@ -8,7 +8,7 @@ import (
 )
 
 func makeBenchRepo(ctx context.Context) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "squire-kernel-bench-*")
+	dir, err := os.MkdirTemp("", "squire-bench-*")
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -16,7 +16,7 @@ func makeBenchRepo(ctx context.Context) (string, func(), error) {
 	steps := [][]string{
 		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "squire@example.invalid"},
-		{"git", "config", "user.name", "Squire Kernel"},
+		{"git", "config", "user.name", "Squire"},
 	}
 	for _, step := range steps {
 		if res := runNative(ctx, dir, step); res.ExitCode != 0 {

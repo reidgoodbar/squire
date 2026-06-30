@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Many-agent normal-UX A/B benchmark for Squire Kernel.
+"""Many-agent normal-UX A/B benchmark for Squire.
 
 The measured Squire workload uses ordinary command argv sent through long-lived
 terminal adapter sessions. The measured command stream does not contain
@@ -77,7 +77,7 @@ def make_repo() -> Path:
     (repo / "tests").mkdir()
     (repo / "README.md").write_text(
         "# Multi-Agent Bench\n\n"
-        "This repository is generated for Squire Kernel benchmarking.\n\n"
+        "This repository is generated for Squire benchmarking.\n\n"
         + "\n".join(f"- item {i}" for i in range(120))
         + "\n",
         encoding="utf-8",

@@ -112,6 +112,7 @@ typedef struct {
 } prepared_exact_replay;
 
 static long long stat_mtime_nano(const struct stat *st);
+static int file_stat_signal(const struct stat *st, const char *mode, char *out, size_t cap);
 static int join_path(char *out, size_t cap, const char *left, const char *right);
 
 static const char *base_name(const char *path) {
@@ -983,9 +984,17 @@ static int executable_signal_for(const char *cwd, const char *name, executable_s
 	if (!mode_string(st.st_mode, mode)) {
 		return 0;
 	}
+	char content_hash[HASH_HEX];
+	if (!read_file_hash(path, content_hash, NULL, NULL)) {
+		return 0;
+	}
+	char stat_signal[256];
+	if (!file_stat_signal(&st, mode, stat_signal, sizeof(stat_signal))) {
+		return 0;
+	}
 	sha256_hex_str(path, sig->path_hash);
-	char signal[PATH_BUF + 128];
-	snprintf(signal, sizeof(signal), "%s|%lld|%lld|%s", base_name(path), (long long)st.st_size, stat_mtime_nano(&st), mode);
+	char signal[PATH_BUF + HASH_HEX + 256];
+	snprintf(signal, sizeof(signal), "%s|%s|%s", base_name(path), content_hash, stat_signal);
 	sha256_hex_str(signal, sig->file_hash);
 	return 1;
 }
@@ -1040,6 +1049,395 @@ static int list_add_path_hash_part(string_list *parts, const char *left, const c
 	return ok;
 }
 
+static int list_add_env_hash_part(string_list *parts, const char *key) {
+	const char *value = getenv(key);
+	char h[HASH_HEX];
+	sha256_hex_str(value == NULL ? "" : value, h);
+	char label[128];
+	if (snprintf(label, sizeof(label), "env:%s", key) >= (int)sizeof(label)) {
+		return 0;
+	}
+	return list_add_path_hash_part(parts, label, h);
+}
+
+static int list_add_config_file_part(string_list *parts, const char *label, const char *path) {
+	if (path == NULL || path[0] == '\0') {
+		return 1;
+	}
+	char left[PATH_BUF + 96], fp[HASH_HEX + 16];
+	if (snprintf(left, sizeof(left), "config:%s:%s", label, path) >= (int)sizeof(left)) {
+		return 0;
+	}
+	file_hash_or_missing(path, fp);
+	return list_add_path_hash_part(parts, left, fp);
+}
+
+static char *trim_ascii_ws(char *s) {
+	while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
+		s++;
+	}
+	char *end = s + strlen(s);
+	while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
+		*--end = '\0';
+	}
+	return s;
+}
+
+static int git_config_dir(const char *path, char out[PATH_BUF]) {
+	snprintf(out, PATH_BUF, "%s", path);
+	char *slash = strrchr(out, '/');
+	if (slash == NULL) {
+		snprintf(out, PATH_BUF, ".");
+		return 1;
+	}
+	if (slash == out) {
+		out[1] = '\0';
+		return 1;
+	}
+	*slash = '\0';
+	return 1;
+}
+
+static int resolve_git_config_include_path(const char *raw, const char *config_path, char out[PATH_BUF]) {
+	if (raw == NULL || raw[0] == '\0') {
+		return 0;
+	}
+	char value[PATH_BUF];
+	snprintf(value, sizeof(value), "%s", raw);
+	char *trimmed = trim_ascii_ws(value);
+	size_t len = strlen(trimmed);
+	if (len >= 2 && ((trimmed[0] == '"' && trimmed[len - 1] == '"') || (trimmed[0] == '\'' && trimmed[len - 1] == '\''))) {
+		trimmed[len - 1] = '\0';
+		trimmed++;
+	}
+	if (trimmed[0] == '\0') {
+		return 0;
+	}
+	if (strcmp(trimmed, "~") == 0) {
+		const char *home = getenv("HOME");
+		if (home == NULL || home[0] == '\0') {
+			return 0;
+		}
+		return snprintf(out, PATH_BUF, "%s", home) > 0;
+	}
+	if (strncmp(trimmed, "~/", 2) == 0) {
+		const char *home = getenv("HOME");
+		if (home == NULL || home[0] == '\0') {
+			return 0;
+		}
+		return join_path(out, PATH_BUF, home, trimmed + 2);
+	}
+	if (trimmed[0] == '/') {
+		return snprintf(out, PATH_BUF, "%s", trimmed) > 0 && strlen(out) < PATH_BUF;
+	}
+	char dir[PATH_BUF];
+	if (!git_config_dir(config_path, dir)) {
+		return 0;
+	}
+	return join_path(out, PATH_BUF, dir, trimmed);
+}
+
+static int add_git_config_include_fingerprints(string_list *parts, const char *config_path, int depth, char seen[][PATH_BUF], int *seen_count) {
+	if (config_path == NULL || config_path[0] == '\0' || depth > 8 || *seen_count >= 64) {
+		return 1;
+	}
+	for (int i = 0; i < *seen_count; i++) {
+		if (strcmp(seen[i], config_path) == 0) {
+			return 1;
+		}
+	}
+	snprintf(seen[*seen_count], PATH_BUF, "%s", config_path);
+	(*seen_count)++;
+
+	char hash[HASH_HEX];
+	unsigned char *content = NULL;
+	size_t content_len = 0;
+	if (!read_file_hash(config_path, hash, &content, &content_len)) {
+		return 1;
+	}
+	char *text = (char *)malloc(content_len + 1);
+	if (text == NULL) {
+		free(content);
+		return 0;
+	}
+	if (content_len > 0) {
+		memcpy(text, content, content_len);
+	}
+	text[content_len] = '\0';
+	free(content);
+
+	char section[128] = "";
+	char *save = NULL;
+	for (char *line = strtok_r(text, "\n", &save); line != NULL; line = strtok_r(NULL, "\n", &save)) {
+		char *p = trim_ascii_ws(line);
+		if (*p == '\0' || *p == '#' || *p == ';') {
+			continue;
+		}
+		if (*p == '[') {
+			char *end = strchr(p, ']');
+			if (end == NULL) {
+				section[0] = '\0';
+				continue;
+			}
+			*end = '\0';
+			snprintf(section, sizeof(section), "%s", trim_ascii_ws(p + 1));
+			for (char *q = section; *q != '\0'; q++) {
+				*q = (char)tolower((unsigned char)*q);
+			}
+			continue;
+		}
+		if (strcmp(section, "include") != 0 && strncmp(section, "includeif ", 10) != 0) {
+			continue;
+		}
+		char *eq = strchr(p, '=');
+		if (eq == NULL) {
+			continue;
+		}
+		*eq = '\0';
+		char *key = trim_ascii_ws(p);
+		if (strcasecmp(key, "path") != 0) {
+			continue;
+		}
+		char include_path[PATH_BUF], label[PATH_BUF + 32], fp[HASH_HEX + 16];
+		if (!resolve_git_config_include_path(eq + 1, config_path, include_path)) {
+			continue;
+		}
+		file_hash_or_missing(include_path, fp);
+		if (snprintf(label, sizeof(label), "config-include:%s", include_path) <= 0 ||
+		    !list_add_path_hash_part(parts, label, fp)) {
+			free(text);
+			return 0;
+		}
+		if (!add_git_config_include_fingerprints(parts, include_path, depth + 1, seen, seen_count)) {
+			free(text);
+			return 0;
+		}
+	}
+	free(text);
+	return 1;
+}
+
+static int list_add_git_config_file_part(string_list *parts, const char *label, const char *path) {
+	if (path == NULL || path[0] == '\0') {
+		return 1;
+	}
+	int ok;
+	if (label == NULL || label[0] == '\0') {
+		char fp[HASH_HEX + 16];
+		file_hash_or_missing(path, fp);
+		ok = list_add_path_hash_part(parts, path, fp);
+	} else {
+		ok = list_add_config_file_part(parts, label, path);
+	}
+	if (!ok) {
+		return 0;
+	}
+	char seen[64][PATH_BUF];
+	int seen_count = 0;
+	return add_git_config_include_fingerprints(parts, path, 0, seen, &seen_count);
+}
+
+static int add_git_config_core_path_fingerprints_from_file(string_list *parts, const char *config_path, const char *key, const char *label, int depth, char seen[][PATH_BUF], int *seen_count) {
+	if (config_path == NULL || config_path[0] == '\0' || depth > 8 || *seen_count >= 64) {
+		return 1;
+	}
+	for (int i = 0; i < *seen_count; i++) {
+		if (strcmp(seen[i], config_path) == 0) {
+			return 1;
+		}
+	}
+	snprintf(seen[*seen_count], PATH_BUF, "%s", config_path);
+	(*seen_count)++;
+
+	char hash[HASH_HEX];
+	unsigned char *content = NULL;
+	size_t content_len = 0;
+	if (!read_file_hash(config_path, hash, &content, &content_len)) {
+		return 1;
+	}
+	char *text = (char *)malloc(content_len + 1);
+	if (text == NULL) {
+		free(content);
+		return 0;
+	}
+	if (content_len > 0) {
+		memcpy(text, content, content_len);
+	}
+	text[content_len] = '\0';
+	free(content);
+
+	char section[128] = "";
+	char *save = NULL;
+	for (char *line = strtok_r(text, "\n", &save); line != NULL; line = strtok_r(NULL, "\n", &save)) {
+		char *p = trim_ascii_ws(line);
+		if (*p == '\0' || *p == '#' || *p == ';') {
+			continue;
+		}
+		if (*p == '[') {
+			char *end = strchr(p, ']');
+			if (end == NULL) {
+				section[0] = '\0';
+				continue;
+			}
+			*end = '\0';
+			snprintf(section, sizeof(section), "%s", trim_ascii_ws(p + 1));
+			for (char *q = section; *q != '\0'; q++) {
+				*q = (char)tolower((unsigned char)*q);
+			}
+			continue;
+		}
+		char *eq = strchr(p, '=');
+		if (eq == NULL) {
+			continue;
+		}
+		*eq = '\0';
+		char *parsed_key = trim_ascii_ws(p);
+		char *value = trim_ascii_ws(eq + 1);
+		if ((strcmp(section, "include") == 0 || strncmp(section, "includeif ", 10) == 0) && strcasecmp(parsed_key, "path") == 0) {
+			char include_path[PATH_BUF];
+			if (resolve_git_config_include_path(value, config_path, include_path) &&
+			    !add_git_config_core_path_fingerprints_from_file(parts, include_path, key, label, depth + 1, seen, seen_count)) {
+				free(text);
+				return 0;
+			}
+			continue;
+		}
+		if (strcmp(section, "core") != 0 || strcasecmp(parsed_key, key) != 0) {
+			continue;
+		}
+		char target[PATH_BUF], part_label[PATH_BUF + 64], fp[HASH_HEX + 16];
+		if (!resolve_git_config_include_path(value, config_path, target)) {
+			continue;
+		}
+		file_hash_or_missing(target, fp);
+		if (snprintf(part_label, sizeof(part_label), "%s:%s", label, target) <= 0 ||
+		    !list_add_path_hash_part(parts, part_label, fp)) {
+			free(text);
+			return 0;
+		}
+	}
+	free(text);
+	return 1;
+}
+
+static int add_configured_git_core_path_fingerprints(string_list *parts, const char *git_dir, const char *key, const char *label) {
+	char seen[64][PATH_BUF];
+	int seen_count = 0;
+	char path[PATH_BUF];
+	if (git_dir != NULL && git_dir[0] != '\0') {
+		if (!join_path(path, sizeof(path), git_dir, "config") ||
+		    !add_git_config_core_path_fingerprints_from_file(parts, path, key, label, 0, seen, &seen_count)) {
+			return 0;
+		}
+	}
+	const char *global = getenv("GIT_CONFIG_GLOBAL");
+	const char *home = getenv("HOME");
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (global != NULL && global[0] != '\0') {
+		if (!add_git_config_core_path_fingerprints_from_file(parts, global, key, label, 0, seen, &seen_count)) {
+			return 0;
+		}
+	} else if (home != NULL && home[0] != '\0') {
+		if (!join_path(path, sizeof(path), home, ".gitconfig") ||
+		    !add_git_config_core_path_fingerprints_from_file(parts, path, key, label, 0, seen, &seen_count)) {
+			return 0;
+		}
+		if (xdg != NULL && xdg[0] != '\0') {
+			if (!join_path(path, sizeof(path), xdg, "git/config") ||
+			    !add_git_config_core_path_fingerprints_from_file(parts, path, key, label, 0, seen, &seen_count)) {
+				return 0;
+			}
+		} else {
+			if (!join_path(path, sizeof(path), home, ".config/git/config") ||
+			    !add_git_config_core_path_fingerprints_from_file(parts, path, key, label, 0, seen, &seen_count)) {
+				return 0;
+			}
+		}
+	}
+	const char *system = getenv("GIT_CONFIG_SYSTEM");
+	if (system != NULL && system[0] != '\0') {
+		if (!add_git_config_core_path_fingerprints_from_file(parts, system, key, label, 0, seen, &seen_count)) {
+			return 0;
+		}
+	} else if (getenv("GIT_CONFIG_NOSYSTEM") == NULL) {
+		if (!add_git_config_core_path_fingerprints_from_file(parts, "/etc/gitconfig", key, label, 0, seen, &seen_count) ||
+		    !add_git_config_core_path_fingerprints_from_file(parts, "/usr/local/etc/gitconfig", key, label, 0, seen, &seen_count) ||
+		    !add_git_config_core_path_fingerprints_from_file(parts, "/opt/homebrew/etc/gitconfig", key, label, 0, seen, &seen_count)) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int add_external_git_config_fingerprints(string_list *parts) {
+	static const char *keys[] = {
+		"GIT_CONFIG_NOSYSTEM",
+		"GIT_CONFIG_SYSTEM",
+		"GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_PARAMETERS",
+		"HOME",
+		"XDG_CONFIG_HOME",
+	};
+	for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+		if (!list_add_env_hash_part(parts, keys[i])) {
+			return 0;
+		}
+	}
+	const char *count_env = getenv("GIT_CONFIG_COUNT");
+	if (count_env != NULL) {
+		int count = atoi(count_env);
+		if (count > 0 && count < 128) {
+			for (int i = 0; i < count; i++) {
+				char key[64], value[64];
+				snprintf(key, sizeof(key), "GIT_CONFIG_KEY_%d", i);
+				snprintf(value, sizeof(value), "GIT_CONFIG_VALUE_%d", i);
+				if (!list_add_env_hash_part(parts, key) || !list_add_env_hash_part(parts, value)) {
+					return 0;
+				}
+			}
+		}
+	}
+	const char *global = getenv("GIT_CONFIG_GLOBAL");
+	const char *home = getenv("HOME");
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	char path[PATH_BUF];
+	if (global != NULL && global[0] != '\0') {
+		if (!list_add_git_config_file_part(parts, "global-env", global)) {
+			return 0;
+		}
+	} else if (home != NULL && home[0] != '\0') {
+		if (!join_path(path, sizeof(path), home, ".gitconfig") ||
+		    !list_add_git_config_file_part(parts, "global-home", path)) {
+			return 0;
+		}
+		if (xdg != NULL && xdg[0] != '\0') {
+			if (!join_path(path, sizeof(path), xdg, "git/config") ||
+			    !list_add_git_config_file_part(parts, "global-xdg", path)) {
+				return 0;
+			}
+		} else {
+			if (!join_path(path, sizeof(path), home, ".config/git/config") ||
+			    !list_add_git_config_file_part(parts, "global-xdg", path)) {
+				return 0;
+			}
+		}
+	}
+	const char *system = getenv("GIT_CONFIG_SYSTEM");
+	if (system != NULL && system[0] != '\0') {
+		if (!list_add_git_config_file_part(parts, "system-env", system)) {
+			return 0;
+		}
+	} else if (getenv("GIT_CONFIG_NOSYSTEM") == NULL) {
+		if (!list_add_git_config_file_part(parts, "system", "/etc/gitconfig") ||
+		    !list_add_git_config_file_part(parts, "system", "/usr/local/etc/gitconfig") ||
+		    !list_add_git_config_file_part(parts, "system", "/opt/homebrew/etc/gitconfig")) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 static int git_config_summary_fingerprint(const char *repo_root, const char *git_dir, char out[HASH_HEX]) {
 	(void)repo_root;
 	string_list parts = {0};
@@ -1047,8 +1445,7 @@ static int git_config_summary_fingerprint(const char *repo_root, const char *git
 	if (!join_path(path, sizeof(path), git_dir, "config")) {
 		return 0;
 	}
-	file_hash_or_missing(path, fp);
-	if (!list_add_path_hash_part(&parts, path, fp)) {
+	if (!list_add_git_config_file_part(&parts, "", path)) {
 		list_free(&parts);
 		return 0;
 	}
@@ -1061,7 +1458,11 @@ static int git_config_summary_fingerprint(const char *repo_root, const char *git
 		list_free(&parts);
 		return 0;
 	}
-	int ok = hash_joined_lines_ordered(&parts, out);
+	if (!add_external_git_config_fingerprints(&parts)) {
+		list_free(&parts);
+		return 0;
+	}
+	int ok = hash_joined_lines(&parts, out);
 	list_free(&parts);
 	return ok;
 }
@@ -1086,6 +1487,50 @@ static int git_attribute_fingerprint(const char *repo_root, const char *git_dir,
 		list_free(&parts);
 		return 0;
 	}
+	if (!add_configured_git_core_path_fingerprints(&parts, git_dir, "attributesfile", "attributes:core-attributes")) {
+		list_free(&parts);
+		return 0;
+	}
+	const char *home = getenv("HOME");
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (home != NULL && home[0] != '\0') {
+		char env_part[HASH_HEX];
+		sha256_hex_str(home, env_part);
+		if (!list_add_path_hash_part(&parts, "env:HOME", env_part)) {
+			list_free(&parts);
+			return 0;
+		}
+	}
+	if (xdg != NULL && xdg[0] != '\0') {
+		char attr_path[PATH_BUF], label[PATH_BUF + 32], attr_fp[HASH_HEX + 16], env_part[HASH_HEX];
+		sha256_hex_str(xdg, env_part);
+		if (!list_add_path_hash_part(&parts, "env:XDG_CONFIG_HOME", env_part)) {
+			list_free(&parts);
+			return 0;
+		}
+		if (!join_path(attr_path, sizeof(attr_path), xdg, "git/attributes")) {
+			list_free(&parts);
+			return 0;
+		}
+		file_hash_or_missing(attr_path, attr_fp);
+		if (snprintf(label, sizeof(label), "attributes:global-xdg:%s", attr_path) <= 0 ||
+		    !list_add_path_hash_part(&parts, label, attr_fp)) {
+			list_free(&parts);
+			return 0;
+		}
+	} else if (home != NULL && home[0] != '\0') {
+		char attr_path[PATH_BUF], label[PATH_BUF + 32], attr_fp[HASH_HEX + 16];
+		if (!join_path(attr_path, sizeof(attr_path), home, ".config/git/attributes")) {
+			list_free(&parts);
+			return 0;
+		}
+		file_hash_or_missing(attr_path, attr_fp);
+		if (snprintf(label, sizeof(label), "attributes:global-xdg:%s", attr_path) <= 0 ||
+		    !list_add_path_hash_part(&parts, label, attr_fp)) {
+			list_free(&parts);
+			return 0;
+		}
+	}
 	int ok = hash_joined_lines_ordered(&parts, out);
 	list_free(&parts);
 	return ok;
@@ -1098,6 +1543,33 @@ static long long stat_mtime_nano(const struct stat *st) {
 	return (long long)st->st_mtim.tv_sec * 1000000000LL + (long long)st->st_mtim.tv_nsec;
 #else
 	return (long long)st->st_mtime * 1000000000LL;
+#endif
+}
+
+static int file_stat_signal(const struct stat *st, const char *mode, char *out, size_t cap) {
+#if defined(__APPLE__)
+	return snprintf(out, cap, "%lld|%lld|%s|dev=%llu|ino=%llu|ctime=%lld.%ld",
+	                (long long)st->st_size,
+	                stat_mtime_nano(st),
+	                mode,
+	                (unsigned long long)st->st_dev,
+	                (unsigned long long)st->st_ino,
+	                (long long)st->st_ctimespec.tv_sec,
+	                (long)st->st_ctimespec.tv_nsec) > 0;
+#elif defined(__linux__)
+	return snprintf(out, cap, "%lld|%lld|%s|dev=%llu|ino=%llu|ctime=%lld.%ld",
+	                (long long)st->st_size,
+	                stat_mtime_nano(st),
+	                mode,
+	                (unsigned long long)st->st_dev,
+	                (unsigned long long)st->st_ino,
+	                (long long)st->st_ctim.tv_sec,
+	                (long)st->st_ctim.tv_nsec) > 0;
+#else
+	return snprintf(out, cap, "%lld|%lld|%s|change:unsupported",
+	                (long long)st->st_size,
+	                stat_mtime_nano(st),
+	                mode) > 0;
 #endif
 }
 
@@ -1177,6 +1649,51 @@ static int workspace_ignore_fingerprint(const char *repo_root, const char *git_d
 		}
 		file_hash_or_missing(path, fp);
 		if (!list_add_path_hash_part(&parts, path, fp)) {
+			list_free(&parts);
+			return 0;
+		}
+	}
+	if (git_dir != NULL && git_dir[0] != '\0' &&
+	    !add_configured_git_core_path_fingerprints(&parts, git_dir, "excludesfile", "ignore:core-excludes")) {
+		list_free(&parts);
+		return 0;
+	}
+	const char *home = getenv("HOME");
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (home != NULL && home[0] != '\0') {
+		char env_part[HASH_HEX];
+		sha256_hex_str(home, env_part);
+		if (!list_add_path_hash_part(&parts, "env:HOME", env_part)) {
+			list_free(&parts);
+			return 0;
+		}
+	}
+	if (xdg != NULL && xdg[0] != '\0') {
+		char path[PATH_BUF], label[PATH_BUF + 32], fp[HASH_HEX + 16], env_part[HASH_HEX];
+		sha256_hex_str(xdg, env_part);
+		if (!list_add_path_hash_part(&parts, "env:XDG_CONFIG_HOME", env_part)) {
+			list_free(&parts);
+			return 0;
+		}
+		if (!join_path(path, sizeof(path), xdg, "git/ignore")) {
+			list_free(&parts);
+			return 0;
+		}
+		file_hash_or_missing(path, fp);
+		if (snprintf(label, sizeof(label), "ignore:global-xdg:%s", path) <= 0 ||
+		    !list_add_path_hash_part(&parts, label, fp)) {
+			list_free(&parts);
+			return 0;
+		}
+	} else if (home != NULL && home[0] != '\0') {
+		char path[PATH_BUF], label[PATH_BUF + 32], fp[HASH_HEX + 16];
+		if (!join_path(path, sizeof(path), home, ".config/git/ignore")) {
+			list_free(&parts);
+			return 0;
+		}
+		file_hash_or_missing(path, fp);
+		if (snprintf(label, sizeof(label), "ignore:global-xdg:%s", path) <= 0 ||
+		    !list_add_path_hash_part(&parts, label, fp)) {
 			list_free(&parts);
 			return 0;
 		}
@@ -1406,9 +1923,11 @@ static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
 static void command_key(policy_invocation *inv, char out[HASH_HEX]) {
 	SQUIRE_SHA256_CTX ctx;
 	SQUIRE_SHA256_Init(&ctx);
+	SQUIRE_SHA256_Update(&ctx, (const unsigned char *)inv->cwd, strlen(inv->cwd));
+	unsigned char zero = 0;
+	SQUIRE_SHA256_Update(&ctx, &zero, 1);
 	for (int i = 0; i < inv->argc; i++) {
 		if (i > 0) {
-			unsigned char zero = 0;
 			SQUIRE_SHA256_Update(&ctx, &zero, 1);
 		}
 		SQUIRE_SHA256_Update(&ctx, (const unsigned char *)inv->argv[i], strlen(inv->argv[i]));

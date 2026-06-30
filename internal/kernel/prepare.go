@@ -114,15 +114,15 @@ func (k *Kernel) warm(ctx context.Context, cwd string, metadataOnly bool) (WarmR
 	}
 
 	var phases PhaseTimings
-	effectiveCWD := cwd
+	metadataCWD := cwd
 	if ws.OracleAvailable && ws.RepoRoot != "" {
-		effectiveCWD = ws.RepoRoot
+		metadataCWD = ws.RepoRoot
 	}
 	if ws.OracleAvailable && ws.Head != "" {
 		observedArgv := []string{"git", "rev-parse", "HEAD"}
-		observed := runNative(ctx, effectiveCWD, observedArgv)
+		observed := runNative(ctx, metadataCWD, observedArgv)
 		if observed.ExitCode == 0 {
-			if err := k.precomputeFastPathOutputs(ctx, effectiveCWD, "warm", observedArgv, observed, ws, ledger, &phases); err != nil {
+			if err := k.precomputeFastPathOutputs(ctx, metadataCWD, "warm", observedArgv, observed, ws, ledger, &phases); err != nil {
 				return WarmReport{}, err
 			}
 			for _, argv := range enabledFastPathArgv() {
@@ -148,11 +148,11 @@ func (k *Kernel) warm(ctx context.Context, cwd string, metadataOnly bool) (WarmR
 		return report, nil
 	}
 
-	prewarmed, prewarmedReports := k.prewarmProofGatedOutputs(ctx, effectiveCWD, ws, ledger, &phases)
+	prewarmed, prewarmedReports := k.prewarmProofGatedOutputs(ctx, cwd, ws, ledger, &phases)
 	report.ProofGatedPrewarmed += prewarmed
 	report.Prepared = append(report.Prepared, prewarmedReports...)
 
-	warmFiles, warmFileReports := k.prewarmWarmFiles(ctx, effectiveCWD, ws, ledger, &phases)
+	warmFiles, warmFileReports := k.prewarmWarmFiles(ctx, cwd, ws, ledger, &phases)
 	report.WarmFilesPrepared += warmFiles
 	report.Prepared = append(report.Prepared, warmFileReports...)
 
@@ -572,6 +572,7 @@ func runProofGatedNative(ctx context.Context, cwd string, argv []string) NativeR
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Dir = cwd
 		cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+		configureNativeCommandCleanup(cmd)
 		stdout, err := cmd.Output()
 		var stderr []byte
 		exitCode := 0

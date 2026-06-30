@@ -1,17 +1,20 @@
-# Squire Kernel Benchmarks
+# Squire Benchmarks
 
 All numbers here are scoped local measurements. They are not broad Codex or
 agent-speedup claims.
 
 ## Current Claim
 
-Squire Kernel accelerates repeated local Git metadata plus hot-prepared
+Squire accelerates repeated local Git metadata plus hot-prepared
 deterministic read-only discovery operations with:
 
 - exact stdout/stderr/exit-code preservation;
-- invalidation proof;
+- local validity proof;
 - native fallback;
 - no prompt/tool/model changes.
+
+Squire reports command-serving measurements. These benchmarks do not include
+model thinking time, API/network latency, or broad end-to-end Codex task time.
 
 ## Mixed Scoped-Session UX
 
@@ -31,16 +34,24 @@ Results:
 - exactness: `true`
 - exact stdout/stderr/exit-code mismatches: `0`
 - hot mmap replays: `204`
+- native fallbacks remained available for every miss and never-replay command
 - native total: `3797.337ms`
 - Squire session total: `816.421ms`
 - workload delta: `2980.916ms`
 - speedup: `4.651x`
 - replay p50/p95/p99/max: `132us` / `880us` / `1243us` / `1428us`
 
+Interpretation:
+
+- `204/270` commands were served from exact hot mmap replay.
+- The remaining commands either were native-control operations or did not have a
+  complete cheap proof.
+- The reported `4.651x` is for this local command-serving workload only.
+
 Script:
 
 ```sh
-python3 scripts/session_mixed_bench.py /private/tmp/squire-kernel-ux --json
+python3 scripts/session_mixed_bench.py /private/tmp/squire-ux --json
 ```
 
 ## VM/Codex Preload Samples
@@ -71,6 +82,32 @@ Results:
 - process CLI hot replay p95: `341us`
 - budget: `1000us`
 - violations: `0`
+
+## Cache-Break Stress
+
+Run date: `2026-06-30`
+
+Target:
+
+- intentionally create cache entries that would be stale if cwd or external Git
+  behavior inputs were not part of the replay proof.
+
+Reproduced and fixed stale replay candidates:
+
+- root-prepared `git status --short` reused from a subdirectory with different
+  cwd-relative bytes;
+- default global Git ignore file changes affecting `git status`;
+- included Git config file changes affecting `git status`;
+- default global Git attributes file changes affecting `git diff`;
+- configured `core.excludesFile` target changes affecting `git status`;
+- configured `core.attributesFile` target changes affecting `git diff`.
+
+Verification:
+
+- targeted regressions pass;
+- direct C mmap shim smoke hits at repo root and misses safely from a subdir
+  when only the root proof was prepared;
+- `go test ./...` passes.
 
 ## Multi-Agent Normal UX A/B
 

@@ -568,6 +568,7 @@ func runNative(ctx context.Context, cwd string, argv []string) NativeResult {
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = cwd
+	configureNativeCommandCleanup(cmd)
 	stdout, err := cmd.Output()
 	var stderr []byte
 	exitCode := 0

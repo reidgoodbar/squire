@@ -47,7 +47,7 @@ while [ "$#" -gt 0 ]; do
   goarch="$2"
   shift 2
 
-  name="squire-kernel_${version}_${goos}_${goarch}"
+  name="squire_${version}_${goos}_${goarch}"
   stage="$out_dir/$name"
   mkdir -p "$stage"
   binary="squire"
@@ -63,7 +63,7 @@ while [ "$#" -gt 0 ]; do
     -o "$stage/$binary" \
     ./cmd/squire
 
-  cp README.md RELEASE_CHECKLIST.md SQUIRE_KERNEL_CONTRACT.md "$stage/"
+  cp README.md RELEASE_CHECKLIST.md SQUIRE_CONTRACT.md "$stage/"
   mkdir -p "$stage/shims"
   cp shims/squire_mmap_shim.c "$stage/shims/"
   cp shims/squire_preload.c "$stage/shims/"
@@ -93,7 +93,7 @@ done
 )
 
 cat > "$out_dir/RELEASE_MANIFEST.txt" <<EOF
-Squire Kernel release artifacts
+Squire release artifacts
 version: $version
 commit: $commit
 date: $date_utc

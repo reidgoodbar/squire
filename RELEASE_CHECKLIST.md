@@ -1,14 +1,14 @@
-# Squire Kernel Release Checklist
+# Squire Release Checklist
 
-Use this checklist before publishing a Squire Kernel build. Keep release claims
-scoped to the proven kernel behavior.
+Use this checklist before publishing a Squire build. Keep release claims
+scoped to the proven Squire behavior.
 
 ## Release Claim
 
 Allowed claim:
 
-> Scoped kernel proof for repeated local Git metadata plus hot-prepared
-> deterministic read-only discovery operations.
+> Scoped proof for repeated local Git metadata plus hot-prepared deterministic
+> read-only discovery operations.
 
 Do not claim broad Codex, Claude, or general agent speedups. Report measured
 workload deltas only for the benchmark or dogfood run that produced them.
@@ -38,6 +38,7 @@ Normal release checks:
 
 ```sh
 go test ./...
+go test ./internal/kernel -run 'TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges' -count=1
 go run ./cmd/squire boost bench repo-metadata
 go run ./cmd/squire boost bench deep-local
 go run ./cmd/squire vm status --short
@@ -55,6 +56,10 @@ Required gates:
 - Enabled fast-path mismatches are zero.
 - Stale HEAD replays are zero.
 - Stale branch replays are zero.
+- Cwd-sensitive repo summary replay cannot cross directory boundaries.
+- External Git behavior inputs invalidate replay, including included config
+  files, default global ignore files, default global attributes files,
+  configured `core.excludesFile`, and configured `core.attributesFile`.
 - Validation replays are zero.
 - Safety gates pass.
 - Mutation-boundary invalidation is observed in the repo-metadata benchmark.
@@ -156,7 +161,7 @@ tmpbin=$(mktemp -d)
 SQUIRE_RELEASE_TARGETS="darwin arm64" \
 VERSION=v0.1.0-beta.1 \
 scripts/build_release_artifacts.sh .tmp/release
-SQUIRE_KERNEL_ARTIFACT_DIR=.tmp/release \
+SQUIRE_ARTIFACT_DIR=.tmp/release \
 SQUIRE_VERSION=v0.1.0-beta.1 \
 SQUIRE_INSTALL_DIR="$tmpbin" \
 ./install.sh
@@ -357,7 +362,7 @@ Expected behavior on Linux:
 - backend is `linux-local`
 - available is `true`
 - `uses_host_command_shims` is `false`
-- `squire vm session -- <command>` uses the scoped session kernel directly
+- `squire vm session -- <command>` uses the scoped session path directly
 
 If `SQUIRE_VM_RUNNER` or `--runner` is configured, smoke the runner contract in
 a temp repo:

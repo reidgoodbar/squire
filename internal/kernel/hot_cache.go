@@ -128,7 +128,7 @@ func (k *Kernel) findPreparedReplay(inv CommandInvocation, phases *PhaseTimings)
 	if !isHotPreparedReplayCandidate(inv.PolicyArgv) {
 		return preparedReplay{}, nil, false
 	}
-	candidates, diagnostics := k.residentPreparedReplayCandidates(preparedReplayLookupKey(inv.PolicyArgv), phases)
+	candidates, diagnostics := k.residentPreparedReplayCandidates(preparedReplayLookupKey(inv.PolicyCWD, inv.PolicyArgv), phases)
 	if len(candidates) == 0 {
 		return k.findPreparedWarmFileReplay(inv, diagnostics, phases)
 	}
@@ -145,8 +145,8 @@ func (k *Kernel) findPreparedReplay(inv CommandInvocation, phases *PhaseTimings)
 	return k.findPreparedWarmFileReplay(inv, diagnostics, phases)
 }
 
-func preparedReplayLookupKey(argv []string) string {
-	return hashString(normalizeArgv(normalizeArgvForPolicy(argv)))
+func preparedReplayLookupKey(cwd string, argv []string) string {
+	return hashString(absPath(cwd) + "\x00" + normalizeArgv(normalizeArgvForPolicy(argv)))
 }
 
 func (k *Kernel) residentPreparedReplayCandidates(command string, phases *PhaseTimings) ([]preparedReplay, []string) {
@@ -300,7 +300,7 @@ func repoSummaryHotProof(cwd string, argv []string) (map[string]string, string, 
 	}
 	hot := map[string]string{
 		"hot_cwd":     hashString(absPath(cwd)),
-		"hot_command": hashString(normalizeArgv(normalizeArgvForPolicy(argv))),
+		"hot_command": preparedReplayLookupKey(cwd, argv),
 	}
 	for k, v := range fp {
 		hot[k] = v
@@ -323,7 +323,7 @@ func fastPathHotProof(cwd string, argv []string) (map[string]string, string, boo
 	}
 	fp := map[string]string{
 		"hot_cwd":     hashString(absPath(cwd)),
-		"hot_command": hashString(normalizeArgv(argv)),
+		"hot_command": preparedReplayLookupKey(cwd, argv),
 		"repo_root":   hashString(repoRoot),
 	}
 	var epoch string
@@ -360,7 +360,7 @@ func fastPathHotProofFromWorld(ws WorldState, argv []string) (map[string]string,
 	argv = normalizeArgvForPolicy(argv)
 	fp := map[string]string{
 		"hot_cwd":     hashString(ws.RepoRoot),
-		"hot_command": hashString(normalizeArgv(argv)),
+		"hot_command": preparedReplayLookupKey(ws.RepoRoot, argv),
 		"repo_root":   hashString(ws.RepoRoot),
 	}
 	var epoch string
@@ -459,7 +459,7 @@ func fileInspectionHotProof(cwd string, argv []string) (map[string]string, strin
 	rel = filepath.ToSlash(rel)
 	fp := map[string]string{
 		"hot_cwd":            hashString(root),
-		"hot_command":        hashString(normalizeArgv(argv)),
+		"hot_command":        preparedReplayLookupKey(root, argv),
 		"file_path":          hashString(rel),
 		"file_name":          hashString(filepath.Base(path)),
 		"file_content":       contentHash,
@@ -482,7 +482,7 @@ func toolVersionHotProof(cwd string, argv []string) (map[string]string, string, 
 	}
 	fp := map[string]string{
 		"hot_cwd":            hashString(absPath(cwd)),
-		"hot_command":        hashString(normalizeArgv(argv)),
+		"hot_command":        preparedReplayLookupKey(cwd, argv),
 		"tool_name":          hashString(name),
 		"tool_path":          signal.PathHash,
 		"tool_executable":    signal.FileHash,
@@ -510,7 +510,7 @@ func commandPathHotProof(cwd string, argv []string) (map[string]string, string, 
 	}
 	fp := map[string]string{
 		"hot_cwd":           hashString(absPath(cwd)),
-		"hot_command":       hashString(normalizeArgv(argv)),
+		"hot_command":       preparedReplayLookupKey(cwd, argv),
 		"lookup_tool":       hashString(target),
 		"which_path":        whichSignal.PathHash,
 		"which_executable":  whichSignal.FileHash,

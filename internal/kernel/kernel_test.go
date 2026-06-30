@@ -865,6 +865,447 @@ func TestProofGatedRepoSummaryReplaysAfterWarm(t *testing.T) {
 	}
 }
 
+func TestProofGatedRepoSummaryDoesNotReplayAfterSameStatSignalWorkspaceChange(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.Mkdir(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, ctx, repo, filepath.Join("src", "app.js"), "export const value = 000;\n", "add app")
+	path := filepath.Join(repo, "src", "app.js")
+	original := []byte("export const value = 111;\n")
+	changed := []byte("export const value = 222;\n")
+	if len(original) != len(changed) {
+		t.Fatal("test fixture contents must have equal size")
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixedTime := time.Unix(1_700_000_000, 222_333_444)
+	if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"git", "status", "--short"},
+		{"git", "diff", "--", "src/app.js"},
+	} {
+		warmed := k.Run(ctx, "test", repo, argv)
+		if warmed.Mode != ModeReplay {
+			t.Fatalf("%s warmup mode = %s, want replay; diagnostics=%v", displayCommand(argv), warmed.Mode, warmed.Diagnostics)
+		}
+		assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, runNative(ctx, repo, argv))
+	}
+
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	afterStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeStat.Size() != afterStat.Size() || !beforeStat.ModTime().Equal(afterStat.ModTime()) || beforeStat.Mode() != afterStat.Mode() {
+		t.Skipf("filesystem did not preserve same legacy stat signal: before=%q after=%q", legacyStatSignal(beforeStat), legacyStatSignal(afterStat))
+	}
+
+	status := k.Run(ctx, "test", repo, []string{"git", "status", "--short"})
+	if status.Mode == ModeReplay {
+		t.Fatalf("git status replayed after same-stat workspace content change")
+	}
+	assertSameResult(t, status.Stdout, status.Stderr, status.ExitCode, runNative(ctx, repo, []string{"git", "status", "--short"}))
+
+	diff := k.Run(ctx, "test", repo, []string{"git", "diff", "--", "src/app.js"})
+	nativeDiff := runNative(ctx, repo, []string{"git", "diff", "--", "src/app.js"})
+	if diff.Mode == ModeReplay {
+		t.Fatalf("git diff replayed after same-stat workspace content change")
+	}
+	assertSameResult(t, diff.Stdout, diff.Stderr, diff.ExitCode, nativeDiff)
+	if !strings.Contains(string(nativeDiff.Stdout), "222") {
+		t.Fatalf("native diff did not include changed bytes: %q", nativeDiff.Stdout)
+	}
+}
+
+func TestProofGatedRepoSummaryDoesNotReplayAfterModeOnlyWorkspaceChange(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if res := runNative(ctx, repo, []string{"git", "config", "core.filemode", "true"}); res.ExitCode != 0 {
+		t.Fatalf("git config core.filemode failed: %s", res.Stderr)
+	}
+	commitFile(t, ctx, repo, "script.sh", "#!/bin/sh\necho hi\n", "add script")
+	path := filepath.Join(repo, "script.sh")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if native := runNative(ctx, repo, []string{"git", "status", "--short"}); native.ExitCode != 0 || len(native.Stdout) != 0 {
+		t.Fatalf("repo not clean before warm: exit=%d stdout=%q stderr=%q", native.ExitCode, native.Stdout, native.Stderr)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"git", "status", "--short"},
+		{"git", "diff", "--", "script.sh"},
+	} {
+		warmed := k.Run(ctx, "test", repo, argv)
+		if warmed.Mode != ModeReplay {
+			t.Fatalf("%s warmup mode = %s, want replay; diagnostics=%v", displayCommand(argv), warmed.Mode, warmed.Diagnostics)
+		}
+		assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, runNative(ctx, repo, argv))
+	}
+
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nativeStatus := runNative(ctx, repo, []string{"git", "status", "--short"})
+	nativeDiff := runNative(ctx, repo, []string{"git", "diff", "--", "script.sh"})
+	if len(nativeStatus.Stdout) == 0 && len(nativeDiff.Stdout) == 0 {
+		t.Skip("native git did not report mode-only change")
+	}
+
+	status := k.Run(ctx, "test", repo, []string{"git", "status", "--short"})
+	if status.Mode == ModeReplay {
+		t.Fatalf("git status replayed after mode-only workspace change")
+	}
+	assertSameResult(t, status.Stdout, status.Stderr, status.ExitCode, nativeStatus)
+
+	diff := k.Run(ctx, "test", repo, []string{"git", "diff", "--", "script.sh"})
+	if diff.Mode == ModeReplay {
+		t.Fatalf("git diff replayed after mode-only workspace change")
+	}
+	assertSameResult(t, diff.Stdout, diff.Stderr, diff.ExitCode, nativeDiff)
+}
+
+func TestProofGatedRepoSummaryDoesNotReplayWhenGlobalGitConfigChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	subdir := filepath.Join(repo, "src")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgTrue := filepath.Join(repo, "global-true.gitconfig")
+	cfgFalse := filepath.Join(repo, "global-false.gitconfig")
+	if err := os.WriteFile(cfgTrue, []byte("[status]\n\trelativePaths = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgFalse, []byte("[status]\n\trelativePaths = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", cfgTrue)
+	argv := []string{"git", "status", "--short"}
+	nativeTrue := runNative(ctx, subdir, argv)
+	if nativeTrue.ExitCode != 0 {
+		t.Fatalf("native true config failed: %s", nativeTrue.Stderr)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfgFalse)
+	nativeFalse := runNative(ctx, subdir, argv)
+	if nativeFalse.ExitCode != 0 {
+		t.Fatalf("native false config failed: %s", nativeFalse.Stderr)
+	}
+	if string(nativeTrue.Stdout) == string(nativeFalse.Stdout) {
+		t.Skipf("global status.relativePaths did not change native output: %q", nativeTrue.Stdout)
+	}
+
+	t.Setenv("GIT_CONFIG_GLOBAL", cfgTrue)
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, subdir); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", subdir, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeTrue)
+
+	t.Setenv("GIT_CONFIG_GLOBAL", cfgFalse)
+	after := k.Run(ctx, "test", subdir, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git status replayed across global git config change: got %q want native %q", after.Stdout, nativeFalse.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeFalse)
+}
+
+func TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	home := filepath.Join(t.TempDir(), "home")
+	xdg := filepath.Join(home, ".config")
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+
+	if err := os.WriteFile(filepath.Join(repo, "scratch.log"), []byte("scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"git", "status", "--short"}
+	nativeBefore := runNative(ctx, repo, argv)
+	if nativeBefore.ExitCode != 0 {
+		t.Fatalf("native status before failed: %s", nativeBefore.Stderr)
+	}
+	if !strings.Contains(string(nativeBefore.Stdout), "scratch.log") {
+		t.Fatalf("native status before did not include scratch.log: %q", nativeBefore.Stdout)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeBefore)
+
+	if err := os.WriteFile(filepath.Join(xdg, "git", "ignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nativeAfter := runNative(ctx, repo, argv)
+	if nativeAfter.ExitCode != 0 {
+		t.Fatalf("native status after failed: %s", nativeAfter.Stderr)
+	}
+	if strings.Contains(string(nativeAfter.Stdout), "scratch.log") {
+		t.Skipf("native git did not apply default global ignore: %q", nativeAfter.Stdout)
+	}
+
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git status replayed across default global ignore change: got %q want native %q", after.Stdout, nativeAfter.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeAfter)
+}
+
+func TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	subdir := filepath.Join(repo, "src")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	includePath := filepath.Join(t.TempDir(), "included.gitconfig")
+	if err := os.WriteFile(includePath, []byte("[status]\n\trelativePaths = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := runNative(ctx, repo, []string{"git", "config", "--local", "include.path", includePath}); res.ExitCode != 0 {
+		t.Fatalf("git config include.path failed: %s", res.Stderr)
+	}
+
+	argv := []string{"git", "status", "--short"}
+	nativeTrue := runNative(ctx, subdir, argv)
+	if nativeTrue.ExitCode != 0 {
+		t.Fatalf("native status with included true config failed: %s", nativeTrue.Stderr)
+	}
+	if err := os.WriteFile(includePath, []byte("[status]\n\trelativePaths = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nativeFalse := runNative(ctx, subdir, argv)
+	if nativeFalse.ExitCode != 0 {
+		t.Fatalf("native status with included false config failed: %s", nativeFalse.Stderr)
+	}
+	if string(nativeTrue.Stdout) == string(nativeFalse.Stdout) {
+		t.Skipf("included status.relativePaths did not change native output: %q", nativeTrue.Stdout)
+	}
+
+	if err := os.WriteFile(includePath, []byte("[status]\n\trelativePaths = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, subdir); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", subdir, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeTrue)
+
+	if err := os.WriteFile(includePath, []byte("[status]\n\trelativePaths = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after := k.Run(ctx, "test", subdir, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git status replayed across included git config change: got %q want native %q", after.Stdout, nativeFalse.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeFalse)
+}
+
+func TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	home := filepath.Join(t.TempDir(), "home")
+	xdg := filepath.Join(home, ".config")
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+
+	commitFile(t, ctx, repo, "data.dat", "one\n", "add data")
+	if err := os.WriteFile(filepath.Join(repo, "data.dat"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"git", "diff"}
+	nativeBefore := runNative(ctx, repo, argv)
+	if nativeBefore.ExitCode != 0 {
+		t.Fatalf("native diff before failed: %s", nativeBefore.Stderr)
+	}
+	if !strings.Contains(string(nativeBefore.Stdout), "-one") || !strings.Contains(string(nativeBefore.Stdout), "+two") {
+		t.Fatalf("native diff before did not look textual: %q", nativeBefore.Stdout)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeBefore)
+
+	if err := os.WriteFile(filepath.Join(xdg, "git", "attributes"), []byte("*.dat -diff\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nativeAfter := runNative(ctx, repo, argv)
+	if nativeAfter.ExitCode != 0 {
+		t.Fatalf("native diff after failed: %s", nativeAfter.Stderr)
+	}
+	if string(nativeAfter.Stdout) == string(nativeBefore.Stdout) {
+		t.Skipf("native git did not apply default global attributes: %q", nativeAfter.Stdout)
+	}
+
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git diff replayed across default global attributes change: got %q want native %q", after.Stdout, nativeAfter.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeAfter)
+}
+
+func TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	excludesPath := filepath.Join(t.TempDir(), "excludes")
+	if err := os.WriteFile(excludesPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := runNative(ctx, repo, []string{"git", "config", "--local", "core.excludesFile", excludesPath}); res.ExitCode != 0 {
+		t.Fatalf("git config core.excludesFile failed: %s", res.Stderr)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "scratch.log"), []byte("scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argv := []string{"git", "status", "--short"}
+	nativeBefore := runNative(ctx, repo, argv)
+	if nativeBefore.ExitCode != 0 {
+		t.Fatalf("native status before failed: %s", nativeBefore.Stderr)
+	}
+	if !strings.Contains(string(nativeBefore.Stdout), "scratch.log") {
+		t.Fatalf("native status before did not include scratch.log: %q", nativeBefore.Stdout)
+	}
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeBefore)
+
+	if err := os.WriteFile(excludesPath, []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nativeAfter := runNative(ctx, repo, argv)
+	if nativeAfter.ExitCode != 0 {
+		t.Fatalf("native status after failed: %s", nativeAfter.Stderr)
+	}
+	if strings.Contains(string(nativeAfter.Stdout), "scratch.log") {
+		t.Skipf("native git did not apply configured excludes file: %q", nativeAfter.Stdout)
+	}
+
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git status replayed across configured excludes file change: got %q want native %q", after.Stdout, nativeAfter.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeAfter)
+}
+
+func TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	attributesPath := filepath.Join(t.TempDir(), "attributes")
+	if err := os.WriteFile(attributesPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := runNative(ctx, repo, []string{"git", "config", "--local", "core.attributesFile", attributesPath}); res.ExitCode != 0 {
+		t.Fatalf("git config core.attributesFile failed: %s", res.Stderr)
+	}
+	commitFile(t, ctx, repo, "data.dat", "one\n", "add data")
+	if err := os.WriteFile(filepath.Join(repo, "data.dat"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argv := []string{"git", "diff"}
+	nativeBefore := runNative(ctx, repo, argv)
+	if nativeBefore.ExitCode != 0 {
+		t.Fatalf("native diff before failed: %s", nativeBefore.Stderr)
+	}
+	if !strings.Contains(string(nativeBefore.Stdout), "-one") || !strings.Contains(string(nativeBefore.Stdout), "+two") {
+		t.Fatalf("native diff before did not look textual: %q", nativeBefore.Stdout)
+	}
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, nativeBefore)
+
+	if err := os.WriteFile(attributesPath, []byte("*.dat -diff\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nativeAfter := runNative(ctx, repo, argv)
+	if nativeAfter.ExitCode != 0 {
+		t.Fatalf("native diff after failed: %s", nativeAfter.Stderr)
+	}
+	if string(nativeAfter.Stdout) == string(nativeBefore.Stdout) {
+		t.Skipf("native git did not apply configured attributes file: %q", nativeAfter.Stdout)
+	}
+
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("git diff replayed across configured attributes file change: got %q want native %q", after.Stdout, nativeAfter.Stdout)
+	}
+	assertSameResult(t, after.Stdout, after.Stderr, after.ExitCode, nativeAfter)
+}
+
 func TestProofGatedStatusInvalidatesOnCommitHeadChange(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)
@@ -1221,6 +1662,123 @@ func TestProofGatedToolDiscoveryReplays(t *testing.T) {
 	}
 }
 
+func TestToolVersionDoesNotReplayAfterSameStatSignalExecutableChange(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	binDir := filepath.Join(repo, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolPath := filepath.Join(binDir, "python3")
+	original := []byte("#!/bin/sh\nprintf 'Python 3.11.1\\n'\n")
+	changed := []byte("#!/bin/sh\nprintf 'Python 3.11.2\\n'\n")
+	if len(original) != len(changed) {
+		t.Fatal("test fixture contents must have equal size")
+	}
+	if err := os.WriteFile(toolPath, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixedTime := time.Unix(1_700_000_000, 987_654_321)
+	if err := os.Chtimes(toolPath, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(toolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"python3", "--version"}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, runNative(ctx, repo, argv))
+
+	if err := os.WriteFile(toolPath, changed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(toolPath, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(toolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+		t.Skipf("filesystem did not preserve same legacy stat signal: before=%q after=%q", legacyStatSignal(before), legacyStatSignal(after))
+	}
+
+	res := k.Run(ctx, "test", repo, argv)
+	native := runNative(ctx, repo, argv)
+	if string(native.Stdout) != "Python 3.11.2\n" {
+		t.Fatalf("native did not see changed executable output: stdout=%q stderr=%q exit=%d", native.Stdout, native.Stderr, native.ExitCode)
+	}
+	if res.Mode == ModeReplay {
+		t.Fatalf("same-stat executable change replayed stale output: got %q want native %q", res.Stdout, native.Stdout)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, native)
+}
+
+func TestToolVersionDoesNotReplayAfterPATHSymlinkRetarget(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	binDir := filepath.Join(repo, "bin")
+	toolDir := filepath.Join(repo, "tools")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(toolDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolA := filepath.Join(toolDir, "python-a")
+	toolB := filepath.Join(toolDir, "python-b")
+	for path, content := range map[string]string{
+		toolA: "#!/bin/sh\nprintf 'Python 3.11.1\\n'\n",
+		toolB: "#!/bin/sh\nprintf 'Python 3.11.2\\n'\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(binDir, "python3")
+	if err := os.Symlink(toolA, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"python3", "--version"}
+	warmed := k.Run(ctx, "test", repo, argv)
+	if warmed.Mode != ModeReplay {
+		t.Fatalf("warmup mode = %s, want replay; diagnostics=%v", warmed.Mode, warmed.Diagnostics)
+	}
+	assertSameResult(t, warmed.Stdout, warmed.Stderr, warmed.ExitCode, runNative(ctx, repo, argv))
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(toolB, link); err != nil {
+		t.Fatal(err)
+	}
+	native := runNative(ctx, repo, argv)
+	if string(native.Stdout) != "Python 3.11.2\n" {
+		t.Fatalf("native did not see retargeted executable output: stdout=%q stderr=%q exit=%d", native.Stdout, native.Stderr, native.ExitCode)
+	}
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode == ModeReplay {
+		t.Fatalf("symlink-retargeted executable replayed stale output: got %q want native %q", res.Stdout, native.Stdout)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, native)
+}
+
 func TestDeepLocalReportTiering(t *testing.T) {
 	ctx := context.Background()
 	// Use very small options to keep the benchmark fast in CI.
@@ -1534,7 +2092,7 @@ func TestKernelStatusSummaryIsCompact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Squire Kernel status", "readiness:", "repo_oracle:", "repo_root:", "native_fallback: available", "runtime_decisions: replay_or_native", "enabled_fast_paths:", "prepared_entries:", "hot_snapshot:", "background_maintainer:"} {
+	for _, want := range []string{"Squire status", "readiness:", "repo_oracle:", "repo_root:", "native_fallback: available", "runtime_decisions: replay_or_native", "enabled_fast_paths:", "prepared_entries:", "hot_snapshot:", "background_maintainer:"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("kernel status summary missing %q:\n%s", want, status)
 		}
@@ -1630,7 +2188,7 @@ func testRepo(t *testing.T, ctx context.Context) string {
 	for _, argv := range [][]string{
 		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "squire@example.invalid"},
-		{"git", "config", "user.name", "Squire Kernel"},
+		{"git", "config", "user.name", "Squire"},
 	} {
 		if res := runNative(ctx, dir, argv); res.ExitCode != 0 {
 			t.Fatalf("%s failed: %s", displayCommand(argv), res.Stderr)

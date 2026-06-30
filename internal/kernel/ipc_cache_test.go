@@ -139,6 +139,46 @@ func TestHotSnapshotReplaysWithoutSocket(t *testing.T) {
 	}
 }
 
+func TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	subdir := filepath.Join(repo, "src")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, ctx, repo, filepath.Join("src", "app.js"), "export const value = 1;\n", "add app")
+	if err := os.WriteFile(filepath.Join(subdir, "app.js"), []byte("export const value = 2;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argv := []string{"git", "status", "--short"}
+	rootNative := runNative(ctx, repo, argv)
+	subdirNative := runNative(ctx, subdir, argv)
+	if rootNative.ExitCode != 0 || subdirNative.ExitCode != 0 {
+		t.Fatalf("native status failed: root=%q subdir=%q", rootNative.Stderr, subdirNative.Stderr)
+	}
+	if string(rootNative.Stdout) == string(subdirNative.Stdout) {
+		t.Skipf("native status output is not cwd-sensitive in this environment: %q", rootNative.Stdout)
+	}
+
+	storeRoot := DefaultStoreRoot(repo)
+	if _, err := New(storeRoot).Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	client := New(storeRoot)
+	rootReplay := client.Run(ctx, "test", repo, argv)
+	if rootReplay.Mode != ModeReplay {
+		t.Fatalf("root mode = %s, want replay; diagnostics=%v", rootReplay.Mode, rootReplay.Diagnostics)
+	}
+	assertSameResult(t, rootReplay.Stdout, rootReplay.Stderr, rootReplay.ExitCode, rootNative)
+
+	subdirResult := client.Run(ctx, "test", subdir, argv)
+	assertSameResult(t, subdirResult.Stdout, subdirResult.Stderr, subdirResult.ExitCode, subdirNative)
+	if subdirResult.Mode == ModeReplay && string(subdirResult.Stdout) == string(rootNative.Stdout) {
+		t.Fatalf("hot snapshot replayed root-relative status in subdir: got %q want %q", subdirResult.Stdout, subdirNative.Stdout)
+	}
+}
+
 func TestHotSnapshotStaleEpochFallsBackNative(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)

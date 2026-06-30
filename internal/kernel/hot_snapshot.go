@@ -334,7 +334,7 @@ func (k *Kernel) readHotSnapshotResponse(path string, inv CommandInvocation) (ho
 	if !ok {
 		return hotCacheResponse{}, false
 	}
-	commandKey := preparedReplayLookupKey(inv.PolicyArgv)
+	commandKey := preparedReplayLookupKey(inv.PolicyCWD, inv.PolicyArgv)
 	epochHash := hashString(hotEpoch)
 
 	info, err := os.Stat(path)
@@ -386,7 +386,7 @@ func readHotSnapshotResponse(path string, inv CommandInvocation) (hotCacheRespon
 	if !ok {
 		return hotCacheResponse{}, false
 	}
-	commandKey := preparedReplayLookupKey(inv.PolicyArgv)
+	commandKey := preparedReplayLookupKey(inv.PolicyCWD, inv.PolicyArgv)
 	epochHash := hashString(hotEpoch)
 	data, cleanup, err := mapHotSnapshotFile(path)
 	if err != nil {

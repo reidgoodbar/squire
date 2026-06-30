@@ -1,6 +1,6 @@
-# Squire Kernel
+# Squire
 
-Squire Kernel is a local performance layer for AI coding agents.
+Squire is a local performance layer for AI coding agents.
 
 The agent still chooses every command. Squire watches and warms the local
 workspace, then serves exact cached results for deterministic read-only
@@ -43,6 +43,26 @@ Squire runs underneath Codex:
 - serves exact hot-snapshot hits when safe;
 - falls back to native execution on every miss or unsafe operation.
 
+## Cache Validity
+
+Squire does not trust a cached answer just because it exists. Every replay is a
+proof check against the current local world:
+
+- the normalized command, cwd, repo root, and tool identity must match;
+- relevant Git epochs, content hashes, config/index fingerprints, executable
+  byte identity, selected environment inputs, and OS change signals must still
+  match;
+- Git-sensitive replay also proves cwd-relative output boundaries and relevant
+  external Git inputs such as config includes, global ignore files, global
+  attributes files, `core.excludesFile`, and `core.attributesFile`;
+- the cached stdout, stderr, and exit code must come from a previous exact
+  native observation or a hot-prepared exact observation;
+- the operation must still be allowed by policy.
+
+If any proof element is missing, stale, too expensive to check, or corrupted,
+Squire runs the original command natively. Stale cache entries may remain on
+disk, but they are not valid replay entries unless the proof passes.
+
 Optional observability after a session:
 
 ```sh
@@ -63,7 +83,7 @@ Squire is not a new agent tool and does not change the prompt/tool surface.
 On macOS, `squire codex` uses a ready Linux microVM backend when it is already
 configured. If the VM is unavailable or fails before Codex takes over, Squire
 falls back to the host scoped session. On Linux, it uses the local scoped
-session kernel directly.
+session path directly.
 
 `squire setup` still exists, but it is an advanced preflight/repair command, not
 part of the happy path.
@@ -102,15 +122,19 @@ matches.
 
 ## Current Evidence
 
-Current scoped proof:
+Current scoped claim:
 
-> Squire Kernel accelerates repeated local Git metadata plus hot-prepared
+> Squire accelerates repeated local Git metadata plus hot-prepared
 > deterministic read-only discovery operations with exact stdout/stderr/exit
-> code preservation, invalidation proof, and native fallback.
+> code preservation, local validity proof, and native fallback.
 
 Latest mixed local UX benchmark:
 
 - commands: `270`
+- workload: fresh Python/TypeScript repo, one normal scoped zsh session, plain
+  commands across Git metadata, repo summaries, bounded file reads, tool
+  probes, and native-control commands
+- agent-visible Squire commands in measured stream: `0`
 - exact mismatches: `0`
 - hot mmap replays: `204`
 - native total: `3797.337ms`
@@ -119,7 +143,18 @@ Latest mixed local UX benchmark:
 - speedup: `4.651x`
 - replay p50/p95/p99/max: `132us` / `880us` / `1243us` / `1428us`
 
-This is a scoped local-command claim, not a broad Codex speedup claim.
+This benchmark measures local command-serving time only. It does not include
+model thinking time, network time, or a broad Codex task-speedup claim.
+
+Latest cache-break stress pass:
+
+- reproduced stale replay candidates for cwd-sensitive `git status`, default
+  global Git ignore, included Git config, default global Git attributes,
+  configured `core.excludesFile`, and configured `core.attributesFile`;
+- fixed those proof gaps in both Go hot snapshot logic and the C mmap/preload
+  reader;
+- added regressions that require native fallback or a fresh proof instead of
+  stale bytes.
 
 More detail: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
@@ -145,6 +180,9 @@ squire boost bench repo-metadata [--short|--json]
 squire boost bench deep-local [--short|--json]
 ```
 
+The advanced `squire kernel ...` namespace is kept for compatibility with
+existing diagnostics and release scripts.
+
 ## Development
 
 ```sh
@@ -154,6 +192,6 @@ git diff --check
 
 Release checklist: [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
 
-Kernel contract: [SQUIRE_KERNEL_CONTRACT.md](SQUIRE_KERNEL_CONTRACT.md)
+Squire contract: [SQUIRE_CONTRACT.md](SQUIRE_CONTRACT.md)
 
 Advanced architecture: [docs/ADVANCED.md](docs/ADVANCED.md)

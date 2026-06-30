@@ -729,11 +729,14 @@ func executableSignal(cwd, name string) (executableProofSignal, bool) {
 	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
 		return executableProofSignal{}, false
 	}
+	contentHash, ok := hashFile(path)
+	if !ok {
+		return executableProofSignal{}, false
+	}
 	signal := strings.Join([]string{
 		filepath.Base(path),
-		strconv.FormatInt(info.Size(), 10),
-		strconv.FormatInt(info.ModTime().UnixNano(), 10),
-		info.Mode().String(),
+		contentHash,
+		fileHashStatSignal(info),
 	}, "|")
 	return executableProofSignal{
 		PathHash: hashString(path),
@@ -795,13 +798,144 @@ func fileHashOrMissing(path string) string {
 
 func gitConfigSummaryFingerprint(repoRoot, gitDirAbs string) string {
 	var parts []string
-	for _, path := range []string{
-		filepath.Join(gitDirAbs, "config"),
-		filepath.Join(gitDirAbs, "info", "sparse-checkout"),
-	} {
-		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
-	}
+	parts = append(parts, gitConfigFileFingerprints("", filepath.Join(gitDirAbs, "config"))...)
+	parts = append(parts, filepath.Join(gitDirAbs, "info", "sparse-checkout")+"\x00"+fileHashOrMissing(filepath.Join(gitDirAbs, "info", "sparse-checkout")))
+	parts = append(parts, externalGitConfigFingerprints()...)
+	sort.Strings(parts)
 	return hashString(strings.Join(parts, "\n"))
+}
+
+func gitConfigFileFingerprints(label, path string) []string {
+	if path == "" {
+		return nil
+	}
+	var parts []string
+	if label == "" {
+		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
+	} else {
+		parts = append(parts, "config:"+label+":"+path+"\x00"+fileHashOrMissing(path))
+	}
+	for _, includePath := range gitConfigIncludePaths(path, map[string]bool{}, 0) {
+		parts = append(parts, "config-include:"+includePath+"\x00"+fileHashOrMissing(includePath))
+	}
+	return parts
+}
+
+func externalGitConfigFingerprints() []string {
+	var parts []string
+	for _, key := range []string{
+		"GIT_CONFIG_NOSYSTEM",
+		"GIT_CONFIG_SYSTEM",
+		"GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_PARAMETERS",
+		"HOME",
+		"XDG_CONFIG_HOME",
+	} {
+		parts = append(parts, "env:"+key+"\x00"+hashString(os.Getenv(key)))
+	}
+	if count, err := strconv.Atoi(os.Getenv("GIT_CONFIG_COUNT")); err == nil && count > 0 && count < 128 {
+		for i := 0; i < count; i++ {
+			key := fmt.Sprintf("GIT_CONFIG_KEY_%d", i)
+			value := fmt.Sprintf("GIT_CONFIG_VALUE_%d", i)
+			parts = append(parts, "env:"+key+"\x00"+hashString(os.Getenv(key)))
+			parts = append(parts, "env:"+value+"\x00"+hashString(os.Getenv(value)))
+		}
+	}
+	addConfigPath := func(label, path string) {
+		if path == "" {
+			return
+		}
+		parts = append(parts, gitConfigFileFingerprints(label, path)...)
+	}
+	if global := os.Getenv("GIT_CONFIG_GLOBAL"); global != "" {
+		addConfigPath("global-env", global)
+	} else if home := os.Getenv("HOME"); home != "" {
+		addConfigPath("global-home", filepath.Join(home, ".gitconfig"))
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			addConfigPath("global-xdg", filepath.Join(xdg, "git", "config"))
+		} else {
+			addConfigPath("global-xdg", filepath.Join(home, ".config", "git", "config"))
+		}
+	}
+	if system := os.Getenv("GIT_CONFIG_SYSTEM"); system != "" {
+		addConfigPath("system-env", system)
+	} else if os.Getenv("GIT_CONFIG_NOSYSTEM") == "" {
+		for _, path := range []string{"/etc/gitconfig", "/usr/local/etc/gitconfig", "/opt/homebrew/etc/gitconfig"} {
+			addConfigPath("system", path)
+		}
+	}
+	return parts
+}
+
+func gitConfigIncludePaths(configPath string, seen map[string]bool, depth int) []string {
+	if configPath == "" || depth > 8 {
+		return nil
+	}
+	configPath = filepath.Clean(configPath)
+	if seen[configPath] {
+		return nil
+	}
+	seen[configPath] = true
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+	var includes []string
+	section := ""
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			end := strings.Index(line, "]")
+			if end < 0 {
+				section = ""
+				continue
+			}
+			section = strings.ToLower(strings.TrimSpace(line[1:end]))
+			continue
+		}
+		if section != "include" && !strings.HasPrefix(section, "includeif ") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "path") {
+			continue
+		}
+		includePath := resolveGitConfigIncludePath(strings.TrimSpace(value), filepath.Dir(configPath))
+		if includePath == "" {
+			continue
+		}
+		includes = append(includes, includePath)
+		includes = append(includes, gitConfigIncludePaths(includePath, seen, depth+1)...)
+	}
+	return includes
+}
+
+func resolveGitConfigIncludePath(value, baseDir string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	if value == "" {
+		return ""
+	}
+	if value == "~" {
+		if home := os.Getenv("HOME"); home != "" {
+			return filepath.Clean(home)
+		}
+		return ""
+	}
+	if strings.HasPrefix(value, "~/") {
+		if home := os.Getenv("HOME"); home != "" {
+			return filepath.Clean(filepath.Join(home, value[2:]))
+		}
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Clean(filepath.Join(baseDir, value))
 }
 
 func gitAttributeFingerprint(repoRoot, gitDirAbs string) string {
@@ -812,7 +946,109 @@ func gitAttributeFingerprint(repoRoot, gitDirAbs string) string {
 	} {
 		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
 	}
+	if gitDirAbs != "" {
+		parts = append(parts, configuredGitCorePathFingerprints(gitDirAbs, "attributesfile", "attributes:core-attributes")...)
+	}
+	parts = append(parts, externalGitAttributeFingerprints()...)
 	return hashString(strings.Join(parts, "\n"))
+}
+
+func externalGitAttributeFingerprints() []string {
+	var parts []string
+	addAttributesPath := func(label, path string) {
+		if path == "" {
+			return
+		}
+		parts = append(parts, "attributes:"+label+":"+path+"\x00"+fileHashOrMissing(path))
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		parts = append(parts, "env:HOME\x00"+hashString(home))
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		parts = append(parts, "env:XDG_CONFIG_HOME\x00"+hashString(xdg))
+		addAttributesPath("global-xdg", filepath.Join(xdg, "git", "attributes"))
+	} else if home := os.Getenv("HOME"); home != "" {
+		addAttributesPath("global-xdg", filepath.Join(home, ".config", "git", "attributes"))
+	}
+	return parts
+}
+
+func configuredGitCorePathFingerprints(gitDirAbs, key, label string) []string {
+	var parts []string
+	seenValues := map[string]bool{}
+	for _, configPath := range gitConfigProofPaths(gitDirAbs) {
+		if configPath == "" {
+			continue
+		}
+		allConfigs := append([]string{configPath}, gitConfigIncludePaths(configPath, map[string]bool{}, 0)...)
+		for _, path := range allConfigs {
+			for _, value := range gitConfigSectionPathValues(path, "core", key) {
+				target := resolveGitConfigIncludePath(value, filepath.Dir(path))
+				if target == "" || seenValues[target] {
+					continue
+				}
+				seenValues[target] = true
+				parts = append(parts, label+":"+target+"\x00"+fileHashOrMissing(target))
+			}
+		}
+	}
+	return parts
+}
+
+func gitConfigProofPaths(gitDirAbs string) []string {
+	var paths []string
+	if gitDirAbs != "" {
+		paths = append(paths, filepath.Join(gitDirAbs, "config"))
+	}
+	if global := os.Getenv("GIT_CONFIG_GLOBAL"); global != "" {
+		paths = append(paths, global)
+	} else if home := os.Getenv("HOME"); home != "" {
+		paths = append(paths, filepath.Join(home, ".gitconfig"))
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			paths = append(paths, filepath.Join(xdg, "git", "config"))
+		} else {
+			paths = append(paths, filepath.Join(home, ".config", "git", "config"))
+		}
+	}
+	if system := os.Getenv("GIT_CONFIG_SYSTEM"); system != "" {
+		paths = append(paths, system)
+	} else if os.Getenv("GIT_CONFIG_NOSYSTEM") == "" {
+		paths = append(paths, "/etc/gitconfig", "/usr/local/etc/gitconfig", "/opt/homebrew/etc/gitconfig")
+	}
+	return paths
+}
+
+func gitConfigSectionPathValues(configPath, wantSection, wantKey string) []string {
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+	var values []string
+	section := ""
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			end := strings.Index(line, "]")
+			if end < 0 {
+				section = ""
+				continue
+			}
+			section = strings.ToLower(strings.TrimSpace(line[1:end]))
+			continue
+		}
+		if !strings.EqualFold(section, wantSection) {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), wantKey) {
+			continue
+		}
+		values = append(values, strings.TrimSpace(value))
+	}
+	return values
 }
 
 func workspaceIgnoreFingerprint(repoRoot, gitDirAbs string) string {
@@ -822,9 +1058,31 @@ func workspaceIgnoreFingerprint(repoRoot, gitDirAbs string) string {
 	}
 	if gitDirAbs != "" {
 		parts = append(parts, filepath.Join(gitDirAbs, "info", "exclude")+"\x00"+fileHashOrMissing(filepath.Join(gitDirAbs, "info", "exclude")))
+		parts = append(parts, configuredGitCorePathFingerprints(gitDirAbs, "excludesfile", "ignore:core-excludes")...)
 	}
+	parts = append(parts, externalGitIgnoreFingerprints()...)
 	sort.Strings(parts)
 	return hashString(strings.Join(parts, "\n"))
+}
+
+func externalGitIgnoreFingerprints() []string {
+	var parts []string
+	addIgnorePath := func(label, path string) {
+		if path == "" {
+			return
+		}
+		parts = append(parts, "ignore:"+label+":"+path+"\x00"+fileHashOrMissing(path))
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		parts = append(parts, "env:HOME\x00"+hashString(home))
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		parts = append(parts, "env:XDG_CONFIG_HOME\x00"+hashString(xdg))
+		addIgnorePath("global-xdg", filepath.Join(xdg, "git", "ignore"))
+	} else if home := os.Getenv("HOME"); home != "" {
+		addIgnorePath("global-xdg", filepath.Join(home, ".config", "git", "ignore"))
+	}
+	return parts
 }
 
 func collectNamedFileFingerprints(root, name string, parts *[]string) {
@@ -922,8 +1180,13 @@ func exactWorkspaceStatSignal(root string) (string, bool) {
 			complete = false
 			return nil
 		}
+		signal, ok := fileHashStatCacheSignal(info)
+		if !ok {
+			complete = false
+			return nil
+		}
 		rel = filepath.ToSlash(rel)
-		parts = append(parts, fmt.Sprintf("%s\x00%s\x00%d\x00%d", rel, info.Mode().String(), info.Size(), info.ModTime().UnixNano()))
+		parts = append(parts, rel+"\x00"+signal)
 		return nil
 	})
 	if !complete {

@@ -19,15 +19,16 @@ var (
 )
 
 type versionReport struct {
-	Product        string `json:"product"`
-	KernelContract string `json:"kernel_contract"`
-	Version        string `json:"version"`
-	Commit         string `json:"commit"`
-	Date           string `json:"date"`
+	Product  string `json:"product"`
+	Contract string `json:"contract"`
+	Version  string `json:"version"`
+	Commit   string `json:"commit"`
+	Date     string `json:"date"`
 }
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := rootContext()
+	defer stop()
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -278,7 +279,7 @@ func boostUsageError(args []string) string {
 }
 
 func usageText() string {
-	return `Squire Kernel v1
+	return `Squire v1
 
 usage:
   squire codex [codex args...]
@@ -349,11 +350,11 @@ func helpTopic(topic []string) string {
 		return `usage:
   squire codex [codex args...]
 
-Starts Codex inside the normal Squire Kernel product path. This is the
+Starts Codex inside the normal Squire product path. This is the
 recommended UX. It does not require a separate setup command. On macOS, Squire
 uses the Linux microVM backend first when it is already configured, then falls
 back to the host scoped session. On Linux hosts, Squire uses the local scoped
-session kernel directly.
+session path directly.
 
 The model still sees and emits ordinary commands. Squire scopes local store
 prep, warm state, the resident maintainer, hot snapshot access, exact replay,
@@ -370,7 +371,7 @@ Examples:
   squire setup
 
 Advanced preflight/repair command. It is not required before squire codex.
-Initializes the local Squire Kernel store, prints privacy mode, and does not
+Initializes the local Squire store, prints privacy mode, and does not
 install global command shims.
 `
 	case "session":
@@ -401,7 +402,7 @@ bounded preload coverage experiments.
   squire vm session [--quiet] [--backend auto|linux-local|external-runner] [--runner <path>] -- <command> [args...]
 
 Runs Squire as an isolated Linux execution mode. On Linux hosts, vm session uses
-the same scoped session kernel directly. On macOS, vm session runs the
+the same scoped session path directly. On macOS, vm session runs the
 Virtualization.framework Linux guest when SQUIRE_VM_HELPER, SQUIRE_VM_KERNEL,
 and SQUIRE_VM_INITRD are configured, or falls back to an external runner when
 SQUIRE_VM_RUNNER or --runner is provided to hand the session to a guest lifecycle
@@ -413,7 +414,7 @@ The model still emits ordinary commands. The guest runner contract receives:
 
   <runner> session --cwd <host-cwd> --store-root <store-root> -- <command> [args...]
 
-The guest must run Squire Kernel inside the Linux environment and preserve the
+The guest must run Squire inside the Linux environment and preserve the
 same contract: exact stdout/stderr/exit-code or native fallback inside the
 guest. Host-native and vm sessions are intentionally separate because Linux
 guest execution does not preserve macOS-specific command semantics.
@@ -422,7 +423,7 @@ guest execution does not preserve macOS-specific command semantics.
 		return `usage:
   squire version [--short|--json]
 
-Prints Squire Kernel build identity. Release builds can set version, commit,
+Prints Squire build identity. Release builds can set version, commit,
 and date with Go linker flags. Human-readable output is the default; use
 --json for automation.
 `
@@ -439,7 +440,7 @@ status, and latest benchmark status. Use --short for a compact readiness view.
 		return `usage:
   squire kernel run -- <command> [args...]
 
-Runs an agent-chosen command through Squire Kernel. The "--" delimiter is
+Runs an agent-chosen command through Squire. The "--" delimiter is
 required so Squire options cannot be confused with the command being served.
 On a valid proof, Squire returns exact stdout, stderr, and exit code. Otherwise
 it runs the original command natively.
@@ -825,11 +826,11 @@ func jsonOut(v any) string {
 
 func currentVersionReport() versionReport {
 	return versionReport{
-		Product:        "Squire Kernel",
-		KernelContract: "v1",
-		Version:        buildVersion,
-		Commit:         buildCommit,
-		Date:           buildDate,
+		Product:  "Squire",
+		Contract: "v1",
+		Version:  buildVersion,
+		Commit:   buildCommit,
+		Date:     buildDate,
 	}
 }
 
@@ -839,7 +840,7 @@ func versionOut(format outputFormat) string {
 		return jsonOut(report)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s\n", report.Product, report.KernelContract)
+	fmt.Fprintf(&b, "%s %s\n", report.Product, report.Contract)
 	fmt.Fprintf(&b, "version: %s\n", report.Version)
 	fmt.Fprintf(&b, "commit: %s\n", report.Commit)
 	fmt.Fprintf(&b, "date: %s\n", report.Date)
@@ -851,7 +852,7 @@ func warmReportOut(report kernel.WarmReport, format outputFormat) string {
 		return jsonOut(report)
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel warm")
+	fmt.Fprintln(&b, "Squire warm")
 	fmt.Fprintf(&b, "repo_oracle: %s\n", boolAvailability(report.OracleAvailable))
 	if report.RepoRoot != "" {
 		fmt.Fprintf(&b, "repo_root: %s\n", report.RepoRoot)
@@ -887,7 +888,7 @@ func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string
 		return jsonOut(report)
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel repo-metadata benchmark")
+	fmt.Fprintln(&b, "Squire repo-metadata benchmark")
 	fmt.Fprintf(&b, "exactness: %t\n", report.Exactness)
 	fmt.Fprintf(&b, "mismatches: %d\n", report.Mismatches)
 	fmt.Fprintf(&b, "mutation_boundary_invalidation: %t\n", report.MutationBoundaryInvalidation)
@@ -907,7 +908,7 @@ func deepLocalBenchOut(report kernel.DeepBenchReport, format outputFormat) strin
 		return jsonOut(report)
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel deep-local benchmark")
+	fmt.Fprintln(&b, "Squire deep-local benchmark")
 	fmt.Fprintf(&b, "safety_gates: %s\n", gateStatusForCLI(report.SafetyGates))
 	fmt.Fprintf(&b, "performance_gates: %s\n", gateStatusForCLI(report.PerformanceGates))
 	fmt.Fprintf(&b, "enabled_fast_path_exactness: %t\n", report.EnabledFastPathExactness)
@@ -972,7 +973,7 @@ func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) strin
 		state = "running"
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel maintainer")
+	fmt.Fprintln(&b, "Squire maintainer")
 	fmt.Fprintf(&b, "status: %s\n", state)
 	fmt.Fprintf(&b, "running: %t\n", status.Running)
 	if status.PID > 0 {
@@ -1005,7 +1006,7 @@ func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) strin
 
 func formatMaintainerReportShort(report kernel.MaintainerReport) string {
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel maintainer")
+	fmt.Fprintln(&b, "Squire maintainer")
 	fmt.Fprintf(&b, "mode: %s\n", report.Mode)
 	fmt.Fprintf(&b, "repo_oracle: %s\n", boolAvailability(report.OracleAvailable))
 	if report.RepoRoot != "" {

@@ -1,4 +1,4 @@
-# Squire Kernel Advanced Notes
+# Squire Advanced Notes
 
 This document keeps implementation detail out of the top-level README.
 
@@ -31,7 +31,7 @@ Level 2, Transparent Fast Path:
 - On macOS, use the Linux microVM backend when it is already configured.
 - If the VM is unavailable or fails before Codex takes over, fall back to the
   host scoped session.
-- On Linux, use the local scoped session kernel directly.
+- On Linux, use the local scoped session path directly.
 - Do not stop the user to provision VM assets.
 
 The model-visible command surface stays unchanged. Codex still emits ordinary
@@ -72,7 +72,7 @@ squire codex
 ## Hot Replay Path
 
 The foreground hot path checks a daemon-published mmap snapshot before loading
-the full kernel ledger or opening daemon sockets.
+the full ledger or opening daemon sockets.
 
 A replay requires:
 
@@ -84,7 +84,27 @@ A replay requires:
 - available native fallback.
 
 The mmap snapshot is a local owner-only file with fixed-size descriptors. It is
-not a literal kernel bypass; native filesystem state remains authoritative.
+not a literal operating-system bypass; native filesystem state remains
+authoritative.
+The cache can contain stale records; they are replayable only when these proof
+inputs match the current local world.
+
+Git repo-summary replay has extra proof inputs because Git output can change
+without a source-file edit:
+
+- cwd is part of the hot command key, so cwd-relative outputs such as
+  `git status --short` cannot cross directory boundaries;
+- Git config fingerprints include local, global, system, environment-provided,
+  and recursively included config files;
+- ignore proof includes workspace ignore files, `.git/info/exclude`, default
+  global Git ignore files, and configured `core.excludesFile` targets;
+- diff attribute proof includes workspace attributes, `.git/info/attributes`,
+  default global Git attributes files, and configured `core.attributesFile`
+  targets.
+
+The regression suite intentionally mutates each of those external inputs after
+warming to confirm Squire falls back native or requires a fresh proof instead
+of serving stale bytes.
 
 ## Background Maintainer
 

@@ -653,7 +653,7 @@ func p95(values []int64) int64 {
 }
 
 func makeDeepBenchRepo(ctx context.Context, packages int) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "squire-kernel-deep-*")
+	dir, err := os.MkdirTemp("", "squire-deep-*")
 	if err != nil {
 		return "", func() {}, err
 	}

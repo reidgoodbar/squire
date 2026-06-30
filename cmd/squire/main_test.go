@@ -19,7 +19,7 @@ import (
 func TestUsageTextDocumentsKernelContract(t *testing.T) {
 	text := usageText()
 	for _, want := range []string{
-		"Squire Kernel v1",
+		"Squire v1",
 		"squire codex",
 		"squire version",
 		"squire session",
@@ -463,7 +463,7 @@ func TestVersionOutput(t *testing.T) {
 
 	text := versionOut(outputShort)
 	for _, want := range []string{
-		"Squire Kernel v1",
+		"Squire v1",
 		"version: 1.2.3",
 		"commit: abc123",
 		"date: 2026-06-18",
@@ -475,8 +475,8 @@ func TestVersionOutput(t *testing.T) {
 
 	json := versionOut(outputJSON)
 	for _, want := range []string{
-		`"product": "Squire Kernel"`,
-		`"kernel_contract": "v1"`,
+		`"product": "Squire"`,
+		`"contract": "v1"`,
 		`"version": "1.2.3"`,
 		`"commit": "abc123"`,
 		`"date": "2026-06-18"`,
@@ -912,7 +912,7 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 	}
 	text := boostStatusOut(report, outputShort)
 	for _, want := range []string{
-		"Squire Kernel acceleration status",
+		"Squire acceleration status",
 		"git rev-parse HEAD",
 		"replays: 3",
 		"native_fallbacks: 2",
@@ -1009,7 +1009,7 @@ func TestRepoMetadataBenchShortOutput(t *testing.T) {
 	}
 	text := repoMetadataBenchOut(report, outputShort)
 	for _, want := range []string{
-		"Squire Kernel repo-metadata benchmark",
+		"Squire repo-metadata benchmark",
 		"exactness: true",
 		"mismatches: 0",
 		"mutation_boundary_invalidation: true",
@@ -1044,7 +1044,7 @@ func TestWarmReportShortOutput(t *testing.T) {
 	}
 	text := warmReportOut(report, outputShort)
 	for _, want := range []string{
-		"Squire Kernel warm",
+		"Squire warm",
 		"repo_oracle: available",
 		"repo_root: /repo",
 		"fast_path_prepared: 5",
@@ -1081,7 +1081,7 @@ func TestDeepLocalBenchShortOutput(t *testing.T) {
 	}
 	text := deepLocalBenchOut(report, outputShort)
 	for _, want := range []string{
-		"Squire Kernel deep-local benchmark",
+		"Squire deep-local benchmark",
 		"safety_gates: pass",
 		"performance_gates: needs_optimization",
 		"enabled_fast_path_exactness: true",
@@ -1115,7 +1115,7 @@ func TestBackgroundStatusShortOutput(t *testing.T) {
 	}
 	text := formatBackgroundStatusShort(status)
 	for _, want := range []string{
-		"Squire Kernel maintainer",
+		"Squire maintainer",
 		"status: already_running",
 		"running: true",
 		"pid: 123",
@@ -1170,7 +1170,7 @@ func TestMaintainerReportShortOutput(t *testing.T) {
 	}
 	text := formatMaintainerReportShort(report)
 	for _, want := range []string{
-		"Squire Kernel maintainer",
+		"Squire maintainer",
 		"mode: resident_bounded",
 		"repo_oracle: available",
 		"poll_cycles: 2",
@@ -1192,7 +1192,7 @@ func initAdapterGitRepo(t *testing.T) string {
 	for _, args := range [][]string{
 		{"init", "-b", "main"},
 		{"config", "user.email", "squire@example.invalid"},
-		{"config", "user.name", "Squire Kernel"},
+		{"config", "user.name", "Squire"},
 	} {
 		stdout, stderr, code := runGitRaw(repo, args...)
 		if code != 0 {

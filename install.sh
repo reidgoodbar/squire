@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${SQUIRE_KERNEL_REPO:-reidgoodbar/squire-kernel}"
+repo="${SQUIRE_REPO:-${SQUIRE_KERNEL_REPO:-reidgoodbar/squire}}"
 version="${SQUIRE_VERSION:-${SQUIRE_KERNEL_VERSION:-}}"
 install_dir="${SQUIRE_INSTALL_DIR:-${HOME:-}/.local/bin}"
 github_base="${GITHUB_BASE_URL:-https://github.com}"
 github_api="${GITHUB_API_URL:-https://api.github.com}"
-artifact_dir="${SQUIRE_KERNEL_ARTIFACT_DIR:-}"
+artifact_dir="${SQUIRE_ARTIFACT_DIR:-${SQUIRE_KERNEL_ARTIFACT_DIR:-}}"
 
 fail() {
   echo "squire install: $*" >&2
@@ -269,7 +269,7 @@ if [ -z "$version" ]; then
   fail "could not resolve latest release; set SQUIRE_VERSION"
 fi
 
-asset="squire-kernel_${version}_${os}_${arch}.tar.gz"
+asset="squire_${version}_${os}_${arch}.tar.gz"
 tmp="${TMPDIR:-/tmp}/squire-install.$$"
 mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
@@ -286,7 +286,7 @@ fi
 verify_checksum "$tmp" "$asset"
 
 tar -xzf "$tmp/$asset" -C "$tmp"
-stage="$tmp/squire-kernel_${version}_${os}_${arch}"
+stage="$tmp/squire_${version}_${os}_${arch}"
 binary="$stage/squire"
 if [ ! -f "$binary" ]; then
   fail "archive did not contain squire binary"

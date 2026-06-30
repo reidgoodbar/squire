@@ -1,17 +1,17 @@
-# Squire Kernel Contract
+# Squire Contract
 
-Squire Kernel v1 is a scoped kernel proof for repeated local Git metadata plus
+Squire v1 is a scoped proof for repeated local Git metadata plus
 hot-prepared deterministic read-only discovery operations.
 
 ## Product Claim
 
-Scoped kernel proof for repeated local Git metadata plus hot-prepared
-deterministic read-only discovery operations.
+Scoped proof for repeated local Git metadata plus hot-prepared deterministic
+read-only discovery operations.
 
-Squire Kernel transparently accelerates a tiny allowlist of repeated local Git
+Squire transparently accelerates a tiny allowlist of repeated local Git
 metadata operations and hot-prepared deterministic read-only discovery
-operations with exact stdout, stderr, and exit-code preservation, correct
-invalidation, native fallback, and measured hot-path performance.
+operations with exact stdout, stderr, and exit-code preservation, local
+validity proof, native fallback, and measured hot-path performance.
 
 The replay performance target is sub-1ms p95 wall time for replay hits.
 Invalid/missing-cache and never-replay paths execute natively, so their
@@ -30,6 +30,34 @@ This is not a broad Codex speedup claim.
 6. Exact stdout/stderr/exit-code required.
 7. Every replay needs invalidation proof.
 8. Local world state proves validity.
+
+## Validity Proof
+
+Squire caches observations, not authority. A cache entry becomes replayable only
+after the foreground path proves that the current local world still matches the
+world that produced the bytes.
+
+Every replay proof must include:
+
+- normalized command key and exact original argv policy;
+- cwd, repo root, and tool identity;
+- relevant invalidation epochs for HEAD, branch, Git config, Git index, file
+  tree, file content, and workspace state;
+- input fingerprints such as content hashes, config fingerprints, PATH or
+  selected environment hashes, executable byte identity, OS change signals, and
+  bounded workspace proof inputs;
+- command-output namespace inputs such as cwd-relative Git output semantics;
+- external Git behavior inputs, including global config files, included config
+  files, default global ignore files, default global attributes files,
+  configured `core.excludesFile`, and configured `core.attributesFile`;
+- output fingerprints and locally stored exact stdout/stderr/exit-code bytes;
+- policy confirmation that the operator is enabled or proof-gated and not in a
+  never-replay family;
+- native fallback availability.
+
+If any element is absent, stale, mismatched, too expensive to prove, or
+corrupted, Squire must execute the original command natively. Durable cache
+records may be stale; they are valid only after the current proof passes.
 
 ## Operator Boundaries
 
@@ -67,29 +95,38 @@ Hot-prepared proof-gated candidates may replay only when the command key, cheap
 hot fingerprints, hot invalidation epoch, output hashes, and in-memory output
 bytes all match. Their p95 replay wall time is reported separately from
 metadata fast-path p95.
+For cwd-sensitive Git commands, the hot command key must include cwd. A replay
+prepared at the repo root must not satisfy the same argv from a subdirectory
+unless the proof was prepared for that subdirectory and the output bytes match
+native execution from that cwd.
+For Git status and diff outputs, relevant external Git inputs must be part of
+the invalidation proof. Changing a global ignore file, global attributes file,
+included config file, configured excludes file, or configured attributes file
+must force native fallback or a freshly prepared observation.
 
 The foreground CLI serving path first checks a daemon-published mmap hot
-snapshot before constructing the full kernel object, loading ledgers, or
-touching daemon/socket paths. If that exact read-only snapshot proof hits, the
-CLI writes the cached stdout/stderr bytes and exits with the cached exit code.
-If the CLI hot client misses, the regular kernel path checks resident in-memory
+snapshot before loading ledgers or touching daemon/socket paths. If that exact
+read-only snapshot proof hits, the CLI writes the cached stdout/stderr bytes
+and exits with the cached exit code.
+If the CLI hot client misses, the regular serving path checks resident in-memory
 prepared output and then the bounded resident hot-cache IPC server when it is
 running. The mmap snapshot is a local, owner-only, atomically published file
 with fixed-size descriptors laid out for cache-friendly lookup. It avoids
 foreground ledger hydration and Unix-socket round trips on hits, but it still
 uses normal OS memory mapping and still requires local invalidation proof; it
-is not a literal kernel bypass. If the snapshot, resident cache, or daemon is
-unavailable, misses, times out, returns invalid hashes, or fails the hot proof,
-native execution wins. A separate background maintainer may produce durable
-evidence and reports, publish the mmap snapshot, and serve exact prepared
-output to fresh foreground processes over a local Unix-socket daemon cache.
+is not a literal operating-system bypass. If the snapshot, resident cache, or
+daemon is unavailable, misses, times out, returns invalid hashes, or fails the
+hot proof, native execution wins. A separate background maintainer may produce
+durable evidence and reports, publish the mmap snapshot, and serve exact
+prepared output to fresh foreground processes over a local Unix-socket daemon
+cache.
 
 The primary production foreground is `squire codex`, which launches Codex
 through a zero-extra-step backend router. On macOS, Squire must use the Linux
 microVM backend when the helper and guest assets are already configured, then
 fall back to the host scoped session if the VM is unavailable or fails before
 Codex takes over. `squire codex` must not stop the user to provision VM assets.
-On Linux hosts, it may use the local scoped session kernel directly. The
+On Linux hosts, it may use the local scoped session path directly. The
 lower-level `squire session -- <command>` surface remains available for
 advanced launchers and diagnostics. Scoped sessions prefer a local preload
 library when available and the launcher is safe for preload inheritance, set
@@ -160,10 +197,10 @@ resident hot-cache connection and keep short session-local daemon-unavailable
 and exact-command miss caches. These caches must be bounded, brief, and
 fault-open: they may suppress replay attempts, but they must never suppress
 native execution. For adapter integrations, replay checks should reuse the
-foreground kernel's cached mmap snapshot view rather than map/unmap the
-snapshot on every request. Adapter responses may use pooled buffers to reduce
-allocation churn, but the wire protocol must still preserve exact
-stdout/stderr bytes and exit code.
+foreground's cached mmap snapshot view rather than map/unmap the snapshot on
+every request. Adapter responses may use pooled buffers to reduce allocation
+churn, but the wire protocol must still preserve exact stdout/stderr bytes and
+exit code.
 
 The production foreground is host/runtime owned, not model owned. `squire
 codex`, a scoped session, or a terminal adapter may serve already-chosen
@@ -184,7 +221,7 @@ the same replay contract: exact stdout/stderr/exit-code or native fallback
 inside the guest. VM mode must not depend on host command shims, session-local
 host PATH tricks, or the macOS scoped C shim fallback.
 
-On Linux hosts, `squire vm session` may use the same scoped session kernel
+On Linux hosts, `squire vm session` may use the same scoped session path
 directly. On macOS, VM mode uses the built-in `squire-vm-darwin`
 Virtualization.framework helper when that helper is installed and Linux guest
 assets are configured. The helper must be signed with the
@@ -225,11 +262,11 @@ workspace, regular files below the bounded size limits, non-hidden/VCS paths,
 and source/config extensions or well-known project metadata files. It is
 invalidated by local file proof. Exact command observations include the exact
 argv in their proof. Warm-file entries are keyed by relative path, file content
-hash, size, and mode, and may materialize arbitrary eligible bounded `sed -n`
-windows or bounded `cat` output from those same proven bytes without
-precomputing every possible range.
+hash, size, mode, and OS change signal, and may materialize arbitrary eligible
+bounded `sed -n` windows or bounded `cat` output from those same proven bytes
+without precomputing every possible range.
 Tool discovery replay is invalidated by PATH, selected environment variables,
-and executable identity signals. `.env`, hidden paths, likely secret/token/key
+and executable byte identity. `.env`, hidden paths, likely secret/token/key
 files, unknown binary reads, shell aliases, shell functions, and shell-specific
 startup state remain native.
 
@@ -295,7 +332,7 @@ targets until output-store and privacy policy are explicit.
 
 ## OTel Boundary
 
-Squire Kernel must work without OpenTelemetry. OTel is optional session
+Squire must work without OpenTelemetry. OTel is optional session
 metadata only and is not required for correctness, invalidation, replay proof,
 or native fallback.
 
@@ -318,7 +355,7 @@ claims.
 ## Production-Safe Levels 3-5
 
 These are the production-safe parts of the Level 3-5 direction. They preserve
-the kernel contract, keep native filesystem state authoritative, and prioritize
+the Squire contract, keep native filesystem state authoritative, and prioritize
 safety, auditability, and native fallback.
 
 - Level 3, Virtual Memory-Mapped Workspace: The production-safe subset is
@@ -330,11 +367,11 @@ safety, auditability, and native fallback.
   asynchronous write flush, and no production rollback layer in v1.
 
 - Level 4, Schema-Native IPC: The production-safe subset is structured internal
-  diagnostics, binary hot-cache IPC, and mmap snapshot descriptors. `squire
-  kernel status` parses the binary snapshot header and descriptor table to
-  report exact command entries, workspace image files, payload bytes, and
-  availability. This cannot replace the agent-visible command contract: CLI
-  commands must still return exact stdout, stderr, and native exit codes.
+  diagnostics, binary hot-cache IPC, and mmap snapshot descriptors. Status
+  diagnostics parse the binary snapshot header and descriptor table to report
+  exact command entries, workspace image files, payload bytes, and availability.
+  This cannot replace the agent-visible command contract: CLI commands must
+  still return exact stdout, stderr, and native exit codes.
 
 - Level 5, Anticipatory Speculative Execution: The production-safe subset is
   local idle-window prewarming after observed native operations. Bounded

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const scopedKernelClaim = "Scoped kernel proof for repeated local Git metadata plus hot-prepared read-only discovery operations."
+const scopedKernelClaim = "Scoped proof for repeated local Git metadata plus hot-prepared read-only discovery operations."
 
 type LatestBenchmarkStatus struct {
 	Name                         string     `json:"name"`
@@ -67,14 +67,14 @@ func Setup(ctx context.Context, cwd, storeRoot string) (string, error) {
 	}
 	ws := k.Oracle.MetadataSnapshot(ctx, cwd)
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel setup complete")
+	fmt.Fprintln(&b, "Squire setup complete")
 	fmt.Fprintln(&b, "privacy_mode: standard")
 	fmt.Fprintf(&b, "store: %s\n", storeRoot)
 	fmt.Fprintf(&b, "repo_oracle: %s\n", availability(ws.OracleAvailable))
 	fmt.Fprintf(&b, "repo_root: %s\n", ws.RepoRoot)
 	fmt.Fprintln(&b, "global_shims: not installed")
-	fmt.Fprintln(&b, "next: squire kernel maintain --background --short")
-	fmt.Fprintln(&b, "try: squire kernel run -- git rev-parse HEAD")
+	fmt.Fprintln(&b, "next: squire codex")
+	fmt.Fprintln(&b, "diagnostics: squire kernel status --short")
 	return b.String(), nil
 }
 
@@ -89,7 +89,7 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	background, backgroundErr := LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 	js, _ := json.MarshalIndent(ws, "", "  ")
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel status")
+	fmt.Fprintln(&b, "Squire status")
 	fmt.Fprintln(&b, "claim:", scopedKernelClaim)
 	fmt.Fprintln(&b, "readiness:")
 	fmt.Fprintf(&b, "  status: %s\n", readinessStatus(ws, snapshot, background, backgroundErr))
@@ -239,7 +239,7 @@ func KernelStatusSummary(ctx context.Context, cwd, storeRoot string) (string, er
 	readiness := readinessStatus(ws, snapshot, background, backgroundErr)
 
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel status")
+	fmt.Fprintln(&b, "Squire status")
 	fmt.Fprintf(&b, "readiness: %s\n", readiness)
 	fmt.Fprintf(&b, "repo_oracle: %s\n", availability(ws.OracleAvailable))
 	fmt.Fprintf(&b, "repo_root: %s\n", emptyAsNA(ws.RepoRoot))
@@ -403,7 +403,7 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 
 func FormatBoostStatusReport(report BoostStatusReport) string {
 	var b strings.Builder
-	fmt.Fprintln(&b, "Squire Kernel acceleration status")
+	fmt.Fprintln(&b, "Squire acceleration status")
 	fmt.Fprintln(&b, "enabled_fast_paths:")
 	for _, item := range report.EnabledFastPaths {
 		fmt.Fprintln(&b, "  -", item)

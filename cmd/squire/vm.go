@@ -215,7 +215,7 @@ func detectVMStatus(cwd, storeRoot, requestedBackend, requestedRunner string) vm
 		HostOS:                    hostOS,
 		HostArch:                  runtimeGOARCH(),
 		GuestOS:                   "linux",
-		GuestExecution:            "ordinary agent-chosen commands served by Squire Kernel inside the guest",
+		GuestExecution:            "ordinary agent-chosen commands served by Squire inside the guest",
 		NativeFallbackAvailable:   true,
 		AgentVisibleSuggestions:   false,
 		ChangesAgentCommands:      false,
@@ -245,7 +245,7 @@ func detectVMStatus(cwd, storeRoot, requestedBackend, requestedRunner string) vm
 			return report
 		}
 		report.Available = true
-		report.Diagnostics = append(report.Diagnostics, "host is already Linux; using the scoped session kernel directly")
+		report.Diagnostics = append(report.Diagnostics, "host is already Linux; using the scoped session path directly")
 		return report
 	}
 	if requestedBackend == vmBackendVirtualization || (requestedBackend == vmBackendAuto && hostOS == "darwin") {
