@@ -147,6 +147,15 @@ The public install UX is:
 curl -fsSL https://squire.run/install.sh | bash
 ```
 
+The Cloudflare Worker for that URL lives in `cloudflare/squire-run`. Deploy it
+after publishing release assets:
+
+```sh
+npx wrangler deploy -c cloudflare/squire-run/wrangler.toml
+curl -fsSI https://squire.run/install.sh
+curl -fsS https://squire.run/install.sh | sh -n
+```
+
 The installer is a user-level binary install. It installs `squire` and
 `squire-codex`, but must not install global command shims, start a global
 daemon, or create repo-local state outside the workspace where Squire later

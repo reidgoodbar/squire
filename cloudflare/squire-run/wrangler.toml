@@ -1,0 +1,9 @@
+name = "squire-run"
+main = "src/worker.js"
+compatibility_date = "2026-07-02"
+workers_dev = true
+
+routes = [
+  { pattern = "squire.run/*", zone_name = "squire.run" },
+  { pattern = "www.squire.run/*", zone_name = "squire.run" }
+]
