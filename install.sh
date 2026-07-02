@@ -266,6 +266,17 @@ verify_checksum() {
   )
 }
 
+fetch_codex_archive() {
+  if [ -n "$codex_artifact_dir" ]; then
+    cp "$codex_artifact_dir/$codex_asset" "$tmp/$codex_asset" &&
+      cp "$codex_artifact_dir/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
+  else
+    codex_fetch_base="$github_base/$codex_repo/releases/download/$codex_version"
+    fetch_file "$codex_fetch_base/$codex_asset" "$tmp/$codex_asset" &&
+      fetch_file "$codex_fetch_base/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
+  fi
+}
+
 if [ -z "$install_dir" ] || [ "$install_dir" = "/.local/bin" ]; then
   fail "HOME is not set; set SQUIRE_INSTALL_DIR"
 fi
@@ -298,30 +309,33 @@ else
   fetch_file "$base/SHA256SUMS" "$tmp/SHA256SUMS"
 fi
 
-if [ -n "$codex_artifact_dir" ]; then
-  cp "$codex_artifact_dir/$codex_asset" "$tmp/$codex_asset"
-  cp "$codex_artifact_dir/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
-else
-  codex_base="$github_base/$codex_repo/releases/download/$codex_version"
-  fetch_file "$codex_base/$codex_asset" "$tmp/$codex_asset"
-  fetch_file "$codex_base/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
-fi
-
 verify_checksum "$tmp" "$asset"
-verify_checksum "$tmp" "$codex_asset" SQUIRE_CODEX_SHA256SUMS
 
 tar -xzf "$tmp/$asset" -C "$tmp"
-tar -xzf "$tmp/$codex_asset" -C "$tmp"
 stage="$tmp/squire_${version}_${os}_${arch}"
 codex_stage="$tmp/squire-codex_${codex_version}_${os}_${arch}"
 binary="$stage/squire"
-codex_binary="$codex_stage/squire-codex"
 if [ "$os" = "windows" ]; then
   binary="$stage/squire.exe"
-  codex_binary="$codex_stage/squire-codex.exe"
 fi
 if [ ! -f "$binary" ]; then
   fail "archive did not contain squire binary"
+fi
+
+codex_binary="$codex_stage/squire-codex"
+legacy_codex_binary="$stage/squire-codex"
+if [ "$os" = "windows" ]; then
+  codex_binary="$codex_stage/squire-codex.exe"
+  legacy_codex_binary="$stage/squire-codex.exe"
+fi
+if fetch_codex_archive; then
+  verify_checksum "$tmp" "$codex_asset" SQUIRE_CODEX_SHA256SUMS
+  tar -xzf "$tmp/$codex_asset" -C "$tmp"
+elif [ -f "$legacy_codex_binary" ]; then
+  codex_binary="$legacy_codex_binary"
+  echo "squire install: using legacy squire-codex bundled in $asset"
+else
+  fail "could not fetch matching squire-codex release artifact"
 fi
 if [ ! -f "$codex_binary" ]; then
   fail "archive did not contain squire-codex binary"
