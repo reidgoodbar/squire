@@ -111,12 +111,11 @@ Advanced diagnostics:
 
 ```sh
 squire boost status --json
-squire kernel status --short
 squire setup
 ```
 
-The `squire kernel ...` namespace remains for diagnostics and compatibility,
-but the product is just Squire.
+Internal diagnostic namespaces remain for release tests, but the product is
+just Squire.
 
 ## Benchmarks
 
