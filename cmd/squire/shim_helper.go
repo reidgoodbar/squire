@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"squire.run/kernel/internal/kernel"
+	"squire.run/internal/kernel"
 )
 
 var shimHelperMagic = [8]byte{'S', 'Q', 'S', 'H', 'I', 'M', '1', 0}

@@ -146,6 +146,78 @@ python3 scripts/preload_ops_bench.py /path/to/squire \
   --json
 ```
 
+## Replay Fuzz
+
+Run date: `2026-07-02`
+
+The replay fuzzer generates deterministic random read-only command plans and
+compares native execution against Squire byte-for-byte. It covers Git metadata,
+repo summaries, bounded file reads, moving `sed/head/tail` windows, fixed
+`grep`/`rg`, directory/env probes, tool probes, composed `sh -c` commands, and
+safe native-fallback controls.
+
+Long-format `ls -la` is intentionally excluded from the stable equivalence pool
+because it observes `.`/`..` directory metadata that can change between two
+sequential benchmark passes in `/private/tmp`; it remains native-only.
+
+Latest stable seeds:
+
+- seed `20260702`: `3000` cases, exactness `true`, mismatches `0`, hot replays
+  `2171`, speedup `2.048x`, delta `14221.677ms`
+- seed `777`: `3000` cases, exactness `true`, mismatches `0`, hot replays
+  `2172`, speedup `1.959x`, delta `13279.218ms`
+
+Script:
+
+```sh
+python3 scripts/replay_fuzz.py /path/to/squire \
+  --cases 3000 \
+  --seed 20260702 \
+  --json
+```
+
+## Fixed-String Ripgrep Lane
+
+Run date: `2026-07-02`
+
+Workload:
+
+- fresh Git repo in `/private/tmp`;
+- scoped preload transport only, no PATH shims;
+- `rg -F` direct forms and one composed `rg -F ... | head` form;
+- `200` operations per command per e2e sample;
+- `3` e2e samples per command;
+- `20` native direct samples per command.
+
+Results:
+
+- exactness: `4/4`;
+- native mismatches: `0`;
+- native fallback remained available;
+- hot replay events all used the mmap warm-file proof path.
+
+| Command | Native p50 | Squire e2e p50 | Hot replay p50 | Hot replay p95 | Hot replay p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `rg -F two src/app.js` | `3.424ms` | `2.541ms` | `124us` | `156us` | `178us` |
+| `rg -n -F two src/app.js` | `3.310ms` | `2.525ms` | `125us` | `155us` | `169us` |
+| `rg -q -F two src/app.js` | `3.287ms` | `2.525ms` | `120us` | `150us` | `167us` |
+| `rg -F two src/app.js | head -n 1` | `8.364ms` | `2.691ms` | `154us` | `182us` | `210us` |
+
+The e2e columns include the helper/session envelope. The hot replay columns are
+the actual mmap proof-and-materialization events recorded by Squire.
+
+Script:
+
+```sh
+python3 scripts/preload_ops_bench.py /path/to/squire \
+  --rounds 200 \
+  --native-direct-rounds 20 \
+  --native-batch-rounds 20 \
+  --e2e-samples 3 \
+  --only rg_fixed,rg_fixed_n,rg_fixed_q,shell_rg_head \
+  --json
+```
+
 ## Concurrent Echo Stress
 
 Workload:

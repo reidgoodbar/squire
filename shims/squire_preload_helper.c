@@ -6,7 +6,9 @@
 // exact replay bytes to the already-wired descriptors or execs the native
 // command on any miss. It is not a PATH shim and is not invoked by agents.
 
+#ifndef SQUIRE_MMAP_NO_MAIN
 #define SQUIRE_MMAP_NO_MAIN 1
+#endif
 #define SQUIRE_MMAP_HELPER_REAL_EXEC 1
 #include "squire_mmap_shim.c"
 
@@ -462,6 +464,56 @@ static int helper_append_fixed_grep(byte_buf *out, const unsigned char *content,
 	return 1;
 }
 
+static int helper_append_decimal_int(byte_buf *out, int value) {
+	char buf[32];
+	int n = snprintf(buf, sizeof(buf), "%d", value);
+	if (n <= 0 || n >= (int)sizeof(buf)) {
+		return 0;
+	}
+	return bytes_append(out, (const unsigned char *)buf, (size_t)n);
+}
+
+static int helper_append_fixed_rg(byte_buf *out, const unsigned char *content, uint32_t len, const char *pattern, int quiet, int line_number, int *matched) {
+	*matched = 0;
+	size_t pattern_len = strlen(pattern);
+	if (pattern_len == 0) {
+		return 0;
+	}
+	for (uint32_t i = 0; i < len; i++) {
+		if (content[i] == '\0') {
+			return 0;
+		}
+	}
+	int line = 1;
+	uint32_t offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		uint32_t line_len = line_end - offset;
+		if (mem_contains_bytes(content + offset, line_len, (const unsigned char *)pattern, pattern_len)) {
+			*matched = 1;
+			if (quiet) {
+				return 1;
+			}
+			if (line_number && (!helper_append_decimal_int(out, line) || !bytes_append_byte(out, ':'))) {
+				return 0;
+			}
+			if (!helper_copy_bytes(out, content + offset, line_len) ||
+			    !bytes_append_byte(out, '\n')) {
+				return 0;
+			}
+		}
+		if (line_end < len && content[line_end] == '\n') {
+			line_end++;
+		}
+		offset = line_end;
+		line++;
+	}
+	return 1;
+}
+
 static int helper_parse_line_count_arg(int argc, char argv[HELPER_SHELL_MAX_ARGS][HELPER_SHELL_WORD_BUF], int *count) {
 	if (argc == 3 && strcmp(argv[1], "-n") == 0) {
 		char *end = NULL;
@@ -507,7 +559,7 @@ static int helper_parse_stdin_grep(int argc, char argv[HELPER_SHELL_MAX_ARGS][HE
 	return fixed && *pattern != NULL;
 }
 
-static int helper_eval_node(helper_plan *plan, int idx, const byte_buf *input, helper_result *out, long long replay_start_ns);
+static int helper_eval_node(helper_plan *plan, int idx, const byte_buf *input, helper_result *out, long long replay_start_ns, const char *cwd);
 
 static int helper_eval_filter(helper_node *node, const byte_buf *input, helper_result *out) {
 	const char *name = base_name(node->argv[0]);
@@ -549,6 +601,7 @@ static int helper_tool_candidate(const char *path, char *const argv[]) {
 	       strcmp(tool, "ls") == 0 ||
 	       strcmp(tool, "file") == 0 ||
 	       strcmp(tool, "grep") == 0 ||
+	       strcmp(tool, "rg") == 0 ||
 	       strcmp(tool, "printenv") == 0 ||
 	       strcmp(tool, "whoami") == 0 ||
 	       strcmp(tool, "uname") == 0 ||
@@ -560,10 +613,10 @@ static int helper_tool_candidate(const char *path, char *const argv[]) {
 	       strcmp(tool, "tail") == 0;
 }
 
-static int helper_prepare_warm_file(int argc, char **argv, helper_result *out, long long replay_start_ns) {
+static int helper_prepare_warm_file_at_cwd(const char *cwd, int argc, char **argv, helper_result *out, long long replay_start_ns) {
 	mmap_trace_path("shell-ir-helper-warm-file-enter", argv != NULL && argc > 0 ? argv[0] : NULL);
 	policy_invocation inv;
-	if (!normalize_invocation(argc, argv, &inv) || !is_warm_file_candidate(&inv) || !warm_file_replay_enabled()) {
+	if (!normalize_invocation_at_cwd(cwd, argc, argv, &inv) || !is_warm_file_candidate(&inv) || !warm_file_replay_enabled()) {
 		mmap_trace_path("shell-ir-helper-warm-file-skip-policy", argv != NULL && argc > 0 ? argv[0] : NULL);
 		return 0;
 	}
@@ -615,6 +668,15 @@ static int helper_prepare_warm_file(int argc, char **argv, helper_result *out, l
 		ok = parse_fixed_grep_args(&inv, &pattern, &grep_path, &quiet) &&
 		     helper_append_fixed_grep(&out->stdout_buf, content, content_len, pattern, quiet, &matched);
 		out->exit_code = matched ? 0 : 1;
+	} else if (strcmp(inv.argv[0], "rg") == 0) {
+		const char *pattern = NULL;
+		const char *rg_path = NULL;
+		int quiet = 0;
+		int line_number = 0;
+		int matched = 0;
+		ok = parse_fixed_rg_args(&inv, &pattern, &rg_path, &quiet, &line_number) &&
+		     helper_append_fixed_rg(&out->stdout_buf, content, content_len, pattern, quiet, line_number, &matched);
+		out->exit_code = matched ? 0 : 1;
 	}
 	if (ok) {
 		mmap_trace_path("shell-ir-helper-warm-file-hit", inv.argv[0]);
@@ -624,7 +686,11 @@ static int helper_prepare_warm_file(int argc, char **argv, helper_result *out, l
 	return ok;
 }
 
-static int helper_eval_source(helper_node *node, helper_result *out, long long replay_start_ns) {
+static int helper_prepare_warm_file(int argc, char **argv, helper_result *out, long long replay_start_ns) {
+	return helper_prepare_warm_file_at_cwd(NULL, argc, argv, out, replay_start_ns);
+}
+
+static int helper_eval_source(helper_node *node, helper_result *out, long long replay_start_ns, const char *cwd) {
 	char *argv[HELPER_SHELL_MAX_ARGS];
 	for (int i = 0; i < node->argc; i++) {
 		argv[i] = node->argv[i];
@@ -637,7 +703,7 @@ static int helper_eval_source(helper_node *node, helper_result *out, long long r
 	}
 	prepared_exact_replay prepared;
 	mmap_trace_path("shell-ir-helper-source-prepare", argv[0]);
-	if (prepare_exact_replay(node->argc, argv, &prepared)) {
+	if (prepare_exact_replay_at_cwd(cwd, node->argc, argv, &prepared)) {
 		mmap_trace_path("shell-ir-helper-source-hit", argv[0]);
 		int ok = helper_copy_bytes(&out->stdout_buf, prepared.stdout_data, prepared.stdout_len) &&
 		         helper_copy_bytes(&out->stderr_buf, prepared.stderr_data, prepared.stderr_len);
@@ -649,12 +715,12 @@ static int helper_eval_source(helper_node *node, helper_result *out, long long r
 		return ok;
 	}
 	mmap_trace_path("shell-ir-helper-source-exact-miss", argv[0]);
-	return helper_prepare_warm_file(node->argc, argv, out, replay_start_ns);
+	return helper_prepare_warm_file_at_cwd(cwd, node->argc, argv, out, replay_start_ns);
 }
 
-static int helper_eval_binary(helper_plan *plan, int left_idx, int right_idx, const byte_buf *input, helper_result *out, long long replay_start_ns, helper_node_kind kind) {
+static int helper_eval_binary(helper_plan *plan, int left_idx, int right_idx, const byte_buf *input, helper_result *out, long long replay_start_ns, helper_node_kind kind, const char *cwd) {
 	helper_result left = {0};
-	if (!helper_eval_node(plan, left_idx, input, &left, replay_start_ns)) {
+	if (!helper_eval_node(plan, left_idx, input, &left, replay_start_ns, cwd)) {
 		return 0;
 	}
 	if (kind == HELPER_NODE_AND && left.exit_code != 0) {
@@ -663,7 +729,7 @@ static int helper_eval_binary(helper_plan *plan, int left_idx, int right_idx, co
 	}
 	if (kind == HELPER_NODE_PIPE) {
 		helper_result right = {0};
-		if (!helper_eval_node(plan, right_idx, &left.stdout_buf, &right, replay_start_ns)) {
+		if (!helper_eval_node(plan, right_idx, &left.stdout_buf, &right, replay_start_ns, cwd)) {
 			helper_result_free(&left);
 			return 0;
 		}
@@ -676,7 +742,7 @@ static int helper_eval_binary(helper_plan *plan, int left_idx, int right_idx, co
 		return ok;
 	}
 	helper_result right = {0};
-	if (!helper_eval_node(plan, right_idx, input, &right, replay_start_ns)) {
+	if (!helper_eval_node(plan, right_idx, input, &right, replay_start_ns, cwd)) {
 		helper_result_free(&left);
 		return 0;
 	}
@@ -690,20 +756,20 @@ static int helper_eval_binary(helper_plan *plan, int left_idx, int right_idx, co
 	return ok;
 }
 
-static int helper_eval_node(helper_plan *plan, int idx, const byte_buf *input, helper_result *out, long long replay_start_ns) {
+static int helper_eval_node(helper_plan *plan, int idx, const byte_buf *input, helper_result *out, long long replay_start_ns, const char *cwd) {
 	if (plan == NULL || out == NULL || idx < 0 || idx >= plan->count) {
 		return 0;
 	}
 	helper_node *node = &plan->nodes[idx];
 	switch (node->kind) {
 	case HELPER_NODE_EXEC:
-		return input != NULL ? helper_eval_filter(node, input, out) : helper_eval_source(node, out, replay_start_ns);
+		return input != NULL ? helper_eval_filter(node, input, out) : helper_eval_source(node, out, replay_start_ns, cwd);
 	case HELPER_NODE_PIPE:
 	case HELPER_NODE_AND:
 	case HELPER_NODE_SEQ:
-		return helper_eval_binary(plan, node->left, node->right, input, out, replay_start_ns, node->kind);
+		return helper_eval_binary(plan, node->left, node->right, input, out, replay_start_ns, node->kind, cwd);
 	case HELPER_NODE_REDIR_NULL:
-		if (!helper_eval_node(plan, node->left, input, out, replay_start_ns)) {
+		if (!helper_eval_node(plan, node->left, input, out, replay_start_ns, cwd)) {
 			return 0;
 		}
 		if (node->fd == 1) {
@@ -722,29 +788,40 @@ static int helper_eval_node(helper_plan *plan, int idx, const byte_buf *input, h
 	}
 }
 
-static int helper_run_shell_ir(const char *command) {
+static int helper_eval_shell_ir_at_cwd(const char *cwd, const char *command, helper_result *res, long long replay_start_ns) {
 	mmap_trace_path("shell-ir-helper-run-enter", NULL);
+	if (res == NULL) {
+		return 0;
+	}
+	memset(res, 0, sizeof(*res));
 	helper_plan *plan = (helper_plan *)calloc(1, sizeof(*plan));
 	if (plan == NULL) {
-		return -1;
+		return 0;
 	}
 	if (!helper_parse_shell_plan(command, plan)) {
 		mmap_trace_path("shell-ir-helper-parse-miss", NULL);
 		free(plan);
-		return -1;
+		return 0;
 	}
 	mmap_trace_path("shell-ir-helper-parse-ok", NULL);
-	helper_result res = {0};
-	if (!helper_eval_node(plan, plan->root, NULL, &res, now_monotonic_ns())) {
+	if (!helper_eval_node(plan, plan->root, NULL, res, replay_start_ns, cwd)) {
 		mmap_trace_path("shell-ir-helper-eval-miss", NULL);
-		helper_result_free(&res);
+		helper_result_free(res);
 		free(plan);
-		return -1;
+		return 0;
 	}
 	free(plan);
 	mmap_trace_path("shell-ir-helper-eval-ok", NULL);
-	if (res.stdout_buf.len > MAX_FAST_OUTPUT_BYTES || res.stderr_buf.len > MAX_FAST_OUTPUT_BYTES) {
-		helper_result_free(&res);
+	if (res->stdout_buf.len > MAX_FAST_OUTPUT_BYTES || res->stderr_buf.len > MAX_FAST_OUTPUT_BYTES) {
+		helper_result_free(res);
+		return 0;
+	}
+	return 1;
+}
+
+static int helper_run_shell_ir_at_cwd(const char *cwd, const char *command) {
+	helper_result res = {0};
+	if (!helper_eval_shell_ir_at_cwd(cwd, command, &res, now_monotonic_ns())) {
 		return -1;
 	}
 	if (res.stdout_buf.len > 0 && !write_all(STDOUT_FILENO, res.stdout_buf.data, res.stdout_buf.len)) {
@@ -761,6 +838,10 @@ static int helper_run_shell_ir(const char *command) {
 	return exit_code;
 }
 
+static int helper_run_shell_ir(const char *command) {
+	return helper_run_shell_ir_at_cwd(NULL, command);
+}
+
 static int helper_exec_shell_fallback(const char *shell_path, const char *shell_argv0, const char *shell_flag, const char *command) {
 	if (shell_path == NULL || shell_argv0 == NULL || shell_flag == NULL || command == NULL) {
 		return 127;
@@ -770,6 +851,7 @@ static int helper_exec_shell_fallback(const char *shell_path, const char *shell_
 	return errno == ENOENT ? 127 : 126;
 }
 
+#ifndef SQUIRE_PRELOAD_HELPER_NO_MAIN
 int main(int argc, char **argv) {
 	if (argc >= 6 && strcmp(argv[1], "--shell-ir") == 0) {
 		int rc = helper_run_shell_ir(argv[5]);
@@ -797,3 +879,4 @@ int main(int argc, char **argv) {
 	}
 	return 0;
 }
+#endif

@@ -12,6 +12,7 @@ import (
 type preparedWarmFile struct {
 	Entry        PreparedEntry
 	Content      []byte
+	LineStarts   []int
 	NativeWallMS int64
 }
 
@@ -24,7 +25,7 @@ func (k *Kernel) prewarmWarmFiles(ctx context.Context, cwd string, ws WorldState
 	var reports []WarmPreparedReport
 	for _, rel := range replayableInspectionPrewarmFiles(ws.RepoRoot, workspaceImagePrewarmFileLimit) {
 		argv := []string{"sed", "-n", "1,1p", rel}
-		if k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "Level 3 workspace image bytes prepared for arbitrary bounded sed/cat/head/tail replay; native fallback still available") {
+		if k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "Level 3 workspace image bytes prepared for arbitrary bounded sed/cat/head/tail/grep/rg replay; native fallback still available") {
 			count++
 			reports = append(reports, WarmPreparedReport{
 				Kind:              PreparedKindWarmFile,
@@ -32,7 +33,7 @@ func (k *Kernel) prewarmWarmFiles(ctx context.Context, cwd string, ws WorldState
 				NormalizedCommand: "warm eligible workspace file",
 				ReplayEligible:    true,
 				EvidenceQuality:   ws.EvidenceQuality,
-				Privacy:           "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail replay",
+				Privacy:           "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail/grep/rg replay",
 			})
 		}
 	}
@@ -75,7 +76,7 @@ func (k *Kernel) prepareWarmFileFromCommand(cwd string, argv []string, ws WorldS
 		EvidenceQuality:      ws.EvidenceQuality,
 		ReplayEligible:       true,
 		OutputRef:            ref,
-		Privacy:              "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail replay",
+		Privacy:              "eligible local workspace file bytes stored locally for exact bounded cat/sed/head/tail/grep/rg replay",
 		PreparedAt:           time.Now(),
 		Notes:                []string{note},
 	})
@@ -96,7 +97,7 @@ func (k *Kernel) findPreparedWarmFileReplay(inv CommandInvocation, diagnostics [
 		if candidate.Entry.HotInvalidationEpoch != hotEpoch || !mapsEqual(candidate.Entry.HotFingerprints, hotFPS) {
 			continue
 		}
-		stdout, exitCode, ok := warmFileCommandOutput(candidate.Content, inv.PolicyArgv)
+		stdout, exitCode, ok := warmFileCommandOutputIndexed(candidate.Content, candidate.LineStarts, inv.PolicyArgv)
 		if !ok || len(stdout) > maxFastPathOutputBytes {
 			return preparedReplay{}, diagnostics, false
 		}
@@ -214,10 +215,20 @@ func replayableInspectionArgPath(argv []string) string {
 			return path
 		}
 	}
+	if isFixedRgFileSearch(argv) {
+		_, path, _, _, ok := parseFixedRgArgs(argv)
+		if ok {
+			return path
+		}
+	}
 	return ""
 }
 
 func warmFileCommandOutput(content []byte, argv []string) ([]byte, int, bool) {
+	return warmFileCommandOutputIndexed(content, nil, argv)
+}
+
+func warmFileCommandOutputIndexed(content []byte, lineStarts []int, argv []string) ([]byte, int, bool) {
 	argv = normalizeArgvForPolicy(argv)
 	if isReplayableCatFileRead(argv) {
 		return append([]byte(nil), content...), 0, true
@@ -227,21 +238,21 @@ func warmFileCommandOutput(content []byte, argv []string) ([]byte, int, bool) {
 		if !ok {
 			return nil, 0, false
 		}
-		return sedPrintRangeBytes(content, start, end), 0, true
+		return sedPrintRangeBytesIndexed(content, lineStarts, start, end), 0, true
 	}
 	if isBoundedHeadPrint(argv) {
 		_, n, ok := parseHeadTailArgs(argv, false)
 		if !ok {
 			return nil, 0, false
 		}
-		return sedPrintRangeBytes(content, 1, n), 0, true
+		return sedPrintRangeBytesIndexed(content, lineStarts, 1, n), 0, true
 	}
 	if isBoundedTailPrint(argv) {
 		_, n, ok := parseHeadTailArgs(argv, true)
 		if !ok {
 			return nil, 0, false
 		}
-		return tailLineBytes(content, n), 0, true
+		return tailLineBytesIndexed(content, lineStarts, n), 0, true
 	}
 	if isFixedGrepFileSearch(argv) {
 		pattern, _, quiet, ok := parseFixedGrepArgs(argv)
@@ -254,12 +265,40 @@ func warmFileCommandOutput(content []byte, argv []string) ([]byte, int, bool) {
 		}
 		return stdout, 0, true
 	}
+	if isFixedRgFileSearch(argv) {
+		pattern, _, quiet, lineNumber, ok := parseFixedRgArgs(argv)
+		if !ok || bytes.IndexByte(content, 0) >= 0 {
+			return nil, 0, false
+		}
+		stdout, matched := fixedRgOutput(content, []byte(pattern), quiet, lineNumber)
+		if !matched {
+			return nil, 1, true
+		}
+		return stdout, 0, true
+	}
 	return nil, 0, false
 }
 
 func sedPrintRangeBytes(content []byte, start, end int) []byte {
+	return sedPrintRangeBytesIndexed(content, nil, start, end)
+}
+
+func sedPrintRangeBytesIndexed(content []byte, lineStarts []int, start, end int) []byte {
 	if start < 1 || end < start || len(content) == 0 {
 		return nil
+	}
+	if len(lineStarts) > 0 {
+		startIdx := start - 1
+		if startIdx >= len(lineStarts) {
+			return nil
+		}
+		endIdx := end - 1
+		if endIdx >= len(lineStarts) {
+			endIdx = len(lineStarts) - 1
+		}
+		begin := lineStarts[startIdx]
+		finish := lineEndOffset(content, lineStarts, endIdx)
+		return append([]byte(nil), content[begin:finish]...)
 	}
 	var out bytes.Buffer
 	lineNo := 1
@@ -280,8 +319,21 @@ func sedPrintRangeBytes(content []byte, start, end int) []byte {
 }
 
 func tailLineBytes(content []byte, count int) []byte {
+	return tailLineBytesIndexed(content, nil, count)
+}
+
+func tailLineBytesIndexed(content []byte, lineStarts []int, count int) []byte {
 	if count < 1 || len(content) == 0 {
 		return nil
+	}
+	if len(lineStarts) > 0 {
+		startIdx := len(lineStarts) - count
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		begin := lineStarts[startIdx]
+		finish := lineEndOffset(content, lineStarts, len(lineStarts)-1)
+		return append([]byte(nil), content[begin:finish]...)
 	}
 	type lineRange struct {
 		start int
@@ -307,6 +359,30 @@ func tailLineBytes(content []byte, count int) []byte {
 		out.Write(content[line.start:line.end])
 	}
 	return out.Bytes()
+}
+
+func lineStartsForContent(content []byte) []int {
+	if len(content) == 0 {
+		return nil
+	}
+	starts := make([]int, 0, bytes.Count(content, []byte{'\n'})+1)
+	starts = append(starts, 0)
+	for i, b := range content {
+		if b == '\n' && i+1 < len(content) {
+			starts = append(starts, i+1)
+		}
+	}
+	return starts
+}
+
+func lineEndOffset(content []byte, lineStarts []int, idx int) int {
+	if idx < 0 || idx >= len(lineStarts) {
+		return len(content)
+	}
+	if idx+1 < len(lineStarts) {
+		return lineStarts[idx+1]
+	}
+	return len(content)
 }
 
 func fixedGrepOutput(content, pattern []byte, quiet bool) ([]byte, bool) {
@@ -338,6 +414,45 @@ func fixedGrepOutput(content, pattern []byte, quiet bool) ([]byte, bool) {
 			out.WriteByte('\n')
 		}
 		offset = lineEnd
+	}
+	return out.Bytes(), matched
+}
+
+func fixedRgOutput(content, pattern []byte, quiet, lineNumber bool) ([]byte, bool) {
+	if len(pattern) == 0 {
+		return nil, false
+	}
+	var out bytes.Buffer
+	matched := false
+	lineNo := 1
+	offset := 0
+	for offset < len(content) {
+		next := bytes.IndexByte(content[offset:], '\n')
+		lineEnd := len(content)
+		hasNewline := false
+		if next >= 0 {
+			lineEnd = offset + next + 1
+			hasNewline = true
+		}
+		line := content[offset:lineEnd]
+		lineForMatch := line
+		if hasNewline {
+			lineForMatch = line[:len(line)-1]
+		}
+		if bytes.Contains(lineForMatch, pattern) {
+			matched = true
+			if quiet {
+				return nil, true
+			}
+			if lineNumber {
+				out.WriteString(strconv.Itoa(lineNo))
+				out.WriteByte(':')
+			}
+			out.Write(lineForMatch)
+			out.WriteByte('\n')
+		}
+		offset = lineEnd
+		lineNo++
 	}
 	return out.Bytes(), matched
 }

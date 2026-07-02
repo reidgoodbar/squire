@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"squire.run/kernel/internal/kernel"
+	"squire.run/internal/kernel"
 )
 
 var adapterWriteBufferPool = sync.Pool{
@@ -69,16 +69,21 @@ type adapterRequest struct {
 	ID               string            `json:"id,omitempty"`
 	CWD              string            `json:"cwd,omitempty"`
 	Argv             []string          `json:"argv"`
+	Script           string            `json:"script,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	ClearEnv         bool              `json:"clear_env,omitempty"`
 	SessionID        string            `json:"session_id,omitempty"`
 	EnsureMaintainer *bool             `json:"ensure_maintainer,omitempty"`
+	ReplayOnly       bool              `json:"replay_only,omitempty"`
 	Debug            bool              `json:"debug,omitempty"`
 }
 
 type adapterResponse struct {
 	ID                string                `json:"id,omitempty"`
 	OK                bool                  `json:"ok"`
+	ReplayHit         bool                  `json:"replay_hit,omitempty"`
+	ReplayMiss        bool                  `json:"replay_miss,omitempty"`
+	MissReason        string                `json:"miss_reason,omitempty"`
 	StdoutB64         string                `json:"stdout_b64,omitempty"`
 	StderrB64         string                `json:"stderr_b64,omitempty"`
 	ExitCode          int                   `json:"exit_code"`
@@ -188,6 +193,9 @@ func writeAdapterResponseFast(buf *bytes.Buffer, resp adapterResponse) {
 	first := true
 	writeJSONFieldString(buf, &first, "id", resp.ID)
 	writeJSONFieldBoolAlways(buf, &first, "ok", resp.OK)
+	writeJSONFieldBool(buf, &first, "replay_hit", resp.ReplayHit)
+	writeJSONFieldBool(buf, &first, "replay_miss", resp.ReplayMiss)
+	writeJSONFieldString(buf, &first, "miss_reason", resp.MissReason)
 	writeJSONFieldString(buf, &first, "stdout_b64", resp.StdoutB64)
 	writeJSONFieldString(buf, &first, "stderr_b64", resp.StderrB64)
 	writeJSONFieldIntAlways(buf, &first, "exit_code", resp.ExitCode)
@@ -283,8 +291,8 @@ func writeAdapterResponseSlow(w io.Writer, resp adapterResponse) error {
 }
 
 func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) adapterResponse {
-	if len(req.Argv) == 0 {
-		return adapterResponse{ID: req.ID, OK: false, Error: "missing argv"}
+	if len(req.Argv) == 0 && req.Script == "" {
+		return adapterResponse{ID: req.ID, OK: false, Error: "missing argv or script"}
 	}
 	return withAdapterEnv(req.Env, req.ClearEnv, func() adapterResponse {
 		cwd := req.CWD
@@ -296,8 +304,43 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 			sessionID = s.defaultSessionID
 		}
 		resp := adapterResponse{ID: req.ID, OK: true}
+		if req.Script != "" {
+			if !req.ReplayOnly {
+				return adapterResponse{ID: req.ID, OK: false, Error: "script requests require replay_only"}
+			}
+			state := s.stateFor(cwd)
+			storeRoot := state.storeRoot
+			ensure := s.ensureMaintainer
+			if req.EnsureMaintainer != nil {
+				ensure = *req.EnsureMaintainer
+			}
+			if ensure {
+				status, diagnostics := s.ensureBackgroundMaintainer(ctx, cwd, storeRoot)
+				resp.MaintainerRunning = status.Running
+				resp.MaintainerStarted = status.Started
+				resp.MaintainerAlready = status.AlreadyRunning
+				resp.Diagnostics = append(resp.Diagnostics, diagnostics...)
+			}
+			serveStart := time.Now()
+			if res, ok := state.kernel.ReplayComposedShell(ctx, sessionID, cwd, req.Script); ok {
+				kernel.RecordHotClientResult(storeRoot, res, time.Since(serveStart))
+				s.populateRunResponse(&resp, res, req.Debug)
+				resp.ReplayHit = true
+				return resp
+			}
+			resp.Family = kernel.FamilyShellUnknown
+			resp.ReplayMiss = true
+			resp.MissReason = "composed shell replay miss"
+			return resp
+		}
 		plan := s.planFor(cwd, req.Argv)
 		if !plan.replayAllowed {
+			if req.ReplayOnly {
+				resp.Family = plan.family
+				resp.ReplayMiss = true
+				resp.MissReason = "operator is not replay-allowed"
+				return resp
+			}
 			res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 			s.populateRunResponse(&resp, res, req.Debug)
 			return resp
@@ -306,6 +349,12 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 		storeRoot := state.storeRoot
 		missKey := adapterHotMissKey(storeRoot, plan.key)
 		if s.hotMissValid(missKey) {
+			if req.ReplayOnly {
+				resp.Family = plan.family
+				resp.ReplayMiss = true
+				resp.MissReason = "recent hot snapshot miss"
+				return resp
+			}
 			res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 			s.populateRunResponse(&resp, res, req.Debug)
 			return resp
@@ -327,12 +376,19 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 			delete(s.hotMisses, missKey)
 			kernel.RecordHotClientResult(storeRoot, *res, time.Since(serveStart))
 			s.populateRunResponse(&resp, *res, req.Debug)
+			resp.ReplayHit = true
 			return resp
 		}
 		if s.hotMisses == nil {
 			s.hotMisses = make(map[string]time.Time)
 		}
 		s.hotMisses[missKey] = time.Now().Add(adapterHotMissMemoTTL)
+		if req.ReplayOnly {
+			resp.Family = plan.family
+			resp.ReplayMiss = true
+			resp.MissReason = "hot snapshot miss"
+			return resp
+		}
 		res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 		s.populateRunResponse(&resp, res, req.Debug)
 		return resp

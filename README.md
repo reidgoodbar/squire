@@ -16,208 +16,126 @@ curl -fsSL https://squire.run/install.sh | bash
 ```
 
 The installer downloads the matching GitHub release archive, verifies
-`SHA256SUMS`, and installs `squire` to `~/.local/bin` by default.
+`SHA256SUMS`, and installs `squire` plus `squire-codex` to `~/.local/bin` by
+default. If a C compiler is available, it also builds the optional local hot
+library used by `squire-codex`.
 
-To install somewhere else:
+Squire does not install or authenticate Codex. Install Codex normally first, or
+put `codex` on `PATH` before starting `squire-codex`.
+
+Install somewhere else:
 
 ```sh
 curl -fsSL https://squire.run/install.sh | SQUIRE_INSTALL_DIR=/usr/local/bin bash
 ```
 
-## Use
+## Start
 
 From a repo:
 
 ```sh
-squire codex
+squire-codex
 ```
 
-That is the normal product path. There is no required `squire setup` step.
-Codex opens normally, sees normal commands, and keeps making the same decisions
-it would have made without Squire.
+That is the normal product path. Codex opens normally, the model sees the same
+tool surface, and it keeps emitting ordinary commands such as `git status`,
+`sed -n '1,80p' file`, or `python --version`. Squire runs underneath that
+execution boundary and only replaces a command result when the local proof says
+the bytes are exact.
 
-Squire runs underneath Codex:
+There is no required setup step, no global command shim, no prompt change, no
+new agent tool, and no MCP injection.
 
-- starts or reuses a local maintainer;
-- warms repo and workspace proofs;
-- serves exact hot-snapshot hits when safe;
-- falls back to native execution on every miss or unsafe operation.
+## What Squire Does
 
-## Cache Validity
+- Starts or reuses a local maintainer for the workspace.
+- Warms repo/file/tool proofs in the background.
+- Serves exact stdout, stderr, and exit code for proven read-only hits.
+- Falls back to native execution on every miss, unsafe command, proof failure,
+  corruption, or unavailable daemon.
 
-Squire does not trust a cached answer just because it exists. Every replay is a
-proof check against the current local world:
+Validation, builds, tests, edits, mutating Git commands, package installs, and
+unknown shell commands are native-only.
 
-- the normalized command, cwd, repo root, and tool identity must match;
-- relevant Git epochs, content hashes, config/index fingerprints, executable
-  byte identity, selected environment inputs, and OS change signals must still
-  match;
-- Git-sensitive replay also proves cwd-relative output boundaries and relevant
-  external Git inputs such as config includes, global ignore files, global
-  attributes files, `core.excludesFile`, and `core.attributesFile`;
-- the cached stdout, stderr, and exit code must come from a previous exact
-  native observation or a hot-prepared exact observation;
-- the operation must still be allowed by policy.
+## Why The Cache Is Valid
 
-If any proof element is missing, stale, too expensive to check, or corrupted,
-Squire runs the original command natively. Stale cache entries may remain on
-disk, but they are not valid replay entries unless the proof passes.
+Squire does not trust a cached answer just because it exists. Every replay must
+pass a local proof against the current world:
 
-Optional observability after a session:
+- normalized command, cwd, repo root, and tool identity match;
+- relevant Git epochs, config/index fingerprints, file hashes, selected
+  environment inputs, and executable identity match;
+- Git-sensitive outputs also prove cwd-relative boundaries plus external Git
+  inputs such as included config files, global ignore files, global attributes,
+  `core.excludesFile`, and `core.attributesFile`;
+- cached stdout, stderr, and exit code come from an exact native observation or
+  an exact hot-prepared observation;
+- the operation is still allowed by policy.
+
+If any proof element is missing or stale, Squire runs the original command
+natively. Stale records may remain on disk, but they are not replayable without
+a fresh proof.
+
+## Replay Coverage
+
+Current proven lanes include repeated local Git metadata, repo summaries,
+bounded source/config reads, line windows, fixed-string single-file search,
+tight directory listings, safe environment probes, common version probes, and
+selected read-only shell compositions.
+
+Examples:
+
+- `git rev-parse HEAD`
+- `git status --short`
+- `git ls-files`
+- `git diff --stat`
+- `cat src/app.js`
+- `sed -n '1,80p' src/app.js`
+- `head -n 20 src/app.js`
+- `tail -n 20 src/app.js`
+- `grep -F token src/app.js`
+- `rg -F token src/app.js`
+- `git status --short | head -n 5`
+
+Unsupported forms run natively.
+
+## Status
+
+After a session:
 
 ```sh
 squire boost status --short
 ```
 
-## UX Contract
+Advanced diagnostics:
 
-Squire is not a new agent tool and does not change the prompt/tool surface.
+```sh
+squire boost status --json
+squire kernel status --short
+squire setup
+```
 
-- No prompt changes.
-- No MCP tool injection.
-- No model routing.
-- No agent-visible command suggestions.
-- No validation skipping.
-- Native fallback always.
+The `squire kernel ...` namespace remains for diagnostics and compatibility,
+but the product is just Squire.
 
-On macOS, `squire codex` uses a ready Linux microVM backend when it is already
-configured. If the VM is unavailable or fails before Codex takes over, Squire
-falls back to the host scoped session. On Linux, it uses the local scoped
-session path directly.
+## Benchmarks
 
-`squire setup` still exists, but it is an advanced preflight/repair command, not
-part of the happy path.
+Latest scoped preload panel:
 
-## What Can Replay
-
-Enabled local Git metadata fast paths:
-
-- `git rev-parse HEAD`
-- `git rev-parse --git-dir`
-- `git rev-parse --abbrev-ref HEAD`
-- `git rev-parse --show-toplevel`
-- `git rev-parse --is-inside-work-tree`
-
-Proof-gated read-only candidates include:
-
-- `git status --short`
-- `git status --porcelain`
-- `git ls-files`
-- supported `git diff` forms
-- bounded `cat`, `sed -n`, `head`, and `tail` reads for safe workspace files
-- `file <bounded workspace source/config file>` from exact native warm output
-- bounded literal `grep -F` and `grep -q -F` checks on warmed workspace files
-- tight `ls`, `ls -p`, and `ls -la` directory listings for safe workspace directories
-- `printenv <non-sensitive variable>`
-- common `<tool> --version` probes
-- simple `which` and external `command -v` lookups
-- static environment probes such as `whoami`, `hostname`, `id`, and supported `uname` forms
-
-These replay only from exact native observations while the local proof still
-matches.
-
-Selected composed shell forms are also eligible when the shell is launched
-through the helper-owned `posix_spawn` path. Squire parses a tiny deterministic
-grammar over proof-backed source commands and bounded in-memory filters, then
-falls back by execing the original shell on any miss. Direct in-process shell
-replacement remains disabled.
-
-## What Never Replays
-
-- validation, build, and test commands;
-- edits and formatters that write files;
-- mutating Git commands;
-- package installs and package fetches;
-- `.env`, sensitive file reads, shell aliases/functions, broad unknown shell
-  commands, and unknown binary reads.
-
-## Current Evidence
-
-Current scoped claim:
-
-> Squire accelerates repeated local Git metadata plus hot-prepared
-> deterministic read-only discovery operations with exact stdout/stderr/exit
-> code preservation, local validity proof, and native fallback.
-
-Latest scoped-preload benchmark:
-
-- commands covered: `31`
-- rounds: `1000` operations per command, `5` e2e samples
-- exactness: `31/31`
-- direct command group: native p50 sum `167.549ms`, Squire p50 sum
-  `3.172ms`, `52.8x`
-- composed shell group: native p50 sum `155.398ms`, Squire p50 sum
-  `21.420ms`, `7.3x`
-- all commands: native p50 sum `322.948ms`, Squire p50 sum `24.591ms`,
-  `13.1x`
-- direct e2e p95 examples:
+- `31/31` commands exact
+- direct command group: `52.8x` native p50-sum speedup
+- composed shell group: `7.3x` native p50-sum speedup
+- full panel: `13.1x` native p50-sum speedup
+- representative direct p95:
   - `git rev-parse HEAD`: `0.097ms`
   - `git status --short`: `0.379ms`
   - `git ls-files`: `0.156ms`
   - `cat src/app.js`: `0.129ms`
-  - `grep -F two src/app.js`: `0.122ms`
-- composed examples:
-  - `git rev-parse HEAD | cat`: native p50 `17.959ms`, Squire p50
-    `2.428ms`, `7.4x`
-  - `git status --short | head -n 5`: native p50 `19.344ms`, Squire p50
-    `2.892ms`, `6.7x`
-  - `cat src/app.js | grep -F two | head -n 1`: native p50 `6.593ms`,
-    Squire p50 `2.524ms`, `2.6x`
+  - `grep -F token src/app.js`: `0.122ms`
 
-Direct commands use synthetic completed-child replay when the exact output is
-tiny and pipe-safe. Composed shell commands use the helper shell-plan path, so
-they improve substantially but remain milliseconds e2e because the shell
-composition envelope still exists.
+These are local command-serving measurements only. They do not include model
+thinking time, API/network latency, or a broad task-speedup claim.
 
-This benchmark measures local command-serving time only. It does not include
-model thinking time, network time, or a broad Codex task-speedup claim.
+Full tables and fuzz results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
-Latest cache-break stress pass:
-
-- reproduced stale replay candidates for cwd-sensitive `git status`, default
-  global Git ignore, included Git config, default global Git attributes,
-  configured `core.excludesFile`, and configured `core.attributesFile`;
-- fixed those proof gaps in both Go hot snapshot logic and the C mmap/preload
-  reader;
-- added regressions that require native fallback or a fresh proof instead of
-  stale bytes.
-
-More detail: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
-
-## CLI
-
-```sh
-squire codex [codex args...]
-squire boost status [--short|--json]
-squire kernel status [--short]
-squire setup
-```
-
-Advanced surfaces:
-
-```sh
-squire session -- <command> [args...]
-squire vm status [--short|--json]
-squire vm session -- <command> [args...]
-squire kernel run -- <command> [args...]
-squire kernel warm [--metadata-only] [--short|--json]
-squire kernel maintain --background [--short|--json]
-squire boost bench repo-metadata [--short|--json]
-squire boost bench deep-local [--short|--json]
-```
-
-The advanced `squire kernel ...` namespace is kept for compatibility with
-existing diagnostics and release scripts.
-
-## Development
-
-```sh
-go test ./...
-git diff --check
-```
-
-Release checklist: [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
-
-Squire contract: [SQUIRE_CONTRACT.md](SQUIRE_CONTRACT.md)
-
-Advanced architecture: [docs/ADVANCED.md](docs/ADVANCED.md)
+Advanced architecture notes: [docs/ADVANCED.md](docs/ADVANCED.md)

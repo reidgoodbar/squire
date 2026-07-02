@@ -75,7 +75,8 @@ func isHotClientProof(proof string) bool {
 	return proof == "cli-mmap-hot-snapshot" ||
 		proof == "mmap-hot-snapshot" ||
 		proof == "c-mmap-hot-snapshot" ||
-		proof == "c-mmap-hot-synthetic"
+		proof == "c-mmap-hot-synthetic" ||
+		proof == "composed-shell-adapter"
 }
 
 func LoadHotClientStats(storeRoot string) HotClientStats {

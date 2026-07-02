@@ -1714,7 +1714,6 @@ func TestProofGatedDirectoryListingReplaysAndInvalidates(t *testing.T) {
 	for _, argv := range [][]string{
 		{"ls"},
 		{"ls", "-p"},
-		{"ls", "-la"},
 		{"ls", "src"},
 	} {
 		t.Run(displayCommand(argv), func(t *testing.T) {
@@ -1729,6 +1728,18 @@ func TestProofGatedDirectoryListingReplaysAndInvalidates(t *testing.T) {
 			assertSameResult(t, first.Stdout, first.Stderr, first.ExitCode, native)
 		})
 	}
+	t.Run("ls -la native only", func(t *testing.T) {
+		argv := []string{"ls", "-la"}
+		native := runNative(ctx, repo, argv)
+		if native.ExitCode != 0 {
+			t.Skipf("%s unavailable: %s", displayCommand(argv), native.Stderr)
+		}
+		first := k.Run(ctx, "test", repo, argv)
+		if first.Mode == ModeReplay {
+			t.Fatalf("ls -la replayed despite long-format metadata instability")
+		}
+		assertSameResult(t, first.Stdout, first.Stderr, first.ExitCode, native)
+	})
 
 	before := k.Run(ctx, "test", repo, []string{"ls"})
 	if before.Mode != ModeReplay {

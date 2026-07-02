@@ -149,7 +149,7 @@ func Classify(argv []string) OperatorFamily {
 		}
 		return FamilyShellUnknown
 	}
-	if (name == "rg" && len(argv) == 2 && argv[1] == "--files") || isLiteralRgContentSearch(argv) {
+	if (name == "rg" && len(argv) == 2 && argv[1] == "--files") || isFixedRgFileSearch(argv) {
 		return FamilySearchList
 	}
 	if isDirectoryListing(argv) {
@@ -200,7 +200,8 @@ func IsProofGatedReplayCandidate(argv []string) bool {
 		isCommandPathLookup(argv) ||
 		isStaticEnvironmentProbe(argv) ||
 		isPrintenvProbe(argv) ||
-		isDirectoryListing(argv)
+		isDirectoryListing(argv) ||
+		isFixedRgFileSearch(argv)
 }
 
 func IsReplayAllowed(argv []string) bool {
@@ -261,29 +262,12 @@ func isRgFiles(argv []string) bool {
 	return len(argv) == 2 && filepath.Base(argv[0]) == "rg" && argv[1] == "--files"
 }
 
-func isLiteralRgContentSearch(argv []string) bool {
-	if len(argv) < 3 || filepath.Base(argv[0]) != "rg" {
-		return false
-	}
-	pattern := argv[1]
-	if pattern == "" || strings.HasPrefix(pattern, "-") || strings.ContainsAny(pattern, `\.^$*+?()[]{}|`) {
-		return false
-	}
-	for _, path := range argv[2:] {
-		clean := filepath.Clean(path)
-		if !safeRelativeInspectionPath(clean) {
-			return false
-		}
-	}
-	return true
-}
-
 func isReplayableFileInspection(argv []string) bool {
 	return isWarmFileBackedInspection(argv) || isReplayableFileType(argv)
 }
 
 func isWarmFileBackedInspection(argv []string) bool {
-	return isReplayableCatFileRead(argv) || isBoundedSedPrint(argv) || isBoundedHeadPrint(argv) || isBoundedTailPrint(argv) || isFixedGrepFileSearch(argv)
+	return isReplayableCatFileRead(argv) || isBoundedSedPrint(argv) || isBoundedHeadPrint(argv) || isBoundedTailPrint(argv) || isFixedGrepFileSearch(argv) || isFixedRgFileSearch(argv)
 }
 
 func isManifestFileRead(argv []string) bool {
@@ -317,6 +301,11 @@ func isFixedGrepFileSearch(argv []string) bool {
 	return ok
 }
 
+func isFixedRgFileSearch(argv []string) bool {
+	_, _, _, _, ok := parseFixedRgArgs(argv)
+	return ok
+}
+
 func parseFixedGrepArgs(argv []string) (pattern, path string, quiet bool, ok bool) {
 	if len(argv) != 4 && len(argv) != 5 {
 		return "", "", false, false
@@ -347,6 +336,54 @@ func parseFixedGrepArgs(argv []string) (pattern, path string, quiet bool, ok boo
 		return "", "", false, false
 	}
 	return pattern, clean, quiet, true
+}
+
+func parseFixedRgArgs(argv []string) (pattern, path string, quiet, lineNumber bool, ok bool) {
+	if len(argv) < 4 || len(argv) > 6 || filepath.Base(argv[0]) != "rg" {
+		return "", "", false, false, false
+	}
+	var fixed bool
+	var seenPattern bool
+	for _, arg := range argv[1:] {
+		switch arg {
+		case "-F", "--fixed-strings":
+			if fixed {
+				return "", "", false, false, false
+			}
+			fixed = true
+		case "-q", "--quiet":
+			if quiet {
+				return "", "", false, false, false
+			}
+			quiet = true
+		case "-n", "--line-number":
+			if lineNumber {
+				return "", "", false, false, false
+			}
+			lineNumber = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", "", false, false, false
+			}
+			if !seenPattern {
+				pattern = arg
+				seenPattern = true
+				continue
+			}
+			if path != "" {
+				return "", "", false, false, false
+			}
+			path = arg
+		}
+	}
+	if !fixed || pattern == "" || path == "" || strings.ContainsAny(pattern, "\x00\n\r") {
+		return "", "", false, false, false
+	}
+	clean := filepath.Clean(path)
+	if !safeRelativeInspectionPath(clean) || !isReplayableInspectionName(filepath.Base(clean)) {
+		return "", "", false, false, false
+	}
+	return pattern, clean, quiet, lineNumber, true
 }
 
 func isBoundedSedPrint(argv []string) bool {
@@ -493,7 +530,7 @@ func parseDirectoryListing(argv []string) (string, string, bool) {
 
 func isSupportedLSFlag(flag string) bool {
 	switch flag {
-	case "-p", "-la", "-al":
+	case "-p":
 		return true
 	default:
 		return false

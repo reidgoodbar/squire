@@ -119,7 +119,7 @@ func KernelStatus(ctx context.Context, cwd, storeRoot string) (string, error) {
 	fmt.Fprintln(&b, "  - git remote -v")
 	fmt.Fprintln(&b, "  - git remote get-url origin")
 	fmt.Fprintln(&b, "  - rg --files")
-	fmt.Fprintln(&b, "  - rg <literal> <workspace paths...>")
+	fmt.Fprintln(&b, "  - recursive, regex, multi-path, or otherwise unbounded rg searches")
 	fmt.Fprintln(&b, "never_replay_boundaries:")
 	for _, item := range NeverReplayPolicy() {
 		fmt.Fprintln(&b, "  -", item)

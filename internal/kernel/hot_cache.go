@@ -208,6 +208,7 @@ func (k *Kernel) buildPreparedReplayCache(ledger *ValidityLedger, phases *PhaseT
 			warmFiles[key] = append(warmFiles[key], preparedWarmFile{
 				Entry:        prepared,
 				Content:      content,
+				LineStarts:   lineStartsForContent(content),
 				NativeWallMS: 1,
 			})
 			continue

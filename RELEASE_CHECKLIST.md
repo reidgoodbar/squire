@@ -46,6 +46,7 @@ scripts/release_smoke.sh ./squire
 scripts/adapter_path_bench.py ./squire
 scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
 scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
+scripts/replay_fuzz.py ./squire --cases 3000 --seed 20260702 --json
 scripts/edge_stress.py ./squire --normal-ux
 scripts/edge_stress.py ./squire
 ```
@@ -68,6 +69,8 @@ Required gates:
   p95 Squire-overhead budget above native execution.
 - Multi-agent adapter A/B keeps exact stdout/stderr/exit-code equality with
   zero mismatches and a Squire-free measured command stream.
+- Replay fuzzing over stable read-only commands reports zero byte-level
+  stdout/stderr/exit-code mismatches.
 - VM status reports honest availability. On Linux it may report `linux-local`;
   on macOS it must report `virtualization-framework` unavailable unless an
   explicit guest runner is configured.
@@ -125,8 +128,12 @@ The workflow then builds:
 - `darwin/arm64`
 - `windows/amd64`
 
-Each release includes `.tar.gz` archives, `SHA256SUMS`, and
-`install.sh`, and `RELEASE_MANIFEST.txt`. Verify downloaded artifacts with:
+Each release includes `.tar.gz` archives, `SHA256SUMS`, `install.sh`, and
+`RELEASE_MANIFEST.txt`. Every archive must contain both `squire` and the
+`squire-codex` companion launcher. Archives must also include the C hot API
+source so the installer can build `libsquire_hot.dylib` or `libsquire_hot.so`
+for the `squire-codex` bridge on machines with `cc`. Verify downloaded
+artifacts with:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
@@ -140,13 +147,12 @@ The public install UX is:
 curl -fsSL https://squire.run/install.sh | bash
 ```
 
-The installer is a user-level binary install. It must not install global
-command shims, start a global daemon, or create repo-local state outside the
-workspace where Squire later runs. On macOS, it should also print the Homebrew
-zsh note without claiming shell preload is enabled, because protected Apple
-shells ignore `DYLD_INSERT_LIBRARIES`. It should install the local
-`squire-mmap-shim` helper when `cc` is available; this helper is used only
-through scoped session PATHs, never as a global command shim.
+The installer is a user-level binary install. It installs `squire` and
+`squire-codex`, but must not install global command shims, start a global
+daemon, or create repo-local state outside the workspace where Squire later
+runs. On macOS, it should also print the Homebrew zsh note without claiming
+shell preload is enabled, because protected Apple shells ignore
+`DYLD_INSERT_LIBRARIES`.
 
 Local artifact builds use the same script as GitHub:
 
@@ -166,6 +172,13 @@ SQUIRE_VERSION=v0.1.0-beta.1 \
 SQUIRE_INSTALL_DIR="$tmpbin" \
 ./install.sh
 "$tmpbin/squire" version --short
+test -x "$tmpbin/squire-codex"
+if command -v cc >/dev/null 2>&1; then
+  case "$(uname -s)" in
+    Darwin) test -f "$tmpbin/libsquire_hot.dylib" ;;
+    Linux) test -f "$tmpbin/libsquire_hot.so" ;;
+  esac
+fi
 ```
 
 Omit `SQUIRE_RELEASE_TARGETS` in CI and for real release builds; the default

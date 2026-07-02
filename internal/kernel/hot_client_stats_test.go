@@ -25,26 +25,30 @@ func TestHotClientStatsRecordAggregateOnly(t *testing.T) {
 	reusedKernelReplay.Observation.NativeWallMS = 3
 	reusedKernelReplay.Proof = &ProofRecord{OperationKey: "mmap-hot-snapshot"}
 	RecordHotClientResult(storeRoot, reusedKernelReplay, 500*time.Microsecond)
+	composedReplay := replay
+	composedReplay.Observation.NativeWallMS = 11
+	composedReplay.Proof = &ProofRecord{OperationKey: "composed-shell-adapter"}
+	RecordHotClientResult(storeRoot, composedReplay, 700*time.Microsecond)
 	RecordHotClientResult(storeRoot, RunResult{Mode: ModeNative}, 0)
 
 	stats := LoadHotClientStats(storeRoot)
-	if stats.Replays != 3 {
-		t.Fatalf("replays = %d, want 3", stats.Replays)
+	if stats.Replays != 4 {
+		t.Fatalf("replays = %d, want 4", stats.Replays)
 	}
 	if stats.NativeFallbacks != 0 {
 		t.Fatalf("native fallbacks = %d, want 0", stats.NativeFallbacks)
 	}
-	if stats.NativeWallAvoidedMS != 17 {
-		t.Fatalf("native wall avoided = %d, want 17", stats.NativeWallAvoidedMS)
+	if stats.NativeWallAvoidedMS != 28 {
+		t.Fatalf("native wall avoided = %d, want 28", stats.NativeWallAvoidedMS)
 	}
-	if stats.ReplayWallUS != 4500 {
-		t.Fatalf("replay wall us = %d, want 4500", stats.ReplayWallUS)
+	if stats.ReplayWallUS != 5200 {
+		t.Fatalf("replay wall us = %d, want 5200", stats.ReplayWallUS)
 	}
-	if stats.ReplayWallMeasured != 3 {
-		t.Fatalf("replay wall measured = %d, want 3", stats.ReplayWallMeasured)
+	if stats.ReplayWallMeasured != 4 {
+		t.Fatalf("replay wall measured = %d, want 4", stats.ReplayWallMeasured)
 	}
-	if stats.NetWallSavedMeasuredMS != 13 {
-		t.Fatalf("net wall saved measured = %d, want 13", stats.NetWallSavedMeasuredMS)
+	if stats.NetWallSavedMeasuredMS != 23 {
+		t.Fatalf("net wall saved measured = %d, want 23", stats.NetWallSavedMeasuredMS)
 	}
 	if stats.LastEventUnixNano == 0 || stats.LastReplayUnixNano == 0 {
 		t.Fatalf("last event/replay timestamps were not recorded: %+v", stats)

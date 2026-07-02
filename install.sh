@@ -93,6 +93,45 @@ compile_preload_helper() {
   esac
 }
 
+compile_hot_api() {
+  stage="$1"
+  hot_src="$stage/shims/squire_hot_api.c"
+  if [ ! -f "$hot_src" ]; then
+    echo "squire install: hot API source not present in archive"
+    return 0
+  fi
+  if ! have cc; then
+    echo "squire install: cc not found; skipped optional squire-codex hot library"
+    return 0
+  fi
+  case "$os" in
+    darwin)
+      hot_out="$install_dir/libsquire_hot.dylib"
+      tmp_hot="$install_dir/.libsquire_hot.dylib.tmp.$$"
+      if cc -O3 -DNDEBUG -dynamiclib -o "$tmp_hot" "$hot_src"; then
+        chmod 0755 "$tmp_hot"
+        mv "$tmp_hot" "$hot_out"
+        echo "squire install: installed $hot_out"
+      else
+        rm -f "$tmp_hot"
+        echo "squire install: optional squire-codex hot library build failed; native fallback remains available"
+      fi
+      ;;
+    linux)
+      hot_out="$install_dir/libsquire_hot.so"
+      tmp_hot="$install_dir/.libsquire_hot.so.tmp.$$"
+      if cc -O3 -DNDEBUG -shared -fPIC -o "$tmp_hot" "$hot_src" -ldl -lcrypto; then
+        chmod 0755 "$tmp_hot"
+        mv "$tmp_hot" "$hot_out"
+        echo "squire install: installed $hot_out"
+      else
+        rm -f "$tmp_hot"
+        echo "squire install: optional squire-codex hot library build failed; install libssl headers to enable it"
+      fi
+      ;;
+  esac
+}
+
 compile_vm_darwin() {
   stage="$1"
   if [ "$os" != "darwin" ]; then
@@ -150,6 +189,15 @@ print_macos_shell_note() {
 
   echo "squire install: macOS note: Apple /bin/zsh ignores DYLD_INSERT_LIBRARIES"
   echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
+}
+
+print_codex_note() {
+  if have codex; then
+    echo "squire install: Codex detected at $(command -v codex)"
+  else
+    echo "squire install: Codex was not found on PATH"
+    echo "squire install: install/authenticate Codex normally, then run squire-codex"
+  fi
 }
 
 fetch_stdout() {
@@ -249,8 +297,16 @@ verify_checksum "$tmp" "$asset"
 tar -xzf "$tmp/$asset" -C "$tmp"
 stage="$tmp/squire_${version}_${os}_${arch}"
 binary="$stage/squire"
+codex_binary="$stage/squire-codex"
+if [ "$os" = "windows" ]; then
+  binary="$stage/squire.exe"
+  codex_binary="$stage/squire-codex.exe"
+fi
 if [ ! -f "$binary" ]; then
   fail "archive did not contain squire binary"
+fi
+if [ ! -f "$codex_binary" ]; then
+  fail "archive did not contain squire-codex binary"
 fi
 
 mkdir -p "$install_dir"
@@ -258,13 +314,20 @@ tmp_binary="$install_dir/.squire.tmp.$$"
 cp "$binary" "$tmp_binary"
 chmod 0755 "$tmp_binary"
 mv "$tmp_binary" "$install_dir/squire"
+tmp_codex_binary="$install_dir/.squire-codex.tmp.$$"
+cp "$codex_binary" "$tmp_codex_binary"
+chmod 0755 "$tmp_codex_binary"
+mv "$tmp_codex_binary" "$install_dir/squire-codex"
 
 echo "squire install: installed $install_dir/squire"
+echo "squire install: installed $install_dir/squire-codex"
 "$install_dir/squire" version --short || true
+compile_hot_api "$stage"
 compile_preload "$stage"
 compile_preload_helper "$stage"
 compile_vm_darwin "$stage"
 print_macos_shell_note
+print_codex_note
 
 case ":$PATH:" in
   *":$install_dir:"*) ;;
@@ -276,3 +339,5 @@ esac
 
 echo "squire install: no global command shims installed"
 echo "squire install: repo state is created locally when Squire runs in a workspace"
+echo "squire install: start with:"
+echo "  squire-codex"

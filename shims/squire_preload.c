@@ -103,6 +103,7 @@ static int preload_tool_candidate(const char *path, char *const argv[]) {
 	    strcmp(tool, "ls") == 0 ||
 	    strcmp(tool, "file") == 0 ||
 	    strcmp(tool, "grep") == 0 ||
+	    strcmp(tool, "rg") == 0 ||
 	    strcmp(tool, "printenv") == 0 ||
 	    strcmp(tool, "whoami") == 0 ||
 	    strcmp(tool, "uname") == 0 ||

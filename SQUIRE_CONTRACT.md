@@ -84,8 +84,10 @@ Hot-prepared proof-gated replay candidates:
 - `file <bounded workspace source/config file>` from exact native warm output
 - `grep -F <literal> <bounded workspace source/config file>`
 - `grep -q -F <literal> <bounded workspace source/config file>`
+- `rg -F <literal> <bounded workspace source/config file>`
+- `rg -n/-q -F <literal> <bounded workspace source/config file>`
 - `printenv <non-sensitive variable>`
-- `ls`, `ls -p`, and `ls -la` for safe workspace directories
+- `ls` and `ls -p` for safe workspace directories
 - `<tool> --version` and `<tool> version` for common local tools
 - `pip/pip3 --version`
 - `which <common-tool>`
@@ -119,10 +121,11 @@ For `file`, the output must come from an exact native warm observation and the
 proof includes the target file content hash, size, mode, canonical path,
 `file` executable identity, and selected `file(1)` environment inputs such as
 locale and `MAGIC`.
-For bounded literal `grep`, the proof includes the warmed file content hash,
-size, mode, canonical path, exact literal pattern, quiet/non-quiet mode, and
-exact argv shape. Regex grep, recursive grep, binary files, multiple input
-files, and unsupported flags remain native.
+For bounded literal `grep` and single-file fixed `rg -F`, the proof includes
+the warmed file content hash, size, mode, canonical path, exact literal pattern,
+quiet/non-quiet mode, line-number mode when relevant, and exact argv shape.
+Regex grep/rg, recursive searches, binary files, multiple input files, and
+unsupported flags remain native.
 For `printenv`, only a single explicitly safe variable name is eligible. Names
 that look like credentials, tokens, secrets, keys, auth values, cookies, or
 passwords are denied, and the proof includes the variable name, value/existence,
@@ -310,9 +313,10 @@ and source/config extensions or well-known project metadata files. It is
 invalidated by local file proof. Exact command observations include the exact
 argv in their proof. Warm-file entries are keyed by relative path, file content
 hash, size, mode, and OS change signal, and may materialize arbitrary eligible
-bounded `sed -n`, `head`, `tail`, and literal `grep -F` windows from those same
-proven bytes without precomputing every possible range. `file(1)` remains
-native-precomputed exact output, not guessed from extension.
+bounded `sed -n`, `head`, `tail`, literal `grep -F`, and single-file fixed
+`rg -F` windows from those same proven bytes without precomputing every possible
+range. `file(1)` remains native-precomputed exact output, not guessed from
+extension.
 Tool discovery replay is invalidated by PATH, selected environment variables,
 and executable byte identity. `.env`, hidden paths, likely secret/token/key
 files, unknown binary reads, shell aliases, shell functions, and shell-specific
@@ -323,7 +327,7 @@ Native-only discovery:
 - `git remote -v`
 - `git remote get-url origin`
 - `rg --files`
-- `rg <literal> <workspace paths...>`
+- recursive, regex, multi-path, or otherwise unbounded `rg` searches
 
 These commands are native-only in this baseline and are not replay targets.
 
@@ -345,10 +349,11 @@ commands in a worker pool and may warm eligible workspace file bytes before the
 agent asks for them. These warmed file bytes form the production-safe Level 3
 read-only virtual workspace image. Exact warm observations replay through the
 exact output and hot prepared proof path. Warm-file observations replay only for
-eligible bounded `cat`, `sed -n`, `head`, `tail`, and literal `grep -F`
-requests while the file proof still matches. `file(1)` observations replay only
-from native-precomputed exact output. If a command has no complete cheap hot
-proof, native execution wins on the foreground serving path.
+eligible bounded `cat`, `sed -n`, `head`, `tail`, literal `grep -F`, and
+single-file fixed `rg -F` requests while the file proof still matches. `file(1)`
+observations replay only from native-precomputed exact output. If a command has
+no complete cheap hot proof, native execution wins on the foreground serving
+path.
 
 After an agent-chosen bounded file-inspection command, `squire kernel run` may
 launch a short-lived local helper process to prewarm adjacent read windows,
@@ -410,8 +415,9 @@ safety, auditability, and native fallback.
 - Level 3, Virtual Memory-Mapped Workspace: The production-safe subset is
   implemented as read-only workspace acceleration. Bounded eligible file bytes
   are warmed into a daemon-published mmap hot snapshot, and arbitrary bounded
-  `cat`, `sed -n`, `head`, `tail`, and literal `grep -F` outputs can be
-  materialized from those proven bytes while the file proof still matches.
+  `cat`, `sed -n`, `head`, `tail`, literal `grep -F`, and single-file fixed
+  `rg -F` outputs can be materialized from those proven bytes while the file
+  proof still matches.
   Native-precomputed `file(1)` outputs may replay from the same bounded path
   proof. This improves repeated local reads without creating a virtual write
   layer. There is no edit replay, no mutating CoW overlay, no asynchronous

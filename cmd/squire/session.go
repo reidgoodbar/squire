@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"squire.run/kernel/internal/kernel"
+	"squire.run/internal/kernel"
 )
 
 var sessionShimNames = []string{
@@ -51,6 +51,7 @@ var sessionShimNames = []string{
 
 type sessionOptions struct {
 	Command              []string
+	ExtraEnv             []string
 	PreloadLib           string
 	Quiet                bool
 	MetadataOnly         bool
@@ -115,6 +116,10 @@ func parseSessionOptions(args []string) (sessionOptions, error) {
 
 func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOptions) (int, error) {
 	env := append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_STORE_ROOT="+storeRoot)
+	if sessionCommandIsCodex(opts.Command) {
+		env = append(env, squireCodexBridgeEnv()...)
+	}
+	env = append(env, opts.ExtraEnv...)
 	transport := "native"
 	var err error
 	launcherForSafety := opts.Command[0]
@@ -208,6 +213,14 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 		return exitErr.ExitCode(), nil
 	}
 	return 0, err
+}
+
+func sessionCommandIsCodex(command []string) bool {
+	if len(command) == 0 {
+		return false
+	}
+	base := filepath.Base(command[0])
+	return base == "codex" || base == "codex.exe"
 }
 
 func openHotSnapshotFile(storeRoot string) *os.File {

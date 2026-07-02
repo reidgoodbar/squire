@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"squire.run/kernel/internal/kernel"
+	"squire.run/internal/kernel"
 )
 
 func TestUsageTextDocumentsKernelContract(t *testing.T) {
 	text := usageText()
 	for _, want := range []string{
 		"Squire v1",
+		"squire-codex",
 		"squire codex",
 		"squire version",
 		"squire session",
@@ -114,6 +115,27 @@ func TestParseSessionOptions(t *testing.T) {
 	}
 	if _, err := parseSessionOptions([]string{"--path-shims", "--", "sh"}); err == nil {
 		t.Fatal("removed path-shim transport should fail")
+	}
+}
+
+func TestSessionCommandIsCodex(t *testing.T) {
+	for _, command := range [][]string{
+		{"codex"},
+		{"/usr/local/bin/codex", "exec", "task"},
+		{"codex.exe"},
+	} {
+		if !sessionCommandIsCodex(command) {
+			t.Fatalf("sessionCommandIsCodex(%v) = false, want true", command)
+		}
+	}
+	for _, command := range [][]string{
+		nil,
+		{"sh", "-c", "codex"},
+		{"squire"},
+	} {
+		if sessionCommandIsCodex(command) {
+			t.Fatalf("sessionCommandIsCodex(%v) = true, want false", command)
+		}
 	}
 }
 
@@ -526,6 +548,8 @@ func TestAdapterFastResponseWriterMatchesJSONSemantics(t *testing.T) {
 	resp := adapterResponse{
 		ID:                "id-with-quote-\"",
 		OK:                true,
+		ReplayHit:         true,
+		MissReason:        "not used",
 		StdoutB64:         base64.StdEncoding.EncodeToString([]byte("hello\n")),
 		StderrB64:         base64.StdEncoding.EncodeToString([]byte("warn\n")),
 		ExitCode:          7,
@@ -647,6 +671,45 @@ func TestKernelAdapterNativeDirectSkipsMaintainerAndKernel(t *testing.T) {
 	assertAdapterStdout(t, resp, runCommand(t, repo, "python3", "-m", "unittest", "-h"))
 }
 
+func TestKernelAdapterReplayOnlyNeverRunsNativeForDisallowedCommand(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		ensureMaintainer: true,
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	req := adapterRequest{
+		ID:         "never",
+		CWD:        repo,
+		Argv:       []string{"python3", "-m", "unittest", "-h"},
+		ReplayOnly: true,
+	}
+	resp := server.handleRequest(ctx, req)
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayMiss || resp.ReplayHit {
+		t.Fatalf("replay flags = hit:%t miss:%t, want miss only", resp.ReplayHit, resp.ReplayMiss)
+	}
+	if resp.MissReason == "" {
+		t.Fatalf("missing miss reason: %+v", resp)
+	}
+	if resp.StdoutB64 != "" || resp.StderrB64 != "" || resp.Mode != "" {
+		t.Fatalf("replay-only miss returned command output or mode: %+v", resp)
+	}
+	if len(server.kernels) != 0 {
+		t.Fatalf("replay-only disallowed path constructed %d kernel instances", len(server.kernels))
+	}
+	if len(server.maintainers) != 0 {
+		t.Fatalf("replay-only disallowed path touched maintainer state: %+v", server.maintainers)
+	}
+}
+
 func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
@@ -692,6 +755,297 @@ func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
 	}
 	if len(server.hotMisses) != 1 {
 		t.Fatalf("hot misses after second request = %d, want 1", len(server.hotMisses))
+	}
+}
+
+func TestKernelAdapterReplayOnlyColdMissDoesNotRunNative(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	ensure := false
+	req := adapterRequest{
+		ID:               "status",
+		CWD:              repo,
+		Argv:             []string{"git", "status", "--short"},
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	}
+	resp := server.handleRequest(ctx, req)
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayMiss || resp.ReplayHit {
+		t.Fatalf("replay flags = hit:%t miss:%t, want miss only", resp.ReplayHit, resp.ReplayMiss)
+	}
+	if resp.StdoutB64 != "" || resp.StderrB64 != "" || resp.Mode != "" {
+		t.Fatalf("cold replay-only miss returned command output or mode: %+v", resp)
+	}
+	if len(server.hotMisses) != 1 {
+		t.Fatalf("hot misses = %d, want 1", len(server.hotMisses))
+	}
+}
+
+func TestKernelAdapterReplayOnlyComposedPipeline(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	state := server.stateFor(repo)
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+
+	ensure := false
+	req := adapterRequest{
+		ID:               "script",
+		CWD:              repo,
+		Script:           "git rev-parse HEAD | head -n 1",
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	}
+	resp := server.handleRequest(ctx, req)
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	assertAdapterStdout(t, resp, runCommand(t, repo, "sh", "-c", req.Script))
+	if resp.Proof != "composed-shell-adapter" {
+		t.Fatalf("proof = %q, want composed-shell-adapter", resp.Proof)
+	}
+}
+
+func TestKernelAdapterReplayOnlyComposedSequenceAndRedirection(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	state := server.stateFor(repo)
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"})
+
+	ensure := false
+	req := adapterRequest{
+		ID:               "script",
+		CWD:              repo,
+		Script:           "git rev-parse HEAD >/dev/null; git rev-parse --abbrev-ref HEAD",
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	}
+	resp := server.handleRequest(ctx, req)
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	assertAdapterStdout(t, resp, runCommand(t, repo, "sh", "-c", req.Script))
+}
+
+func TestKernelAdapterReplayOnlyComposedTailGrepAndShortCircuit(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	state := server.stateFor(repo)
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+
+	head := strings.TrimSpace(string(runGit(t, repo, "rev-parse", "HEAD")))
+	ensure := false
+	script := "git rev-parse HEAD | tail -n 1 | grep -F " + head[:12]
+	resp := server.handleRequest(ctx, adapterRequest{
+		ID:               "tail-grep",
+		CWD:              repo,
+		Script:           script,
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	assertAdapterStdout(t, resp, runCommand(t, repo, "sh", "-c", script))
+
+	shortCircuit := "git rev-parse HEAD | grep -q -F definitely_missing_squire_pattern && git rev-parse --git-dir"
+	resp = server.handleRequest(ctx, adapterRequest{
+		ID:               "short-circuit",
+		CWD:              repo,
+		Script:           shortCircuit,
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	stdout, stderr, code := runCommandRaw(repo, "sh", "-c", shortCircuit)
+	assertAdapterOutput(t, resp, stdout, stderr, code)
+}
+
+func TestKernelAdapterReplayOnlyComposedUnsupportedMisses(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	ensure := false
+	resp := server.handleRequest(ctx, adapterRequest{
+		ID:               "script",
+		CWD:              repo,
+		Script:           "python3 -m unittest -h | head -n 1",
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayMiss || resp.ReplayHit {
+		t.Fatalf("replay flags = hit:%t miss:%t, want miss only", resp.ReplayHit, resp.ReplayMiss)
+	}
+	if resp.StdoutB64 != "" || resp.StderrB64 != "" || resp.Mode != "" {
+		t.Fatalf("unsupported composed miss returned output or mode: %+v", resp)
+	}
+}
+
+func TestKernelAdapterReplayOnlyComposedForLoopAndPrintf(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	state := server.stateFor(repo)
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+
+	ensure := false
+	script := "for i in 1 2; do git rev-parse HEAD; done; printf 'SQUIRE_CODEX_AB_OK\\n'"
+	resp := server.handleRequest(ctx, adapterRequest{
+		ID:               "for-loop",
+		CWD:              repo,
+		Script:           script,
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	stdout, stderr, code := runCommandRaw(repo, "sh", "-c", script)
+	assertAdapterOutput(t, resp, stdout, stderr, code)
+}
+
+func TestKernelAdapterReplayOnlyComposedNewlineBlock(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	state := server.stateFor(repo)
+	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+
+	ensure := false
+	script := "git rev-parse HEAD\ngit rev-parse HEAD\nprintf 'SQUIRE_CODEX_AB_OK\\n'"
+	resp := server.handleRequest(ctx, adapterRequest{
+		ID:               "newline-block",
+		CWD:              repo,
+		Script:           script,
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayHit || resp.ReplayMiss {
+		t.Fatalf("replay flags = hit:%t miss:%t, want hit only (%+v)", resp.ReplayHit, resp.ReplayMiss, resp)
+	}
+	stdout, stderr, code := runCommandRaw(repo, "sh", "-c", script)
+	assertAdapterOutput(t, resp, stdout, stderr, code)
+}
+
+func TestKernelAdapterReplayOnlyComposedUnsafeForLoopMisses(t *testing.T) {
+	ctx := context.Background()
+	repo := initAdapterGitRepo(t)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	server := &adapterServer{
+		defaultCWD:       repo,
+		defaultSessionID: "test-adapter",
+		kernels:          make(map[string]*kernel.Kernel),
+		states:           make(map[string]adapterCWDState),
+		plans:            make(map[string]adapterCommandPlan),
+		hotMisses:        make(map[string]time.Time),
+		maintainers:      make(map[string]adapterMaintainerMemo),
+	}
+	ensure := false
+	resp := server.handleRequest(ctx, adapterRequest{
+		ID:               "unsafe-loop",
+		CWD:              repo,
+		Script:           "for i in 1 2; do git add -h >/dev/null; done",
+		ReplayOnly:       true,
+		EnsureMaintainer: &ensure,
+	})
+	if !resp.OK {
+		t.Fatalf("adapter response failed: %+v", resp)
+	}
+	if !resp.ReplayMiss || resp.ReplayHit {
+		t.Fatalf("replay flags = hit:%t miss:%t, want miss only", resp.ReplayHit, resp.ReplayMiss)
 	}
 }
 
@@ -1130,15 +1484,30 @@ func runGit(t *testing.T, repo string, args ...string) []byte {
 
 func runCommand(t *testing.T, dir string, args ...string) []byte {
 	t.Helper()
+	stdout, stderr, code := runCommandRaw(dir, args...)
+	if code != 0 {
+		t.Fatalf("%s failed with code %d\nstdout=%s\nstderr=%s", strings.Join(args, " "), code, stdout, stderr)
+	}
+	return stdout
+}
+
+func runCommandRaw(dir string, args ...string) ([]byte, []byte, int) {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("%s failed: %v\nstdout=%s\nstderr=%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			code = 1
+			stderr.WriteString(err.Error())
+		}
 	}
-	return stdout.Bytes()
+	return stdout.Bytes(), stderr.Bytes(), code
 }
 
 func writeExecutable(t *testing.T, path string) {
@@ -1174,22 +1543,44 @@ func runGitRaw(repo string, args ...string) ([]byte, []byte, int) {
 
 func assertAdapterStdout(t *testing.T, resp adapterResponse, want []byte) {
 	t.Helper()
+	assertAdapterOutput(t, resp, want, nil, 0)
+}
+
+func assertAdapterOutput(t *testing.T, resp adapterResponse, wantStdout, wantStderr []byte, wantExitCode int) {
+	t.Helper()
 	got, err := base64.StdEncoding.DecodeString(resp.StdoutB64)
 	if err != nil {
 		t.Fatalf("stdout is not base64: %v", err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("adapter stdout mismatch for %s\ngot:  %q\nwant: %q", resp.ID, got, want)
+	if !bytes.Equal(got, wantStdout) {
+		t.Fatalf("adapter stdout mismatch for %s\ngot:  %q\nwant: %q", resp.ID, got, wantStdout)
 	}
 	stderr, err := base64.StdEncoding.DecodeString(resp.StderrB64)
 	if err != nil {
 		t.Fatalf("stderr is not base64: %v", err)
 	}
-	if len(stderr) != 0 {
-		t.Fatalf("adapter stderr for %s = %q, want empty", resp.ID, stderr)
+	if !bytes.Equal(stderr, wantStderr) {
+		t.Fatalf("adapter stderr mismatch for %s\ngot:  %q\nwant: %q", resp.ID, stderr, wantStderr)
 	}
-	if resp.ExitCode != 0 {
-		t.Fatalf("adapter exit code for %s = %d, want 0", resp.ID, resp.ExitCode)
+	if resp.ExitCode != wantExitCode {
+		t.Fatalf("adapter exit code for %s = %d, want %d", resp.ID, resp.ExitCode, wantExitCode)
+	}
+}
+
+func warmKernelReplay(t *testing.T, ctx context.Context, k *kernel.Kernel, repo string, argv []string) {
+	t.Helper()
+	if k == nil {
+		t.Fatal("missing kernel")
+	}
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatalf("warm %v failed: %v", argv, err)
+	}
+	if !k.PreloadHotSnapshot() {
+		t.Fatalf("warm %v did not preload hot snapshot", argv)
+	}
+	replay, ok := k.FastReplay(ctx, "test-adapter", repo, argv)
+	if !ok || replay.Mode != kernel.ModeReplay {
+		t.Fatalf("warm %v replay = (%+v, %t), want replay", argv, replay, ok)
 	}
 }
 

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
-	"squire.run/kernel/internal/kernel"
+	"squire.run/internal/kernel"
 )
 
 var (
@@ -229,6 +231,34 @@ func runCodex(ctx context.Context, cwd, storeRoot string, args []string) (int, e
 	return runScopedSession(ctx, cwd, storeRoot, sessionOptions{Command: codexCommand(args), Quiet: true})
 }
 
+func squireCodexBridgeEnv() []string {
+	env := []string{"SQUIRE_CODEX_BRIDGE=1", "SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY=1"}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		env = append(env, "SQUIRE_CODEX_SQUIRE="+exe)
+		if hotLib := squireHotLibraryNextTo(exe); hotLib != "" {
+			env = append(env, "SQUIRE_CODEX_HOT_LIB="+hotLib)
+		}
+	}
+	return env
+}
+
+func squireHotLibraryNextTo(exe string) string {
+	name := "libsquire_hot.so"
+	if runtime.GOOS == "darwin" {
+		name = "libsquire_hot.dylib"
+	}
+	dir := filepath.Dir(exe)
+	for _, candidate := range []string{
+		filepath.Join(dir, name),
+		filepath.Join(dir, "lib", name),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func kernelUsageError(args []string) string {
 	if len(args) == 0 {
 		return `missing kernel subcommand (try "squire help kernel")`
@@ -282,6 +312,7 @@ func usageText() string {
 	return `Squire v1
 
 usage:
+  squire-codex [codex args...]
   squire codex [codex args...]
   squire boost status --short
 
@@ -313,7 +344,7 @@ principles:
 
 first use:
   cd your-repo
-  squire codex
+  squire-codex
 
 help:
   squire help codex
@@ -348,10 +379,12 @@ func helpTopic(topic []string) string {
 	switch strings.Join(topic, " ") {
 	case "codex":
 		return `usage:
+  squire-codex [codex args...]
   squire codex [codex args...]
 
 Starts Codex inside the normal Squire product path. This is the
-recommended UX. It does not require a separate setup command. On macOS, Squire
+recommended UX. The squire-codex companion executable is equivalent to
+squire codex. It does not require a separate setup command. On macOS, Squire
 uses the Linux microVM backend first when it is already configured, then falls
 back to the host scoped session. On Linux hosts, Squire uses the local scoped
 session path directly.
@@ -362,6 +395,7 @@ and native fallback below Codex. It does not add tools, alter prompts, suggest
 commands, stop for VM provisioning, or require Codex to call Squire.
 
 Examples:
+  squire-codex
   squire codex
   squire codex exec "Explain this repo"
   squire codex --skip-git-repo-check exec "Print OK"

@@ -26,7 +26,8 @@ Level 2, Transparent Fast Path:
 
 ## Foreground Product Path
 
-`squire codex` is the normal user path. It is a backend router:
+`squire-codex` is the normal user path and is equivalent to `squire codex`.
+It is a backend router:
 
 - On macOS, use the Linux microVM backend when it is already configured.
 - If the VM is unavailable or fails before Codex takes over, fall back to the
@@ -66,7 +67,7 @@ VM mode is useful for release testing and Linux-compatible projects, but the
 default user command remains:
 
 ```sh
-squire codex
+squire-codex
 ```
 
 ## Hot Replay Path
@@ -135,7 +136,7 @@ Proof-gated replay candidates:
 - `git status --short`
 - `git status --porcelain`
 - supported `git diff` forms
-- bounded safe `cat` and `sed -n` workspace reads
+- bounded safe `cat`, `sed -n`, `head`, `tail`, `grep -F`, and single-file `rg -F` workspace reads/searches
 - common tool version probes
 - simple external PATH `which` and `command -v`
 
@@ -144,7 +145,7 @@ Native-only discovery:
 - `git remote -v`
 - `git remote get-url origin`
 - `rg --files`
-- literal `rg` searches
+- recursive, regex, multi-path, or otherwise unbounded `rg` searches
 
 Never replay:
 

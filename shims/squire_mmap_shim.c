@@ -8,7 +8,7 @@
 //   - enabled Git metadata fast paths
 //   - proof-gated Git repo summaries: ls-files, status, diff
 //   - warmed bounded file inspection: cat/head/tail <file>, sed -n <range>p <file>
-//   - warmed literal grep checks and native-precomputed file(1) type inspection
+//   - warmed literal grep/rg checks and native-precomputed file(1) type inspection
 //   - common tool version probes and command path lookups
 //   - static environment probes, printenv <safe-var>, and tight directory listings
 //
@@ -2034,11 +2034,13 @@ static int safe_git_config_override(const char *value) {
 	       (n == strlen("core.fsmonitor") && strncasecmp(value, "core.fsmonitor", n) == 0);
 }
 
-static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
+static int normalize_invocation_at_cwd(const char *cwd, int argc, char **argv, policy_invocation *out) {
 	if (argc <= 0 || argc > MAX_ARGC) {
 		return 0;
 	}
-	if (getcwd(out->cwd, sizeof(out->cwd)) == NULL) {
+	if (cwd != NULL && cwd[0] != '\0') {
+		snprintf(out->cwd, sizeof(out->cwd), "%s", cwd);
+	} else if (getcwd(out->cwd, sizeof(out->cwd)) == NULL) {
 		return 0;
 	}
 	char cwd_real[PATH_BUF];
@@ -2136,6 +2138,10 @@ static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
 		out->argc++;
 	}
 	return 1;
+}
+
+static int normalize_invocation(int argc, char **argv, policy_invocation *out) {
+	return normalize_invocation_at_cwd(NULL, argc, argv, out);
 }
 
 static void command_key(policy_invocation *inv, char out[HASH_HEX]) {
@@ -2598,7 +2604,7 @@ static int printenv_epoch(policy_invocation *inv, char epoch[256]) {
 }
 
 static int supported_ls_flag(const char *flag) {
-	return strcmp(flag, "-p") == 0 || strcmp(flag, "-la") == 0 || strcmp(flag, "-al") == 0;
+	return strcmp(flag, "-p") == 0;
 }
 
 static int clean_ls_relative_path(const char *input, char out[PATH_BUF]) {
@@ -3078,6 +3084,60 @@ static int parse_fixed_grep_args(policy_invocation *inv, const char **pattern, c
 	return 1;
 }
 
+static int parse_fixed_rg_args(policy_invocation *inv, const char **pattern, const char **path, int *quiet, int *line_number) {
+	if (inv->argc < 4 || inv->argc > 6 || strcmp(inv->argv[0], "rg") != 0) {
+		return 0;
+	}
+	*pattern = NULL;
+	*path = NULL;
+	*quiet = 0;
+	*line_number = 0;
+	int fixed = 0;
+	for (int i = 1; i < inv->argc; i++) {
+		if (strcmp(inv->argv[i], "-F") == 0 || strcmp(inv->argv[i], "--fixed-strings") == 0) {
+			if (fixed) {
+				return 0;
+			}
+			fixed = 1;
+			continue;
+		}
+		if (strcmp(inv->argv[i], "-q") == 0 || strcmp(inv->argv[i], "--quiet") == 0) {
+			if (*quiet) {
+				return 0;
+			}
+			*quiet = 1;
+			continue;
+		}
+		if (strcmp(inv->argv[i], "-n") == 0 || strcmp(inv->argv[i], "--line-number") == 0) {
+			if (*line_number) {
+				return 0;
+			}
+			*line_number = 1;
+			continue;
+		}
+		if (inv->argv[i][0] == '-') {
+			return 0;
+		}
+		if (*pattern == NULL) {
+			*pattern = inv->argv[i];
+			continue;
+		}
+		if (*path != NULL) {
+			return 0;
+		}
+		*path = inv->argv[i];
+	}
+	if (!fixed || *pattern == NULL || *path == NULL || (*pattern)[0] == '\0' ||
+	    strchr(*pattern, '\n') != NULL || strchr(*pattern, '\r') != NULL) {
+		return 0;
+	}
+	char rel[PATH_BUF];
+	if (!clean_relative_path(*path, rel) || !is_replayable_name(base_name(rel))) {
+		return 0;
+	}
+	return 1;
+}
+
 static int warm_file_replay_enabled(void) {
 	return env_truthy("SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY") || env_truthy("SQUIRE_SHIM_REQUIRE_HIT");
 }
@@ -3100,6 +3160,13 @@ static int is_warm_file_candidate(policy_invocation *inv) {
 		const char *path = NULL;
 		int quiet = 0;
 		return parse_fixed_grep_args(inv, &pattern, &path, &quiet);
+	}
+	if (strcmp(inv->argv[0], "rg") == 0) {
+		const char *pattern = NULL;
+		const char *path = NULL;
+		int quiet = 0;
+		int line_number = 0;
+		return parse_fixed_rg_args(inv, &pattern, &path, &quiet, &line_number);
 	}
 	return 0;
 }
@@ -3124,6 +3191,13 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 		const char *pattern = NULL;
 		int quiet = 0;
 		if (!parse_fixed_grep_args(inv, &pattern, &arg_path, &quiet)) {
+			return 0;
+		}
+	} else if (strcmp(inv->argv[0], "rg") == 0) {
+		const char *pattern = NULL;
+		int quiet = 0;
+		int line_number = 0;
+		if (!parse_fixed_rg_args(inv, &pattern, &arg_path, &quiet, &line_number)) {
 			return 0;
 		}
 	} else {
@@ -3457,6 +3531,58 @@ static int output_fixed_grep(const unsigned char *content, uint32_t len, const c
 	return 1;
 }
 
+static int write_decimal_int(int value) {
+	char buf[32];
+	int n = snprintf(buf, sizeof(buf), "%d", value);
+	if (n <= 0 || n >= (int)sizeof(buf)) {
+		return 0;
+	}
+	return write_all(STDOUT_FILENO, buf, (size_t)n);
+}
+
+static int output_fixed_rg(const unsigned char *content, uint32_t len, const char *pattern, int quiet, int line_number, int *matched) {
+	*matched = 0;
+	size_t pattern_len = strlen(pattern);
+	if (pattern_len == 0) {
+		return 0;
+	}
+	for (uint32_t i = 0; i < len; i++) {
+		if (content[i] == '\0') {
+			return 0;
+		}
+	}
+	int line = 1;
+	uint32_t offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		uint32_t line_match_len = line_end - offset;
+		if (mem_contains_bytes(content + offset, line_match_len, (const unsigned char *)pattern, pattern_len)) {
+			*matched = 1;
+			if (quiet) {
+				return 1;
+			}
+			if (line_number && (!write_decimal_int(line) || !write_all(STDOUT_FILENO, ":", 1))) {
+				return 0;
+			}
+			if (line_match_len > 0 && !write_all(STDOUT_FILENO, content + offset, line_match_len)) {
+				return 0;
+			}
+			if (!write_all(STDOUT_FILENO, "\n", 1)) {
+				return 0;
+			}
+		}
+		if (line_end < len && content[line_end] == '\n') {
+			line_end++;
+		}
+		offset = line_end;
+		line++;
+	}
+	return 1;
+}
+
 static int discover_store_root(const char *cwd, char store_root[PATH_BUF]) {
 	const char *env = getenv("SQUIRE_KERNEL_STORE_ROOT");
 	if (env != NULL && env[0] != '\0') {
@@ -3568,6 +3694,21 @@ static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(matched ? 0 : 1);
 	}
+	if (strcmp(inv->argv[0], "rg") == 0) {
+		const char *pattern = NULL;
+		const char *path = NULL;
+		int quiet = 0;
+		int line_number = 0;
+		if (!parse_fixed_rg_args(inv, &pattern, &path, &quiet, &line_number)) {
+			return 0;
+		}
+		int matched = 0;
+		if (!output_fixed_rg(content, content_len, pattern, quiet, line_number, &matched)) {
+			return 0;
+		}
+		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
+		_exit(matched ? 0 : 1);
+	}
 	return 0;
 }
 
@@ -3593,14 +3734,14 @@ static int prepare_exact_replay_for_epoch(mapped_snapshot *snap, policy_invocati
 	return 1;
 }
 
-static int prepare_exact_replay(int argc, char **argv, prepared_exact_replay *prepared) {
+static int prepare_exact_replay_at_cwd(const char *cwd, int argc, char **argv, prepared_exact_replay *prepared) {
 	if (prepared == NULL) {
 		return 0;
 	}
 	memset(prepared, 0, sizeof(*prepared));
 	prepared->replay_start_ns = now_monotonic_ns();
 	policy_invocation inv;
-	if (!normalize_invocation(argc, argv, &inv)) {
+	if (!normalize_invocation_at_cwd(cwd, argc, argv, &inv)) {
 		return 0;
 	}
 	if (!discover_store_root(inv.cwd, prepared->store_root)) {
@@ -3645,6 +3786,10 @@ static int prepare_exact_replay(int argc, char **argv, prepared_exact_replay *pr
 	unmap_snapshot(&prepared->snap);
 	memset(prepared, 0, sizeof(*prepared));
 	return 0;
+}
+
+static int prepare_exact_replay(int argc, char **argv, prepared_exact_replay *prepared) {
+	return prepare_exact_replay_at_cwd(NULL, argc, argv, prepared);
 }
 
 static void release_prepared_exact_replay(prepared_exact_replay *prepared) {

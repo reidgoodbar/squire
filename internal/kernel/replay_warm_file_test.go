@@ -86,6 +86,77 @@ func TestWarmFileFixedGrepReplayMatchesNative(t *testing.T) {
 	}
 }
 
+func TestWarmFileFixedRgReplayMatchesNative(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("rg command unavailable")
+	}
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "search.txt")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("alpha\nbeta\ngamma\nbetamax"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+
+	for _, argv := range [][]string{
+		{"rg", "-F", "beta", rel},
+		{"rg", "-n", "-F", "beta", rel},
+		{"rg", "--line-number", "--fixed-strings", "beta", rel},
+		{"rg", "-q", "-F", "beta", rel},
+		{"rg", "-q", "-F", "missing", rel},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			res := k.Run(ctx, "test", repo, argv)
+			if res.Mode != ModeReplay {
+				t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+			}
+			assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+		})
+	}
+}
+
+func TestWarmFileFixedRgDoesNotReplayRegexOrRecursiveSearch(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "search.txt")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("alpha\nbeta\ngamma\nbetamax"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+
+	for _, argv := range [][]string{
+		{"rg", "beta", rel},
+		{"rg", "-F", "beta", "src"},
+		{"rg", "-F", "beta", rel, "README.md"},
+		{"rg", "-F", "-beta", rel},
+	} {
+		t.Run(displayCommand(argv), func(t *testing.T) {
+			res := k.Run(ctx, "test", repo, argv)
+			if res.Mode == ModeReplay {
+				t.Fatalf("unsafe rg form replayed: argv=%v proof=%+v", argv, res.Proof)
+			}
+		})
+	}
+}
+
 func TestFileTypeReplayMatchesNative(t *testing.T) {
 	if _, err := exec.LookPath("file"); err != nil {
 		t.Skip("file command unavailable")

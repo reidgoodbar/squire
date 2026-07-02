@@ -48,6 +48,9 @@ static char *const *command_for(const char *kind) {
   static char *file_argv[] = {"file", "src/app.js", NULL};
   static char *grep_argv[] = {"grep", "-F", "two", "src/app.js", NULL};
   static char *grep_q_argv[] = {"grep", "-q", "-F", "two", "src/app.js", NULL};
+  static char *rg_fixed_argv[] = {"rg", "-F", "two", "src/app.js", NULL};
+  static char *rg_fixed_n_argv[] = {"rg", "-n", "-F", "two", "src/app.js", NULL};
+  static char *rg_fixed_q_argv[] = {"rg", "-q", "-F", "two", "src/app.js", NULL};
   static char *ls_argv[] = {"ls", "src", NULL};
   static char *printenv_path_argv[] = {"printenv", "PATH", NULL};
   static char *uname_argv[] = {"uname", "-m", NULL};
@@ -60,6 +63,7 @@ static char *const *command_for(const char *kind) {
   static char *shell_status_head_argv[] = {"sh", "-c", "git status --short | head -n 5", NULL};
   static char *shell_ls_files_grep_argv[] = {"sh", "-c", "git ls-files | grep -F src", NULL};
   static char *shell_cat_grep_head_argv[] = {"sh", "-c", "cat src/app.js | grep -F two | head -n 1", NULL};
+  static char *shell_rg_head_argv[] = {"sh", "-c", "rg -F two src/app.js | head -n 1", NULL};
   static char *shell_sed_tail_argv[] = {"sh", "-c", "sed -n '1,4p' src/app.js | tail -n 2", NULL};
   static char *shell_mixed_semicolon_argv[] = {"sh", "-c", "git rev-parse HEAD >/dev/null; git ls-files >/dev/null; cat src/app.js >/dev/null", NULL};
   if (strcmp(kind, "git_rev_parse_head") == 0) return git_head_argv;
@@ -79,6 +83,9 @@ static char *const *command_for(const char *kind) {
   if (strcmp(kind, "file") == 0) return file_argv;
   if (strcmp(kind, "grep") == 0) return grep_argv;
   if (strcmp(kind, "grep_q") == 0) return grep_q_argv;
+  if (strcmp(kind, "rg_fixed") == 0) return rg_fixed_argv;
+  if (strcmp(kind, "rg_fixed_n") == 0) return rg_fixed_n_argv;
+  if (strcmp(kind, "rg_fixed_q") == 0) return rg_fixed_q_argv;
   if (strcmp(kind, "ls") == 0) return ls_argv;
   if (strcmp(kind, "printenv_path") == 0) return printenv_path_argv;
   if (strcmp(kind, "uname") == 0) return uname_argv;
@@ -91,6 +98,7 @@ static char *const *command_for(const char *kind) {
   if (strcmp(kind, "shell_status_head") == 0) return shell_status_head_argv;
   if (strcmp(kind, "shell_ls_files_grep") == 0) return shell_ls_files_grep_argv;
   if (strcmp(kind, "shell_cat_grep_head") == 0) return shell_cat_grep_head_argv;
+  if (strcmp(kind, "shell_rg_head") == 0) return shell_rg_head_argv;
   if (strcmp(kind, "shell_sed_tail") == 0) return shell_sed_tail_argv;
   if (strcmp(kind, "shell_mixed_semicolon") == 0) return shell_mixed_semicolon_argv;
   return NULL;
@@ -355,6 +363,15 @@ def main() -> int:
         "shell_sed_tail": ["sh", "-c", "sed -n '1,4p' src/app.js | tail -n 2"],
         "shell_mixed_semicolon": ["sh", "-c", "git rev-parse HEAD >/dev/null; git ls-files >/dev/null; cat src/app.js >/dev/null"],
     }
+    if shutil.which("rg"):
+        commands.update(
+            {
+                "rg_fixed": ["rg", "-F", "two", "src/app.js"],
+                "rg_fixed_n": ["rg", "-n", "-F", "two", "src/app.js"],
+                "rg_fixed_q": ["rg", "-q", "-F", "two", "src/app.js"],
+                "shell_rg_head": ["sh", "-c", "rg -F two src/app.js | head -n 1"],
+            }
+        )
     native_env = os.environ.copy()
     native_env["SQUIRE_DRIVER_NULL_STDOUT"] = "1"
     preload_env = native_env.copy()

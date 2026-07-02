@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,8 @@ type hotSnapshotCandidate struct {
 	stdoutHash   string
 	stderrHash   string
 	kind         uint32
+	priority     int
+	preparedAt   time.Time
 }
 
 type HotSnapshotStats struct {
@@ -159,6 +162,8 @@ func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[st
 				stdoutHash:   replay.Observation.StdoutHash,
 				stderrHash:   replay.Observation.StderrHash,
 				kind:         hotSnapshotKindExact,
+				priority:     hotSnapshotCandidatePriority(replay.Entry),
+				preparedAt:   replay.Entry.PreparedAt,
 			})
 		}
 	}
@@ -182,10 +187,22 @@ func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[st
 				stdoutHash:   contentHash,
 				stderrHash:   hashBytes(nil),
 				kind:         hotSnapshotKindWarmFile,
+				priority:     hotSnapshotCandidatePriority(replay.Entry),
+				preparedAt:   replay.Entry.PreparedAt,
 			})
 		}
 	}
+	candidates = dedupeHotSnapshotCandidates(candidates)
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].priority != candidates[j].priority {
+			return candidates[i].priority > candidates[j].priority
+		}
+		if !candidates[i].preparedAt.Equal(candidates[j].preparedAt) {
+			return candidates[i].preparedAt.After(candidates[j].preparedAt)
+		}
+		if candidates[i].nativeWallMS != candidates[j].nativeWallMS {
+			return candidates[i].nativeWallMS > candidates[j].nativeWallMS
+		}
 		if candidates[i].commandKey == candidates[j].commandKey {
 			return hashString(candidates[i].epoch) < hashString(candidates[j].epoch)
 		}
@@ -194,7 +211,79 @@ func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[st
 	if len(candidates) > hotSnapshotMaxEntries {
 		candidates = candidates[:hotSnapshotMaxEntries]
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].commandKey == candidates[j].commandKey {
+			return hashString(candidates[i].epoch) < hashString(candidates[j].epoch)
+		}
+		return candidates[i].commandKey < candidates[j].commandKey
+	})
 	return candidates
+}
+
+func dedupeHotSnapshotCandidates(candidates []hotSnapshotCandidate) []hotSnapshotCandidate {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	byProof := make(map[string]hotSnapshotCandidate, len(candidates))
+	for _, candidate := range candidates {
+		key := strconv.FormatUint(uint64(candidate.kind), 10) + "\x00" + candidate.commandKey + "\x00" + candidate.epoch
+		current, ok := byProof[key]
+		if !ok || betterHotSnapshotCandidate(candidate, current) {
+			byProof[key] = candidate
+		}
+	}
+	out := make([]hotSnapshotCandidate, 0, len(byProof))
+	for _, candidate := range byProof {
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func betterHotSnapshotCandidate(a, b hotSnapshotCandidate) bool {
+	if a.priority != b.priority {
+		return a.priority > b.priority
+	}
+	if !a.preparedAt.Equal(b.preparedAt) {
+		return a.preparedAt.After(b.preparedAt)
+	}
+	if a.nativeWallMS != b.nativeWallMS {
+		return a.nativeWallMS > b.nativeWallMS
+	}
+	return len(a.stdout)+len(a.stderr) < len(b.stdout)+len(b.stderr)
+}
+
+func hotSnapshotCandidatePriority(entry PreparedEntry) int {
+	command := entry.NormalizedCommand
+	switch {
+	case entry.Kind == PreparedKindFastPathOutput:
+		return 1000
+	case command == "git status --short" || command == "git status --porcelain":
+		return 980
+	case command == "git ls-files":
+		return 970
+	case strings.HasPrefix(command, "git diff"):
+		return 960
+	case strings.HasPrefix(command, "cat "):
+		return 930
+	case strings.HasPrefix(command, "sed "):
+		return 925
+	case strings.HasPrefix(command, "head ") || strings.HasPrefix(command, "tail "):
+		return 920
+	case strings.HasPrefix(command, "grep ") || strings.HasPrefix(command, "rg "):
+		return 910
+	case command == "ls" || command == "ls -p" || strings.HasPrefix(command, "ls "):
+		return 900
+	case entry.Kind == PreparedKindWarmFile:
+		return 850
+	case entry.OperatorFamily == FamilyFileInspection:
+		return 800
+	case entry.OperatorFamily == FamilySearchList:
+		return 780
+	case entry.OperatorFamily == FamilyEnvironment:
+		return 700
+	default:
+		return 500
+	}
 }
 
 func encodeHotSnapshot(candidates []hotSnapshotCandidate) ([]byte, bool) {
@@ -500,7 +589,7 @@ func decodeHotSnapshotWarmFileResponse(data []byte, commandKey, epochHash string
 	if err != nil {
 		return hotCacheResponse{}, err
 	}
-	stdout, exitCode, ok := warmFileCommandOutput(resp.Stdout, argv)
+	stdout, exitCode, ok := warmFileCommandOutputIndexed(resp.Stdout, lineStartsForContent(resp.Stdout), argv)
 	if !ok || len(stdout) > maxFastPathOutputBytes {
 		return hotCacheResponse{}, errors.New("hot snapshot warm-file command output unavailable")
 	}

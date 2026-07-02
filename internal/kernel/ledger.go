@@ -668,6 +668,12 @@ func fileInspectionProof(op Operation, ws WorldState) (map[string]string, string
 		fp["grep_pattern"] = hashString(pattern)
 		fp["grep_quiet"] = hashString(strconv.FormatBool(quiet))
 	}
+	if isFixedRgFileSearch(op.Argv) {
+		pattern, _, quiet, lineNumber, _ := parseFixedRgArgs(op.Argv)
+		fp["rg_pattern"] = hashString(pattern)
+		fp["rg_quiet"] = hashString(strconv.FormatBool(quiet))
+		fp["rg_line_number"] = hashString(strconv.FormatBool(lineNumber))
+	}
 	if isReplayableFileType(op.Argv) {
 		signal, ok := executableSignal(op.CWD, "file")
 		if !ok {
