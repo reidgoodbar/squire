@@ -144,11 +144,11 @@ sha256sum -c SHA256SUMS
 The public install UX is:
 
 ```sh
-curl -fsSL https://squire.run/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reidgoodbar/squire/main/install.sh | bash
 ```
 
-The Cloudflare Worker for that URL lives in `cloudflare/squire-run`. Deploy it
-after publishing release assets:
+The optional vanity installer lives in `cloudflare/squire-run`. Deploy it only
+when `squire.run` is ready to be the public front door:
 
 ```sh
 npx wrangler deploy -c cloudflare/squire-run/wrangler.toml

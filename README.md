@@ -12,7 +12,7 @@ missing, stale, too expensive, or unsafe, the command runs natively.
 ## Install
 
 ```sh
-curl -fsSL https://squire.run/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reidgoodbar/squire/main/install.sh | bash
 ```
 
 The installer downloads the matching GitHub release archive, verifies
@@ -26,7 +26,7 @@ put `codex` on `PATH` before starting `squire-codex`.
 Install somewhere else:
 
 ```sh
-curl -fsSL https://squire.run/install.sh | SQUIRE_INSTALL_DIR=/usr/local/bin bash
+curl -fsSL https://raw.githubusercontent.com/reidgoodbar/squire/main/install.sh | SQUIRE_INSTALL_DIR=/usr/local/bin bash
 ```
 
 ## Start
