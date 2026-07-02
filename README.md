@@ -15,13 +15,15 @@ missing, stale, too expensive, or unsafe, the command runs natively.
 curl -fsSL https://raw.githubusercontent.com/reidgoodbar/squire/main/install.sh | bash
 ```
 
-The installer downloads the matching GitHub release archive, verifies
-`SHA256SUMS`, and installs `squire` plus `squire-codex` to `~/.local/bin` by
-default. If a C compiler is available, it also builds the optional local hot
-library used by `squire-codex`.
+The installer downloads verified GitHub release archives and installs `squire`
+plus the matching `squire-codex` driver to `~/.local/bin` by default. `squire`
+comes from `reidgoodbar/squire`; `squire-codex` comes from the real Codex fork
+in `reidgoodbar/squire-codex`. If a C compiler is available, the installer also
+builds the optional local hot library used by the driver.
 
-Squire does not install or authenticate Codex. Install Codex normally first, or
-put `codex` on `PATH` before starting `squire-codex`.
+Squire does not change Codex auth or model configuration. `squire-codex` uses
+the normal Codex home, so authenticate and configure Codex the same way you
+already would.
 
 Install somewhere else:
 

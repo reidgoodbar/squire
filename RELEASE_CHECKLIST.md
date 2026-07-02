@@ -128,12 +128,16 @@ The workflow then builds:
 - `darwin/arm64`
 - `windows/amd64`
 
-Each release includes `.tar.gz` archives, `SHA256SUMS`, `install.sh`, and
-`RELEASE_MANIFEST.txt`. Every archive must contain both `squire` and the
-`squire-codex` companion launcher. Archives must also include the C hot API
-source so the installer can build `libsquire_hot.dylib` or `libsquire_hot.so`
-for the `squire-codex` bridge on machines with `cc`. Verify downloaded
-artifacts with:
+Each `reidgoodbar/squire` release includes `.tar.gz` archives, `SHA256SUMS`,
+`install.sh`, and `RELEASE_MANIFEST.txt`. Squire archives contain the `squire`
+binary plus the C hot API source so the installer can build
+`libsquire_hot.dylib` or `libsquire_hot.so` for the `squire-codex` bridge on
+machines with `cc`.
+
+Each matching `reidgoodbar/squire-codex` release must publish the real forked
+driver archives named `squire-codex_<version>_<os>_<arch>.tar.gz` plus its own
+`SHA256SUMS`. The public installer downloads and verifies both release lines
+before installing either binary. Verify downloaded artifacts with:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
@@ -156,12 +160,12 @@ curl -fsSI https://squire.run/install.sh
 curl -fsS https://squire.run/install.sh | sh -n
 ```
 
-The installer is a user-level binary install. It installs `squire` and
-`squire-codex`, but must not install global command shims, start a global
-daemon, or create repo-local state outside the workspace where Squire later
-runs. On macOS, it should also print the Homebrew zsh note without claiming
-shell preload is enabled, because protected Apple shells ignore
-`DYLD_INSERT_LIBRARIES`.
+The installer is a user-level binary install. It installs `squire` from this
+repo and `squire-codex` from the fork release, but must not install global
+command shims, start a global daemon, or create repo-local state outside the
+workspace where Squire later runs. On macOS, it should also print the Homebrew
+zsh note without claiming shell preload is enabled, because protected Apple
+shells ignore `DYLD_INSERT_LIBRARIES`.
 
 Local artifact builds use the same script as GitHub:
 
@@ -176,7 +180,14 @@ tmpbin=$(mktemp -d)
 SQUIRE_RELEASE_TARGETS="darwin arm64" \
 VERSION=v0.1.0-beta.1 \
 scripts/build_release_artifacts.sh .tmp/release
+(
+  cd ../squire-codex
+  SQUIRE_CODEX_RELEASE_TARGETS="darwin arm64" \
+  VERSION=v0.1.0-beta.1 \
+  scripts/build_squire_codex_artifacts.sh .tmp/release
+)
 SQUIRE_ARTIFACT_DIR=.tmp/release \
+SQUIRE_CODEX_ARTIFACT_DIR=../squire-codex/.tmp/release \
 SQUIRE_VERSION=v0.1.0-beta.1 \
 SQUIRE_INSTALL_DIR="$tmpbin" \
 ./install.sh
@@ -189,6 +200,11 @@ if command -v cc >/dev/null 2>&1; then
   esac
 fi
 ```
+
+For a local installer-layout smoke that does not need optimized Codex bytes,
+set `SQUIRE_CODEX_CARGO_PROFILE=dev` on the `squire-codex` artifact build.
+Release builds and CI should omit that variable so the default optimized
+profile is used.
 
 Omit `SQUIRE_RELEASE_TARGETS` in CI and for real release builds; the default
 builds every supported platform.

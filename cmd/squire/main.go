@@ -382,12 +382,13 @@ func helpTopic(topic []string) string {
   squire-codex [codex args...]
   squire codex [codex args...]
 
-Starts Codex inside the normal Squire product path. This is the
-recommended UX. The squire-codex companion executable is equivalent to
-squire codex. It does not require a separate setup command. On macOS, Squire
-uses the Linux microVM backend first when it is already configured, then falls
-back to the host scoped session. On Linux hosts, Squire uses the local scoped
-session path directly.
+squire-codex is the recommended UX and normal product path. It is the real
+Codex fork built with the Squire execution bridge and does not require a
+separate setup command.
+
+squire codex is a compatibility and diagnostics wrapper around a separately
+installed codex executable. It is useful for local experiments, but it is not
+the primary release driver.
 
 The model still sees and emits ordinary commands. Squire scopes local store
 prep, warm state, the resident maintainer, hot snapshot access, exact replay,

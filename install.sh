@@ -2,11 +2,14 @@
 set -eu
 
 repo="${SQUIRE_REPO:-${SQUIRE_KERNEL_REPO:-reidgoodbar/squire}}"
+codex_repo="${SQUIRE_CODEX_REPO:-reidgoodbar/squire-codex}"
 version="${SQUIRE_VERSION:-${SQUIRE_KERNEL_VERSION:-}}"
+codex_version="${SQUIRE_CODEX_VERSION:-}"
 install_dir="${SQUIRE_INSTALL_DIR:-${HOME:-}/.local/bin}"
 github_base="${GITHUB_BASE_URL:-https://github.com}"
 github_api="${GITHUB_API_URL:-https://api.github.com}"
 artifact_dir="${SQUIRE_ARTIFACT_DIR:-${SQUIRE_KERNEL_ARTIFACT_DIR:-}}"
+codex_artifact_dir="${SQUIRE_CODEX_ARTIFACT_DIR:-}"
 
 fail() {
   echo "squire install: $*" >&2
@@ -192,12 +195,8 @@ print_macos_shell_note() {
 }
 
 print_codex_note() {
-  if have codex; then
-    echo "squire install: Codex detected at $(command -v codex)"
-  else
-    echo "squire install: Codex was not found on PATH"
-    echo "squire install: install/authenticate Codex normally, then run squire-codex"
-  fi
+  echo "squire install: installed the Squire Codex driver as squire-codex"
+  echo "squire install: authenticate and configure Codex normally; squire-codex uses the same Codex home"
 }
 
 fetch_stdout() {
@@ -239,25 +238,28 @@ detect_arch() {
   esac
 }
 
-latest_version() {
-  fetch_stdout "$github_api/repos/$repo/releases?per_page=1" |
+latest_version_for() {
+  release_repo="$1"
+  fetch_stdout "$github_api/repos/$release_repo/releases?per_page=1" |
     sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
     head -n 1
 }
 
 verify_checksum() {
-  work_dir="$1"
-  asset="$2"
-  sums="$work_dir/SHA256SUMS"
-  one="$work_dir/SHA256SUMS.one"
+  checksum_work_dir="$1"
+  checksum_asset="$2"
+  checksum_sums_name="${3:-SHA256SUMS}"
+  checksum_sums="$checksum_work_dir/$checksum_sums_name"
+  checksum_one="$checksum_work_dir/$checksum_sums_name.one"
+  checksum_one_base="$checksum_sums_name.one"
 
-  grep " $asset\$" "$sums" > "$one" || fail "SHA256SUMS does not contain $asset"
+  grep " $checksum_asset\$" "$checksum_sums" > "$checksum_one" || fail "SHA256SUMS does not contain $checksum_asset"
   (
-    cd "$work_dir"
+    cd "$checksum_work_dir"
     if have sha256sum; then
-      sha256sum -c SHA256SUMS.one >/dev/null
+      sha256sum -c "$checksum_one_base" >/dev/null
     elif have shasum; then
-      shasum -a 256 -c SHA256SUMS.one >/dev/null
+      shasum -a 256 -c "$checksum_one_base" >/dev/null
     else
       fail "sha256sum or shasum is required to verify downloads"
     fi
@@ -272,13 +274,17 @@ os="$(detect_os)"
 arch="$(detect_arch)"
 
 if [ -z "$version" ]; then
-  version="$(latest_version)"
+  version="$(latest_version_for "$repo")"
 fi
 if [ -z "$version" ]; then
   fail "could not resolve latest release; set SQUIRE_VERSION"
 fi
+if [ -z "$codex_version" ]; then
+  codex_version="$version"
+fi
 
 asset="squire_${version}_${os}_${arch}.tar.gz"
+codex_asset="squire-codex_${codex_version}_${os}_${arch}.tar.gz"
 tmp="${TMPDIR:-/tmp}/squire-install.$$"
 mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
@@ -292,15 +298,27 @@ else
   fetch_file "$base/SHA256SUMS" "$tmp/SHA256SUMS"
 fi
 
+if [ -n "$codex_artifact_dir" ]; then
+  cp "$codex_artifact_dir/$codex_asset" "$tmp/$codex_asset"
+  cp "$codex_artifact_dir/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
+else
+  codex_base="$github_base/$codex_repo/releases/download/$codex_version"
+  fetch_file "$codex_base/$codex_asset" "$tmp/$codex_asset"
+  fetch_file "$codex_base/SHA256SUMS" "$tmp/SQUIRE_CODEX_SHA256SUMS"
+fi
+
 verify_checksum "$tmp" "$asset"
+verify_checksum "$tmp" "$codex_asset" SQUIRE_CODEX_SHA256SUMS
 
 tar -xzf "$tmp/$asset" -C "$tmp"
+tar -xzf "$tmp/$codex_asset" -C "$tmp"
 stage="$tmp/squire_${version}_${os}_${arch}"
+codex_stage="$tmp/squire-codex_${codex_version}_${os}_${arch}"
 binary="$stage/squire"
-codex_binary="$stage/squire-codex"
+codex_binary="$codex_stage/squire-codex"
 if [ "$os" = "windows" ]; then
   binary="$stage/squire.exe"
-  codex_binary="$stage/squire-codex.exe"
+  codex_binary="$codex_stage/squire-codex.exe"
 fi
 if [ ! -f "$binary" ]; then
   fail "archive did not contain squire binary"

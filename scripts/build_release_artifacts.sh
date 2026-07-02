@@ -51,10 +51,8 @@ while [ "$#" -gt 0 ]; do
   stage="$out_dir/$name"
   mkdir -p "$stage"
   binary="squire"
-  codex_binary="squire-codex"
   if [ "$goos" = "windows" ]; then
     binary="squire.exe"
-    codex_binary="squire-codex.exe"
   fi
 
   echo "building $name"
@@ -64,12 +62,6 @@ while [ "$#" -gt 0 ]; do
     -ldflags "$ldflags" \
     -o "$stage/$binary" \
     ./cmd/squire
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
-    -trimpath \
-    -buildvcs=false \
-    -ldflags "$ldflags" \
-    -o "$stage/$codex_binary" \
-    ./cmd/squire-codex
 
   cp README.md RELEASE_CHECKLIST.md SQUIRE_CONTRACT.md "$stage/"
   mkdir -p "$stage/shims"
