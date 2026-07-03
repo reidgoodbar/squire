@@ -453,7 +453,7 @@ func (k *Kernel) readHotSnapshotResponse(path string, inv CommandInvocation) (ho
 		k.hotSnapshotData = data
 		k.hotSnapshotCleanup = cleanup
 	}
-	resp, err := decodeHotSnapshotResponseNoCopy(k.hotSnapshotData, commandKey, epochHash)
+	resp, err := decodeHotSnapshotResponse(k.hotSnapshotData, commandKey, epochHash)
 	if err == nil {
 		return resp, true
 	}
