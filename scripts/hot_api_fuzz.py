@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -408,8 +409,20 @@ class HotAPI:
 
 
 def native_reference(cwd: Path, argv: tuple[str, ...], env: dict[str, str]) -> dict[str, Any]:
+    if len(argv) == 3 and argv[0] == "command" and argv[1] == "-v":
+        return native_reference(cwd, ("sh", "-c", "command -v " + shlex.quote(argv[2])), env)
     start = time.perf_counter_ns()
-    proc = run(list(argv), cwd, env=env, check=False, timeout=20)
+    try:
+        proc = run(list(argv), cwd, env=env, check=False, timeout=20)
+    except FileNotFoundError:
+        elapsed_us = (time.perf_counter_ns() - start) / 1000
+        return {
+            "stdout": b"",
+            "stderr": f"{argv[0]}: not found\n".encode(),
+            "exit_code": 127,
+            "elapsed_us": elapsed_us,
+            "missing_executable": True,
+        }
     elapsed_us = (time.perf_counter_ns() - start) / 1000
     return {
         "stdout": proc.stdout,
