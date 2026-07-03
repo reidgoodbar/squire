@@ -163,23 +163,57 @@ fn hot_library_candidates() -> Vec<PathBuf> {
     for key in ["SQUIRE_CODEX_HOT_LIB", "SQUIRE_HOT_LIB"] {
         if let Ok(path) = std::env::var(key) {
             if !path.is_empty() {
-                out.push(PathBuf::from(path));
+                push_candidate(&mut out, PathBuf::from(path));
             }
         }
     }
     if let Ok(squire) = std::env::var("SQUIRE_CODEX_SQUIRE") {
-        let lib_name = if cfg!(target_os = "macos") {
-            "libsquire_hot.dylib"
-        } else {
-            "libsquire_hot.so"
-        };
         let path = PathBuf::from(squire);
         if let Some(parent) = path.parent() {
-            out.push(parent.join(lib_name));
-            out.push(parent.join("lib").join(lib_name));
+            push_candidate(&mut out, parent.join(hot_library_name()));
+            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            push_candidate(&mut out, parent.join(hot_library_name()));
+            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
+        }
+    }
+    if let Some(squire) = find_on_path(if cfg!(target_os = "windows") {
+        "squire.exe"
+    } else {
+        "squire"
+    }) {
+        if let Some(parent) = squire.parent() {
+            push_candidate(&mut out, parent.join(hot_library_name()));
+            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
         }
     }
     out
+}
+
+fn hot_library_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libsquire_hot.dylib"
+    } else if cfg!(target_os = "windows") {
+        "squire_hot.dll"
+    } else {
+        "libsquire_hot.so"
+    }
+}
+
+fn push_candidate(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !out.contains(&path) {
+        out.push(path);
+    }
+}
+
+fn find_on_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 unsafe fn load_hot_library_at(path: &PathBuf) -> Option<SquireHotLibrary> {
@@ -215,9 +249,11 @@ unsafe fn load_hot_library_at(path: &PathBuf) -> Option<SquireHotLibrary> {
 }
 
 fn bridge_enabled() -> bool {
-    matches!(
-        std::env::var("SQUIRE_CODEX_BRIDGE").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
+    !matches!(
+        std::env::var("SQUIRE_CODEX_BRIDGE")
+            .ok()
+            .map(|value| value.to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off")
     )
 }
 
