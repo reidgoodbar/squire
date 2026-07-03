@@ -537,8 +537,10 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
 
     Codex user-shell commands arrive at the hot API as `sh -c <command>` with a
     per-command environment map. That env can contain benign locale/pager keys
-    that are absent from the squire-codex process environment. Git metadata
-    replays must not be rejected for those non-output-affecting differences.
+    that are absent from the squire-codex process environment. Git metadata and
+    proof-backed composed-shell replays must not be rejected for those
+    non-output-affecting differences, while env-inspection commands must still
+    miss.
     """
     keys = ("LC_ALL", "LC_CTYPE", "GIT_PAGER")
     saved = {key: os.environ.get(key) for key in keys}
@@ -557,16 +559,47 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
         result = run_case(api, repo, case, command_env)
         hot = result["hot"]
         native = result["native"]
+        composed_case = Case(
+            "codex_user_shell_composed_env_gap",
+            "codex_user_shell",
+            ("sh", "-c", "git ls-files | grep -F src"),
+        )
+        composed_result = run_case(api, repo, composed_case, command_env)
+        composed_hot = composed_result["hot"]
+        composed_native = composed_result["native"]
+        env_probe = api.try_replay(repo, ("sh", "-c", "printenv LC_ALL"), command_env)
+        safe = (
+            bool(hot["hit"])
+            and result["mismatch"] is None
+            and bool(composed_hot["hit"])
+            and composed_result["mismatch"] is None
+            and not bool(env_probe["hit"])
+        )
         return {
             "name": case.name,
             "argv": list(case.argv),
             "hit": bool(hot["hit"]),
             "mismatch": result["mismatch"],
-            "safe": bool(hot["hit"]) and result["mismatch"] is None,
+            "safe": safe,
             "hot_us": round(hot["elapsed_us"], 3),
             "native_us": round(native["elapsed_us"], 3) if native is not None else None,
             "hot_exit": hot.get("exit_code"),
             "native_exit": native.get("exit_code") if native is not None else None,
+            "composed": {
+                "name": composed_case.name,
+                "argv": list(composed_case.argv),
+                "hit": bool(composed_hot["hit"]),
+                "mismatch": composed_result["mismatch"],
+                "hot_us": round(composed_hot["elapsed_us"], 3),
+                "native_us": round(composed_native["elapsed_us"], 3)
+                if composed_native is not None
+                else None,
+                "hot_exit": composed_hot.get("exit_code"),
+                "native_exit": composed_native.get("exit_code")
+                if composed_native is not None
+                else None,
+            },
+            "env_probe_missed": not bool(env_probe["hit"]),
         }
     finally:
         for key, value in saved.items():

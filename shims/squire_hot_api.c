@@ -155,6 +155,44 @@ static int squire_hot_git_metadata_env_key(const char *entry, size_t key_len) {
 	       squire_hot_key_eq(entry, key_len, "GIT_ALTERNATE_OBJECT_DIRECTORIES");
 }
 
+static int squire_hot_shell_script_env_key(const char *entry, size_t key_len) {
+	if (squire_hot_key_eq(entry, key_len, "GIT_PAGER") ||
+	    squire_hot_key_eq(entry, key_len, "GH_PAGER")) {
+		return 0;
+	}
+	return squire_hot_key_eq(entry, key_len, "PATH") ||
+	       squire_hot_key_eq(entry, key_len, "HOME") ||
+	       squire_hot_key_eq(entry, key_len, "XDG_CONFIG_HOME") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_KERNEL_STORE_ROOT") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_STORE_ROOT") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_SHIM_REAL_PATH") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_REAL_GIT") ||
+	       (key_len >= 4 && strncmp(entry, "GIT_", 4) == 0);
+}
+
+static int squire_hot_shell_script_requires_full_env(const char *script) {
+	helper_plan plan;
+	if (script == NULL || !helper_parse_shell_plan(script, &plan)) {
+		return 1;
+	}
+	for (int i = 0; i < plan.count; i++) {
+		helper_node *node = &plan.nodes[i];
+		if (node->kind != HELPER_NODE_EXEC || node->argc <= 0) {
+			continue;
+		}
+		const char *tool = base_name(node->argv[0]);
+		if (tool == NULL) {
+			return 1;
+		}
+		if (strcmp(tool, "printenv") == 0 ||
+		    strcmp(tool, "ls") == 0 ||
+		    strcmp(tool, "file") == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static const char *squire_hot_env_value(int envc, const char *const *env, const char *key) {
 	if (envc <= 0 || env == NULL || key == NULL) {
 		return NULL;
@@ -248,6 +286,13 @@ static int squire_hot_git_metadata_env_compatible(int envc, const char *const *e
 	return squire_hot_env_compatible_for(envc, env, squire_hot_git_metadata_env_key);
 }
 
+static int squire_hot_shell_script_env_compatible(const char *script, int envc, const char *const *env) {
+	if (squire_hot_shell_script_requires_full_env(script)) {
+		return squire_hot_env_compatible(envc, env);
+	}
+	return squire_hot_env_compatible_for(envc, env, squire_hot_shell_script_env_key);
+}
+
 static int squire_hot_shell_script_index(int argc, const char *const *argv) {
 	if (argc < 3 || argv == NULL || argv[0] == NULL) {
 		return -1;
@@ -312,6 +357,11 @@ int squire_hot_try_replay_command(const char *cwd, int argc, const char *const *
 	if (git_metadata) {
 		if (!squire_hot_git_metadata_env_compatible(envc, env)) {
 			squire_hot_trace("miss git-metadata-env-incompatible");
+			return 0;
+		}
+	} else if (script_idx >= 0 && script_idx < argc && argv[script_idx] != NULL) {
+		if (!squire_hot_shell_script_env_compatible(argv[script_idx], envc, env)) {
+			squire_hot_trace("miss shell-script-env-incompatible");
 			return 0;
 		}
 	} else if (!squire_hot_env_compatible(envc, env)) {
