@@ -19,6 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 PRELOAD_SOURCE = ROOT / "shims" / "squire_preload.c"
 HELPER_SOURCE = ROOT / "shims" / "squire_preload_helper.c"
 
+
+def default_tmp_dir() -> str:
+    if os.uname().sysname == "Darwin" and Path("/private/tmp").is_dir():
+        return "/private/tmp"
+    return tempfile.gettempdir()
+
+
 DRIVER_SOURCE = r"""
 #include <errno.h>
 #include <spawn.h>
@@ -209,7 +216,7 @@ def compile_driver(source: Path, out: Path) -> None:
 
 
 def make_repo() -> Path:
-    repo = Path(tempfile.mkdtemp(prefix="squire-preload-ops.", dir=os.environ.get("TMPDIR") or "/private/tmp"))
+    repo = Path(tempfile.mkdtemp(prefix="squire-preload-ops.", dir=os.environ.get("TMPDIR") or default_tmp_dir()))
     run(["git", "init", "-b", "main"], repo)
     run(["git", "config", "user.email", "bench@example.com"], repo)
     run(["git", "config", "user.name", "Bench"], repo)
@@ -319,7 +326,7 @@ def main() -> int:
 
     squire = Path(args.squire_bin).resolve()
     repo = make_repo()
-    work = Path(tempfile.mkdtemp(prefix="squire-preload-ops-build.", dir=os.environ.get("TMPDIR") or "/private/tmp"))
+    work = Path(tempfile.mkdtemp(prefix="squire-preload-ops-build.", dir=os.environ.get("TMPDIR") or default_tmp_dir()))
     preload = work / ("squire-preload.dylib" if os.uname().sysname == "Darwin" else "squire-preload.so")
     helper = work / "squire-preload-helper"
     driver = work / "ops-driver"

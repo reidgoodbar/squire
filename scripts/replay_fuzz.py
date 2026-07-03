@@ -31,6 +31,12 @@ PRELOAD_SOURCE = ROOT / "shims" / "squire_preload.c"
 HELPER_SOURCE = ROOT / "shims" / "squire_preload_helper.c"
 
 
+def default_tmp_dir() -> str:
+    if os.uname().sysname == "Darwin" and Path("/private/tmp").is_dir():
+        return "/private/tmp"
+    return tempfile.gettempdir()
+
+
 DRIVER_PREAMBLE = r"""#!/usr/bin/env zsh
 set +e
 zmodload zsh/datetime 2>/dev/null || true
@@ -144,7 +150,7 @@ def select_shell() -> Path:
 
 
 def make_repo(rng: random.Random) -> Path:
-    base = os.environ.get("TMPDIR") or "/private/tmp"
+    base = os.environ.get("TMPDIR") or default_tmp_dir()
     repo = Path(tempfile.mkdtemp(prefix="squire-replay-fuzz.", dir=base))
     for rel in ("src", "lib", "docs", "tests", "nested/deep"):
         (repo / rel).mkdir(parents=True, exist_ok=True)
@@ -482,7 +488,7 @@ def main() -> int:
     rng = random.Random(args.seed)
     squire = resolve_squire(args.squire_bin)
     repo = make_repo(rng)
-    work = Path(tempfile.mkdtemp(prefix="squire-replay-fuzz-work.", dir=os.environ.get("TMPDIR") or "/private/tmp"))
+    work = Path(tempfile.mkdtemp(prefix="squire-replay-fuzz-work.", dir=os.environ.get("TMPDIR") or default_tmp_dir()))
     store_root = work / "store"
     preload = work / ("squire-preload.dylib" if os.uname().sysname == "Darwin" else "squire-preload.so")
     helper = work / "squire-preload-helper"

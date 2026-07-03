@@ -30,6 +30,12 @@ ROOT = Path(__file__).resolve().parents[1]
 HOT_API_SOURCE = ROOT / "shims" / "squire_hot_api.c"
 
 
+def default_tmp_dir() -> str:
+    if os.uname().sysname == "Darwin" and Path("/private/tmp").is_dir():
+        return "/private/tmp"
+    return tempfile.gettempdir()
+
+
 @dataclass(frozen=True)
 class Case:
     name: str
@@ -112,12 +118,14 @@ def compile_hot_api(out: Path) -> None:
             "-ldl",
             "-lcrypto",
         ]
-    run(argv, ROOT, timeout=60)
+    compile_env = os.environ.copy()
+    compile_env["TMPDIR"] = str(out.parent)
+    run(argv, ROOT, env=compile_env, timeout=60)
 
 
 def make_repo(seed: int) -> Path:
     rng = random.Random(seed)
-    base = os.environ.get("TMPDIR") or "/private/tmp"
+    base = os.environ.get("TMPDIR") or default_tmp_dir()
     repo = Path(tempfile.mkdtemp(prefix="squire-hot-api-fuzz.", dir=base))
     for rel in ("src", "src/nested", "lib", "docs", "tests", "logs"):
         (repo / rel).mkdir(parents=True, exist_ok=True)
@@ -678,9 +686,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.cases < 1:
         raise ValueError("--cases must be positive")
+    os.environ.setdefault("TMPDIR", default_tmp_dir())
 
     squire = resolve_squire(args.squire_bin)
-    work = Path(tempfile.mkdtemp(prefix="squire-hot-api-fuzz-work.", dir=os.environ.get("TMPDIR") or "/private/tmp"))
+    work = Path(tempfile.mkdtemp(prefix="squire-hot-api-fuzz-work.", dir=os.environ.get("TMPDIR") or default_tmp_dir()))
     lib = work / ("libsquire_hot.dylib" if os.uname().sysname == "Darwin" else "libsquire_hot.so")
     compile_hot_api(lib)
     repo = make_repo(args.seed)
