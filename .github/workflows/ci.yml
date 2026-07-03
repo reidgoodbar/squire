@@ -45,6 +45,9 @@ jobs:
           go build -o .tmp/squire ./cmd/squire
           scripts/release_smoke.sh .tmp/squire
 
+      - name: Hot API squire-codex regression
+        run: python3 scripts/hot_api_fuzz.py .tmp/squire --cases 75 --seed 20260703
+
       - name: Adapter path benchmark
         run: scripts/adapter_path_bench.py .tmp/squire
 

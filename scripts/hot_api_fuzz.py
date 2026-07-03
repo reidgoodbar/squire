@@ -532,6 +532,50 @@ def run_invalidation_probes(api: HotAPI, squire: Path, repo: Path, env: dict[str
     return probes
 
 
+def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Cover the real squire-codex typed-command path shape.
+
+    Codex user-shell commands arrive at the hot API as `sh -c <command>` with a
+    per-command environment map. That env can contain benign locale/pager keys
+    that are absent from the squire-codex process environment. Git metadata
+    replays must not be rejected for those non-output-affecting differences.
+    """
+    keys = ("LC_ALL", "LC_CTYPE", "GIT_PAGER")
+    saved = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        command_env = dict(env)
+        command_env["LC_ALL"] = "C"
+        command_env["LC_CTYPE"] = "C"
+        command_env["GIT_PAGER"] = "cat"
+        case = Case(
+            "codex_user_shell_git_metadata_env_gap",
+            "codex_user_shell",
+            ("sh", "-c", "git rev-parse HEAD"),
+        )
+        result = run_case(api, repo, case, command_env)
+        hot = result["hot"]
+        native = result["native"]
+        return {
+            "name": case.name,
+            "argv": list(case.argv),
+            "hit": bool(hot["hit"]),
+            "mismatch": result["mismatch"],
+            "safe": bool(hot["hit"]) and result["mismatch"] is None,
+            "hot_us": round(hot["elapsed_us"], 3),
+            "native_us": round(native["elapsed_us"], 3) if native is not None else None,
+            "hot_exit": hot.get("exit_code"),
+            "native_exit": native.get("exit_code") if native is not None else None,
+        }
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Squire Hot API Fuzz Report",
@@ -546,6 +590,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- compared native commands: `{report['native_compared']}`",
         f"- estimated native avoided on hits: `{report['estimated_native_avoided_ms']}` ms",
         f"- measured hot wall on hits: `{report['measured_hot_hit_wall_ms']}` ms",
+        f"- Codex user-shell regression safe: `{report['codex_user_shell_regression']['safe']}`",
         f"- invalidation probes safe: `{report['invalidation_safe']}`",
         "",
         "## Latency",
@@ -567,6 +612,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"| {bucket} | {data['cases']} | {data['hits']} | {data['misses']} | {data['mismatches']} | {data['must_miss_hits']} | {data['hot_us'].get('p95', 0)} | {data['native_us'].get('p95', 0)} |"
         )
+    lines.extend(["", "## Codex User-Shell Regression", ""])
+    lines.append("```json")
+    lines.append(json.dumps(report["codex_user_shell_regression"], indent=2))
+    lines.append("```")
     lines.extend(["", "## Invalidation Probes", "", "| probe | safe | before hit | after hit | rewarm hit | rewarm exact |", "| --- | --- | --- | --- | --- | --- |"])
     for probe in report["invalidation_probes"]:
         lines.append(
@@ -611,6 +660,7 @@ def main() -> int:
     run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
 
     api = HotAPI(lib)
+    codex_user_shell_regression = run_codex_user_shell_regression(api, repo, env)
     cases = generate_cases(args.seed, args.cases)
     summary: dict[str, Any] = {"by_bucket": {}}
     mismatch_examples: list[dict[str, Any]] = []
@@ -688,7 +738,7 @@ def main() -> int:
         by_bucket[bucket]["native_us"] = stats(data["native_us"])
         by_bucket[bucket]["hot_us"] = stats(data["hot_us"])
 
-    status = "pass" if mismatches == 0 and invalidation_safe else "fail"
+    status = "pass" if mismatches == 0 and invalidation_safe and codex_user_shell_regression["safe"] else "fail"
     report = {
         "status": status,
         "seed": args.seed,
@@ -712,6 +762,7 @@ def main() -> int:
         "by_bucket": by_bucket,
         "invalidation_safe": invalidation_safe,
         "invalidation_probes": invalidation_probes,
+        "codex_user_shell_regression": codex_user_shell_regression,
         "hit_examples": hit_examples,
         "miss_examples": miss_examples,
         "mismatch_examples": mismatch_examples,

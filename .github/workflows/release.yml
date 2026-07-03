@@ -79,6 +79,14 @@ jobs:
       - name: Release smoke
         run: scripts/release_smoke.sh .tmp/squire
 
+      - name: Hot API squire-codex fuzz
+        run: |
+          python3 scripts/hot_api_fuzz.py .tmp/squire \
+            --cases 500 \
+            --seed 20260703 \
+            --json-out artifacts/hot-api-fuzz.json \
+            --md-out artifacts/hot-api-fuzz.md
+
       - name: Adapter path benchmark
         run: scripts/adapter_path_bench.py .tmp/squire --json | tee artifacts/adapter-path-bench.json
 

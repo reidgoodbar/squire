@@ -53,6 +53,15 @@ pub(crate) async fn try_replay_bytes(
     })
 }
 
+pub(crate) async fn try_replay_shell_command(
+    command: &str,
+    cwd: &AbsolutePathBuf,
+    env: &HashMap<String, String>,
+) -> Option<SquireReplayOutput> {
+    let argv = ["sh".to_string(), "-c".to_string(), command.to_string()];
+    try_replay_bytes(&argv, cwd, env).await
+}
+
 fn retain_output(bytes: Vec<u8>, max_bytes: Option<usize>) -> StreamOutput<Vec<u8>> {
     let text = match max_bytes {
         Some(max_bytes) if bytes.len() > max_bytes => bytes[..max_bytes].to_vec(),

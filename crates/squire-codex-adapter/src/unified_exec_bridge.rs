@@ -59,7 +59,8 @@ pub(super) async fn try_exec_command(
 
     let start = Instant::now();
     let Some(replay) =
-        exec_squire_bridge::try_replay_bytes(&request.command, &native_cwd, &env).await
+        exec_squire_bridge::try_replay_shell_command(&request.hook_command, &native_cwd, &env)
+            .await
     else {
         return Ok(None);
     };

@@ -44,6 +44,14 @@ jobs:
       - name: Build nightly smoke binary
         run: go build -o .tmp/squire ./cmd/squire
 
+      - name: Hot API squire-codex fuzz
+        run: |
+          python3 scripts/hot_api_fuzz.py .tmp/squire \
+            --cases 500 \
+            --seed 20260703 \
+            --json-out artifacts/hot-api-fuzz.json \
+            --md-out artifacts/hot-api-fuzz.md
+
       - name: Edge stress
         run: scripts/edge_stress.py .tmp/squire | tee artifacts/edge-stress.txt
 

@@ -43,6 +43,7 @@ go run ./cmd/squire boost bench repo-metadata
 go run ./cmd/squire boost bench deep-local
 go run ./cmd/squire vm status --short
 scripts/release_smoke.sh ./squire
+python3 scripts/hot_api_fuzz.py ./squire --cases 500
 scripts/adapter_path_bench.py ./squire
 scripts/edge_stress.py ./squire --scenario echo --normal-ux --strict-performance
 scripts/multi_agent_bench.py ./squire --agents 1,2 --rounds 3
@@ -112,6 +113,7 @@ The release workflow must pass before artifacts are published. It runs:
 - `squire boost bench repo-metadata`
 - `squire boost bench deep-local`
 - `scripts/release_smoke.sh`
+- `python3 scripts/hot_api_fuzz.py ./squire --cases 500`
 - `scripts/adapter_path_bench.py`
 - `scripts/session_preload_bench.py ./squire --rounds 5 --commands 100`
 - `scripts/edge_stress.py --scenario echo --normal-ux --strict-performance`
@@ -250,6 +252,22 @@ workload. Run both direct `git` spawn and shell-launched
 `sh -c "git rev-parse HEAD"` because Codex frequently emits the shell-shaped
 path. The default measurement is production fallback mode. Use
 `--require-hit-measurement` only when debugging hard-hit replay misses.
+
+Run the Squire-owned hot API fuzz before release candidates that touch
+`squire-codex`, `crates/squire-codex-*`, `shims/squire_hot_api.c`, or replay
+environment compatibility:
+
+```sh
+go build -o /tmp/squire-release-check ./cmd/squire
+python3 scripts/hot_api_fuzz.py /tmp/squire-release-check --cases 500
+```
+
+This must pass the deterministic `codex_user_shell_git_metadata_env_gap`
+regression. That case mirrors the real Codex TUI typed-command path:
+`sh -c "git rev-parse HEAD"` with a Codex-built per-command environment where
+benign locale/pager keys can differ from the `squire-codex` process
+environment. It must hit the hot C API, byte-match native Git output, and keep
+`diagnostic_mismatches` at zero.
 
 Compile the optional preload transport before release candidates that touch
 `shims/` or session transport code:

@@ -4,10 +4,13 @@
 
 #include "squire_hot_api.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "squire_preload_helper.c"
+
+extern char **environ;
 
 typedef enum {
 	SQUIRE_HOT_HANDLE_EXACT = 1,
@@ -19,6 +22,22 @@ typedef struct {
 	prepared_exact_replay exact;
 	helper_result script;
 } squire_hot_handle;
+
+static void squire_hot_trace(const char *message) {
+	const char *enabled = getenv("SQUIRE_CODEX_BRIDGE_TRACE");
+	if (enabled != NULL && (strcmp(enabled, "1") == 0 || strcmp(enabled, "true") == 0 || strcmp(enabled, "yes") == 0)) {
+		fprintf(stderr, "squire hot api: %s\n", message);
+		const char *path = getenv("SQUIRE_CODEX_BRIDGE_TRACE_FILE");
+		if (path == NULL || path[0] == '\0') {
+			path = "/tmp/squire-codex-bridge-trace.log";
+		}
+		FILE *f = fopen(path, "a");
+		if (f != NULL) {
+			fprintf(f, "squire hot api: %s\n", message);
+			fclose(f);
+		}
+	}
+}
 
 static void squire_hot_fill_exact(squire_hot_result *out, squire_hot_handle *handle) {
 	out->handle = handle;
@@ -92,6 +111,11 @@ static int squire_hot_key_eq(const char *entry, size_t key_len, const char *key)
 	return strlen(key) == key_len && strncmp(entry, key, key_len) == 0;
 }
 
+static int squire_hot_key_has_prefix(const char *entry, size_t key_len, const char *prefix) {
+	size_t prefix_len = strlen(prefix);
+	return key_len >= prefix_len && strncmp(entry, prefix, prefix_len) == 0;
+}
+
 static int squire_hot_sensitive_env_key(const char *entry, size_t key_len) {
 	return squire_hot_key_eq(entry, key_len, "PATH") ||
 	       squire_hot_key_eq(entry, key_len, "HOME") ||
@@ -104,7 +128,73 @@ static int squire_hot_sensitive_env_key(const char *entry, size_t key_len) {
 	       (key_len >= 4 && strncmp(entry, "GIT_", 4) == 0);
 }
 
-static int squire_hot_env_compatible(int envc, const char *const *env) {
+static int squire_hot_git_metadata_env_key(const char *entry, size_t key_len) {
+	return squire_hot_key_eq(entry, key_len, "PATH") ||
+	       squire_hot_key_eq(entry, key_len, "HOME") ||
+	       squire_hot_key_eq(entry, key_len, "XDG_CONFIG_HOME") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_KERNEL_STORE_ROOT") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_STORE_ROOT") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_SHIM_REAL_PATH") ||
+	       squire_hot_key_eq(entry, key_len, "SQUIRE_REAL_GIT") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_DIR") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_WORK_TREE") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_COMMON_DIR") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_NAMESPACE") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_INDEX_FILE") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG_GLOBAL") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG_SYSTEM") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG_NOSYSTEM") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG_COUNT") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CONFIG_PARAMETERS") ||
+	       squire_hot_key_has_prefix(entry, key_len, "GIT_CONFIG_KEY_") ||
+	       squire_hot_key_has_prefix(entry, key_len, "GIT_CONFIG_VALUE_") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_CEILING_DIRECTORIES") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_DISCOVERY_ACROSS_FILESYSTEM") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_OBJECT_DIRECTORY") ||
+	       squire_hot_key_eq(entry, key_len, "GIT_ALTERNATE_OBJECT_DIRECTORIES");
+}
+
+static const char *squire_hot_env_value(int envc, const char *const *env, const char *key) {
+	if (envc <= 0 || env == NULL || key == NULL) {
+		return NULL;
+	}
+	size_t key_len = strlen(key);
+	for (int i = 0; i < envc; i++) {
+		const char *entry = env[i];
+		if (entry != NULL && strncmp(entry, key, key_len) == 0 && entry[key_len] == '=') {
+			return entry + key_len + 1;
+		}
+	}
+	return NULL;
+}
+
+static int squire_hot_env_values_match(int envc, const char *const *env, const char *key) {
+	const char *actual = getenv(key);
+	const char *expected = squire_hot_env_value(envc, env, key);
+	if (actual == NULL || actual[0] == '\0') {
+		return expected == NULL || expected[0] == '\0';
+	}
+	return expected != NULL && strcmp(actual, expected) == 0;
+}
+
+static int squire_hot_env_key_compatible(int envc, const char *const *env, const char *key, int (*selected)(const char *, size_t)) {
+	size_t key_len = strlen(key);
+	if (!selected(key, key_len)) {
+		return 1;
+	}
+	if (squire_hot_env_values_match(envc, env, key)) {
+		return 1;
+	}
+	char msg[256];
+	const char *actual = getenv(key);
+	const char *expected = squire_hot_env_value(envc, env, key);
+	snprintf(msg, sizeof(msg), "env mismatch key=%s actual=%s expected=%s", key, actual == NULL ? "<unset>" : "<set>", expected == NULL ? "<unset>" : (expected[0] == '\0' ? "<empty>" : "<set>"));
+	squire_hot_trace(msg);
+	return 0;
+}
+
+static int squire_hot_env_compatible_for(int envc, const char *const *env, int (*selected)(const char *, size_t)) {
 	if (envc < 0 || (envc > 0 && env == NULL)) {
 		return 0;
 	}
@@ -118,7 +208,7 @@ static int squire_hot_env_compatible(int envc, const char *const *env) {
 			return 0;
 		}
 		size_t key_len = (size_t)(equals - entry);
-		if (!squire_hot_sensitive_env_key(entry, key_len)) {
+		if (!selected(entry, key_len)) {
 			continue;
 		}
 		char key[128];
@@ -127,13 +217,35 @@ static int squire_hot_env_compatible(int envc, const char *const *env) {
 		}
 		memcpy(key, entry, key_len);
 		key[key_len] = '\0';
-		const char *actual = getenv(key);
-		const char *expected = equals + 1;
-		if (actual == NULL || strcmp(actual, expected) != 0) {
+		if (!squire_hot_env_key_compatible(envc, env, key, selected)) {
 			return 0;
 		}
 	}
+	if (environ != NULL) {
+		for (size_t i = 0; environ[i] != NULL; i++) {
+			const char *entry = environ[i];
+			const char *equals = strchr(entry, '=');
+			size_t key_len = equals == NULL ? strlen(entry) : (size_t)(equals - entry);
+			if (key_len == 0 || key_len >= 128 || !selected(entry, key_len)) {
+				continue;
+			}
+			char key[128];
+			memcpy(key, entry, key_len);
+			key[key_len] = '\0';
+			if (!squire_hot_env_key_compatible(envc, env, key, selected)) {
+				return 0;
+			}
+		}
+	}
 	return 1;
+}
+
+static int squire_hot_env_compatible(int envc, const char *const *env) {
+	return squire_hot_env_compatible_for(envc, env, squire_hot_sensitive_env_key);
+}
+
+static int squire_hot_git_metadata_env_compatible(int envc, const char *const *env) {
+	return squire_hot_env_compatible_for(envc, env, squire_hot_git_metadata_env_key);
 }
 
 static int squire_hot_shell_script_index(int argc, const char *const *argv) {
@@ -155,18 +267,62 @@ static int squire_hot_shell_script_index(int argc, const char *const *argv) {
 	return -1;
 }
 
+static int squire_hot_is_git_metadata_argv(int argc, const char *const *argv) {
+	if (argv == NULL || argc < 3 || argv[0] == NULL || argv[1] == NULL || argv[2] == NULL) {
+		return 0;
+	}
+	if (strcmp(base_name(argv[0]), "git") != 0 || strcmp(argv[1], "rev-parse") != 0) {
+		return 0;
+	}
+	if (argc == 3) {
+		return strcmp(argv[2], "HEAD") == 0 ||
+		       strcmp(argv[2], "--git-dir") == 0 ||
+		       strcmp(argv[2], "--show-toplevel") == 0 ||
+		       strcmp(argv[2], "--is-inside-work-tree") == 0;
+	}
+	return argc == 4 && argv[3] != NULL &&
+	       strcmp(argv[2], "--abbrev-ref") == 0 &&
+	       strcmp(argv[3], "HEAD") == 0;
+}
+
+static int squire_hot_is_git_metadata_script(const char *script) {
+	helper_plan plan;
+	if (script == NULL || !helper_parse_shell_plan(script, &plan) || plan.root < 0 || plan.root >= plan.count) {
+		return 0;
+	}
+	helper_node *node = &plan.nodes[plan.root];
+	if (node->kind != HELPER_NODE_EXEC || node->argc <= 0) {
+		return 0;
+	}
+	const char *argv[HELPER_SHELL_MAX_ARGS];
+	for (int i = 0; i < node->argc; i++) {
+		argv[i] = node->argv[i];
+	}
+	return squire_hot_is_git_metadata_argv(node->argc, argv);
+}
+
 int squire_hot_try_replay_command(const char *cwd, int argc, const char *const *argv, int envc, const char *const *env, squire_hot_result *out) {
 	if (out == NULL || argc <= 0 || argv == NULL) {
 		return 0;
 	}
 	memset(out, 0, sizeof(*out));
-	if (!squire_hot_env_compatible(envc, env)) {
+	int script_idx = squire_hot_shell_script_index(argc, argv);
+	int git_metadata = squire_hot_is_git_metadata_argv(argc, argv) ||
+	                   (script_idx >= 0 && script_idx < argc && squire_hot_is_git_metadata_script(argv[script_idx]));
+	if (git_metadata) {
+		if (!squire_hot_git_metadata_env_compatible(envc, env)) {
+			squire_hot_trace("miss git-metadata-env-incompatible");
+			return 0;
+		}
+	} else if (!squire_hot_env_compatible(envc, env)) {
+		squire_hot_trace("miss env-incompatible");
 		return 0;
 	}
-	int script_idx = squire_hot_shell_script_index(argc, argv);
 	if (script_idx >= 0 && script_idx < argc && argv[script_idx] != NULL) {
+		squire_hot_trace("try shell script");
 		return squire_hot_try_replay_script(cwd, argv[script_idx], out);
 	}
+	squire_hot_trace("try argv");
 	return squire_hot_try_replay_argv(cwd, argc, argv, out);
 }
 

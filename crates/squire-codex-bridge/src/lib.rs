@@ -77,9 +77,19 @@ pub fn try_replay(
     env: &HashMap<String, String>,
 ) -> Option<ReplayOutput> {
     if !bridge_enabled() {
+        trace("disabled");
         return None;
     }
-    let library = HOT_LIBRARY.get_or_init(load_hot_library).as_ref()?;
+    trace(&format!(
+        "called cwd={} argc={} argv={}",
+        cwd.display(),
+        command.len(),
+        shell_join(command)
+    ));
+    let Some(library) = HOT_LIBRARY.get_or_init(load_hot_library).as_ref() else {
+        trace("hot library unavailable");
+        return None;
+    };
     let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok()?;
     let argv_cstrings = command
         .iter()
@@ -119,6 +129,10 @@ pub fn try_replay(
         )
     };
     if hit != 1 || result.handle.is_null() {
+        trace(&format!(
+            "miss code={hit} handle={}",
+            !result.handle.is_null()
+        ));
         return None;
     }
     let stdout = ffi_bytes(result.stdout_data, result.stdout_len)?;
@@ -133,6 +147,23 @@ pub fn try_replay(
         stderr,
         exit_code: result.exit_code,
     })
+}
+
+fn shell_join(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|arg| {
+            if arg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+            {
+                arg.clone()
+            } else {
+                format!("{arg:?}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn ffi_bytes(ptr: *const u8, len: u32) -> Option<Vec<u8>> {
@@ -263,5 +294,15 @@ fn trace(message: &str) {
         Some("1") | Some("true") | Some("yes")
     ) {
         eprintln!("squire-codex bridge: {message}");
+        let path = std::env::var("SQUIRE_CODEX_BRIDGE_TRACE_FILE")
+            .unwrap_or_else(|_| "/tmp/squire-codex-bridge-trace.log".to_string());
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "squire-codex bridge: {message}");
+        }
     }
 }
