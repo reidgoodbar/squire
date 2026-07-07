@@ -117,6 +117,7 @@ typedef struct {
 static long long stat_mtime_nano(const struct stat *st);
 static int file_stat_signal(const struct stat *st, const char *mode, char *out, size_t cap);
 static int join_path(char *out, size_t cap, const char *left, const char *right);
+static int safe_relative_inspection_path_arg(const char *path);
 
 static const char *base_name(const char *path) {
 	const char *slash = strrchr(path, '/');
@@ -2167,6 +2168,12 @@ static void command_key(policy_invocation *inv, char out[HASH_HEX]) {
 }
 
 static int is_git_metadata(policy_invocation *inv) {
+	if (inv->argc == 3 &&
+	    strcmp(inv->argv[0], "git") == 0 &&
+	    strcmp(inv->argv[1], "branch") == 0 &&
+	    strcmp(inv->argv[2], "--show-current") == 0) {
+		return 1;
+	}
 	if (inv->argc == 3 && strcmp(inv->argv[0], "git") == 0 && strcmp(inv->argv[1], "rev-parse") == 0) {
 		return strcmp(inv->argv[2], "HEAD") == 0 ||
 		       strcmp(inv->argv[2], "--git-dir") == 0 ||
@@ -2202,6 +2209,12 @@ static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
 		snprintf(epoch, 256, "hot-branch:%s", h);
 		return 1;
 	}
+	if (inv->argc == 3 && strcmp(inv->argv[1], "branch") == 0 && strcmp(inv->argv[2], "--show-current") == 0) {
+		snprintf(buf, sizeof(buf), "%s|%s|%s", repo_root, branch, head);
+		sha256_hex_str(buf, h);
+		snprintf(epoch, 256, "hot-branch:%s", h);
+		return 1;
+	}
 	if (strcmp(inv->argv[2], "--git-dir") == 0) {
 		snprintf(buf, sizeof(buf), "%s|%s|%s", repo_root, git_rel, git_dir);
 		sha256_hex_str(buf, h);
@@ -2224,7 +2237,13 @@ static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
 }
 
 static int is_git_ls_files(policy_invocation *inv) {
-	return inv->argc == 2 && strcmp(inv->argv[0], "git") == 0 && strcmp(inv->argv[1], "ls-files") == 0;
+	if (inv->argc == 2 && strcmp(inv->argv[0], "git") == 0 && strcmp(inv->argv[1], "ls-files") == 0) {
+		return 1;
+	}
+	return inv->argc == 3 &&
+	       strcmp(inv->argv[0], "git") == 0 &&
+	       strcmp(inv->argv[1], "ls-files") == 0 &&
+	       safe_relative_inspection_path_arg(inv->argv[2]);
 }
 
 static int is_git_status(policy_invocation *inv) {

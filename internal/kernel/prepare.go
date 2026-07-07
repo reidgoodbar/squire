@@ -258,6 +258,7 @@ func enabledFastPathArgv() [][]string {
 		{"git", "rev-parse", "HEAD"},
 		{"git", "rev-parse", "--git-dir"},
 		{"git", "rev-parse", "--abbrev-ref", "HEAD"},
+		{"git", "branch", "--show-current"},
 		{"git", "rev-parse", "--show-toplevel"},
 		{"git", "rev-parse", "--is-inside-work-tree"},
 	}
@@ -443,6 +444,9 @@ func proofGatedPrewarmCandidates(ws WorldState) [][]string {
 		add([]string{"git", "diff"})
 		add([]string{"git", "diff", "--stat"})
 		add([]string{"rg", "--files"})
+		for _, rel := range replayableGitLsFilesPrewarmTargets(ws.RepoRoot, 64) {
+			add([]string{"git", "ls-files", rel})
+		}
 		add([]string{"ls"})
 		add([]string{"ls", "-p"})
 		add([]string{"ls", "-la"})
@@ -532,6 +536,38 @@ func replayableDirectoryPrewarmTargets(root string, limit int) []string {
 		}
 		rels = append(rels, entry.Name())
 	}
+	return rels
+}
+
+func replayableGitLsFilesPrewarmTargets(root string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	var rels []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || len(rels) >= limit {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if path == root {
+			return nil
+		}
+		if shouldSkipPrewarmDir(name) {
+			return filepath.SkipDir
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if safeRelativeInspectionPath(filepath.FromSlash(rel)) {
+			rels = append(rels, rel)
+		}
+		return nil
+	})
 	return rels
 }
 

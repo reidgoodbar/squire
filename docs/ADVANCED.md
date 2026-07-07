@@ -129,14 +129,16 @@ Enabled fast paths:
 - `git rev-parse --abbrev-ref HEAD`
 - `git rev-parse --show-toplevel`
 - `git rev-parse --is-inside-work-tree`
+- `git branch --show-current`
 
 Proof-gated replay candidates:
 
-- `git ls-files`
+- `git ls-files` and safe path-filtered `git ls-files <path>`
 - `git status --short`
 - `git status --porcelain`
 - supported `git diff` forms
 - bounded safe `cat`, `sed -n`, `head`, `tail`, `grep -F`, and single-file `rg -F` workspace reads/searches
+- composed read-only filters including `head`, `tail`, `grep -F`, `wc -l`, and no-arg `sort`
 - common tool version probes
 - simple external PATH `which` and `command -v`
 

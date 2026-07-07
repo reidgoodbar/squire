@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::os::raw::c_void;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 static HOT_LIBRARY: OnceLock<Option<SquireHotLibrary>> = OnceLock::new();
+static AUTO_WARMED_REPOS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 const RTLD_NOW: c_int = 2;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -90,6 +95,22 @@ pub fn try_replay(
         trace("hot library unavailable");
         return None;
     };
+    if let Some(output) = try_replay_with_library(library, command, cwd, env) {
+        return Some(output);
+    }
+    if auto_warm_once(cwd) {
+        trace("retry after auto warm");
+        return try_replay_with_library(library, command, cwd, env);
+    }
+    None
+}
+
+fn try_replay_with_library(
+    library: &SquireHotLibrary,
+    command: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+) -> Option<ReplayOutput> {
     let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok()?;
     let argv_cstrings = command
         .iter()
@@ -147,6 +168,116 @@ pub fn try_replay(
         stderr,
         exit_code: result.exit_code,
     })
+}
+
+fn auto_warm_once(cwd: &Path) -> bool {
+    if !auto_warm_enabled() {
+        return false;
+    }
+    let Some(git_dir) = discover_git_dir(cwd) else {
+        trace("auto warm skipped: no git dir");
+        return false;
+    };
+    let repo_key = git_dir.clone();
+    let warmed = AUTO_WARMED_REPOS.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let Ok(mut guard) = warmed.lock() else {
+            return false;
+        };
+        if !guard.insert(repo_key) {
+            trace("auto warm skipped: repo already attempted");
+            return false;
+        }
+    }
+    let Some(squire) = find_squire_binary() else {
+        trace("auto warm skipped: squire binary unavailable");
+        return false;
+    };
+    trace(&format!("auto warm start {}", cwd.display()));
+    let status = Command::new(squire)
+        .arg("kernel")
+        .arg("warm")
+        .arg("--short")
+        .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            trace("auto warm ok");
+            true
+        }
+        Ok(status) => {
+            trace(&format!("auto warm failed status={status}"));
+            false
+        }
+        Err(err) => {
+            trace(&format!("auto warm failed err={err}"));
+            false
+        }
+    }
+}
+
+fn auto_warm_enabled() -> bool {
+    !matches!(
+        std::env::var("SQUIRE_CODEX_AUTO_WARM")
+            .ok()
+            .map(|value| value.to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off")
+    )
+}
+
+fn find_squire_binary() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("SQUIRE_CODEX_SQUIRE") {
+        if !path.is_empty() {
+            let candidate = PathBuf::from(path);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    find_on_path(if cfg!(target_os = "windows") {
+        "squire.exe"
+    } else {
+        "squire"
+    })
+}
+
+fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let mut dir = std::fs::canonicalize(cwd)
+        .ok()
+        .or_else(|| Some(cwd.to_path_buf()))?;
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file() {
+            if let Some(path) = parse_gitdir_file(&dot_git, &dir) {
+                return Some(path);
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn parse_gitdir_file(path: &Path, worktree_dir: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let raw = content.strip_prefix("gitdir:")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = PathBuf::from(raw);
+    let path = if candidate.is_absolute() {
+        candidate
+    } else {
+        worktree_dir.join(candidate)
+    };
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
 fn shell_join(command: &[String]) -> String {

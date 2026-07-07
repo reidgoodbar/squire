@@ -420,7 +420,7 @@ func inputFingerprints(op Operation, ws WorldState) map[string]string {
 		switch normalizedFastPath(op.Argv) {
 		case "git rev-parse HEAD":
 			fp["head"] = hashString(ws.Head)
-		case "git rev-parse --abbrev-ref HEAD":
+		case "git rev-parse --abbrev-ref HEAD", "git branch --show-current":
 			fp["branch"] = hashString(ws.Branch)
 			fp["head"] = hashString(ws.Head)
 		case "git rev-parse --git-dir":
@@ -447,7 +447,7 @@ func invalidationEpoch(op Operation, ws WorldState) string {
 		switch normalizedFastPath(op.Argv) {
 		case "git rev-parse HEAD":
 			return "head:" + ws.HeadEpoch
-		case "git rev-parse --abbrev-ref HEAD":
+		case "git rev-parse --abbrev-ref HEAD", "git branch --show-current":
 			return "branch:" + hashString(ws.Branch) + ":head:" + ws.HeadEpoch
 		case "git rev-parse --git-dir":
 			return "gitdir:" + hashString(ws.RepoRoot+"|"+ws.GitDir+"|"+ws.GitDirAbs)

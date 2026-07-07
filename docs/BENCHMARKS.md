@@ -203,6 +203,38 @@ Results:
 | `rg -q -F two src/app.js` | `3.287ms` | `2.525ms` | `120us` | `150us` | `167us` |
 | `rg -F two src/app.js | head -n 1` | `8.364ms` | `2.691ms` | `154us` | `182us` | `210us` |
 
+## Hot API Fuzz Stress
+
+Run date: `2026-07-07`
+
+Workload:
+
+- `500` generated direct and composed commands;
+- included Git metadata, repo state, source reads, line windows, fixed search,
+  directory/env probes, version probes, safe native misses, and policy must-misses;
+- included `git branch --show-current`, path-filtered `git ls-files`,
+  `git ls-files <path> | wc -l`, and `git ls-files <path> | sort`;
+- compared replay output against native output for safe commands.
+
+Results:
+
+- status: `pass`;
+- hot hits: `390`;
+- safe misses: `110`;
+- mismatches: `0`;
+- must-miss hits: `0`;
+- invalidation probes: safe.
+
+| Bucket | Cases | Hits | Hot p50 | Hot p95 | Native p50 | Native p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Git metadata | `49` | `49` | `299us` | `392us` | `14.329ms` | `17.643ms` |
+| Repo state | `39` | `37` | `1.589ms` | `2.595ms` | `15.423ms` | `20.747ms` |
+| File read | `37` | `35` | `554us` | `829us` | `3.722ms` | `8.657ms` |
+| Line window | `51` | `46` | `361us` | `471us` | `3.160ms` | `3.764ms` |
+| Fixed search | `53` | `47` | `403us` | `495us` | `3.806ms` | `5.209ms` |
+| Composed pipe | `39` | `35` | `574us` | `893us` | `8.479ms` | `21.463ms` |
+| Composed sequence | `50` | `48` | `1.267ms` | `2.996ms` | `26.419ms` | `51.737ms` |
+
 The e2e columns include the helper/session envelope. The hot replay columns are
 the actual mmap proof-and-materialization events recorded by Squire.
 

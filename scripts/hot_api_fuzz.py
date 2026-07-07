@@ -223,6 +223,7 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                     ("git", "rev-parse", "HEAD"),
                     ("git", "rev-parse", "--git-dir"),
                     ("git", "rev-parse", "--abbrev-ref", "HEAD"),
+                    ("git", "branch", "--show-current"),
                     ("git", "rev-parse", "--show-toplevel"),
                     ("git", "rev-parse", "--is-inside-work-tree"),
                 ]
@@ -233,6 +234,8 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                     ("git", "status", "--short"),
                     ("git", "status", "--porcelain"),
                     ("git", "ls-files"),
+                    ("git", "ls-files", "src"),
+                    ("git", "ls-files", "lib"),
                     ("git", "diff"),
                     ("git", "diff", "--stat"),
                     ("git", "diff", "--", path),
@@ -303,6 +306,8 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                     "git rev-parse HEAD | cat",
                     f"git status --short | head -n {n}",
                     "git ls-files | grep -F src",
+                    "git ls-files src | wc -l",
+                    "git ls-files src | sort",
                     f"cat {p1} | grep -F {pattern} | head -n {n}",
                     f"sed -n {start},{end}p {p2} | tail -n {n}",
                     f"head -n {n} {p1} | tail -n {max(1, n // 2)}",
@@ -318,6 +323,7 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                     f"git rev-parse HEAD >/dev/null && git status --short >/dev/null && cat {p1} >/dev/null",
                     f"git ls-files >/dev/null; sed -n 1,4p {p1} >/dev/null; tail -n 2 {p1} >/dev/null",
                     f"(git ls-files | grep -F src >/dev/null) && (head -n 4 {p1} | tail -n 2 >/dev/null)",
+                    "git branch --show-current >/dev/null; git ls-files src | wc -l >/dev/null; git ls-files src | sort >/dev/null",
                 ]
             )
             argv = ("/bin/sh", "-c", script)

@@ -168,6 +168,9 @@ func Classify(argv []string) OperatorFamily {
 }
 
 func isGitMetadata(argv []string) bool {
+	if isGitBranchShowCurrent(argv) {
+		return true
+	}
 	if isGitAbbrevRefHead(argv) {
 		return true
 	}
@@ -183,6 +186,10 @@ func isGitMetadata(argv []string) bool {
 
 func isGitAbbrevRefHead(argv []string) bool {
 	return len(argv) == 4 && filepath.Base(argv[0]) == "git" && argv[1] == "rev-parse" && argv[2] == "--abbrev-ref" && argv[3] == "HEAD"
+}
+
+func isGitBranchShowCurrent(argv []string) bool {
+	return len(argv) == 3 && filepath.Base(argv[0]) == "git" && argv[1] == "branch" && argv[2] == "--show-current"
 }
 
 func IsFastPathAllowed(argv []string) bool {
@@ -225,7 +232,13 @@ func isGitRepoState(argv []string) bool {
 }
 
 func isGitLsFiles(argv []string) bool {
-	return len(argv) == 2 && filepath.Base(argv[0]) == "git" && argv[1] == "ls-files"
+	if len(argv) == 2 && filepath.Base(argv[0]) == "git" && argv[1] == "ls-files" {
+		return true
+	}
+	return len(argv) == 3 &&
+		filepath.Base(argv[0]) == "git" &&
+		argv[1] == "ls-files" &&
+		safeRelativeInspectionPath(filepath.Clean(argv[2]))
 }
 
 func isGitStatusState(argv []string) bool {
@@ -807,6 +820,9 @@ func isGitMutation(argv []string) bool {
 	}
 	switch argv[1] {
 	case "add", "am", "apply", "bisect", "branch", "checkout", "cherry-pick", "clean", "commit", "fetch", "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash", "submodule", "switch", "tag", "worktree":
+		if isGitBranchShowCurrent(argv) {
+			return false
+		}
 		return true
 	default:
 		return false

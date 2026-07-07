@@ -40,6 +40,8 @@ func TestReplayCandidates(t *testing.T) {
 		{"git status short", []string{"git", "status", "--short"}, true, false, true, FamilyRepoState},
 		{"git status porcelain", []string{"git", "status", "--porcelain"}, true, false, true, FamilyRepoState},
 		{"git ls-files", []string{"git", "ls-files"}, true, false, true, FamilyRepoState},
+		{"git ls-files path", []string{"git", "ls-files", "src/app"}, true, false, true, FamilyRepoState},
+		{"git ls-files hidden path", []string{"git", "ls-files", ".git"}, false, false, false, FamilyShellUnknown},
 		{"git diff", []string{"git", "diff"}, true, false, true, FamilyRepoState},
 		{"git diff stat", []string{"git", "diff", "--stat"}, true, false, true, FamilyRepoState},
 		{"git diff path", []string{"git", "diff", "--", "src/app.js"}, true, false, true, FamilyRepoState},
@@ -60,6 +62,7 @@ func TestReplayCandidates(t *testing.T) {
 		{"mutation", []string{"git", "commit", "-m", "x"}, false, false, false, FamilyEditOrMutation},
 		{"package install", []string{"npm", "install"}, false, false, false, FamilyPackageSetup},
 		{"git rev-parse HEAD", []string{"git", "rev-parse", "HEAD"}, false, true, true, FamilyLocalRepoMetadata},
+		{"git branch show current", []string{"git", "branch", "--show-current"}, false, true, true, FamilyLocalRepoMetadata},
 	}
 
 	for _, c := range cases {

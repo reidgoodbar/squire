@@ -3,7 +3,10 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -706,9 +709,52 @@ func evalComposedShellFilter(argv []string, input []byte) (shellEvalResult, bool
 			return shellEvalResult{exitCode: 1}, true
 		}
 		return shellEvalResult{stdout: stdout, exitCode: 0}, true
+	case "wc":
+		if len(argv) != 2 || argv[1] != "-l" {
+			return shellEvalResult{}, false
+		}
+		return shellEvalResult{stdout: []byte(formatComposedShellWCLineCount(bytes.Count(input, []byte{'\n'}))), exitCode: 0}, true
+	case "sort":
+		if len(argv) != 1 || bytes.IndexByte(input, 0) >= 0 {
+			return shellEvalResult{}, false
+		}
+		out, ok := sortComposedShellLines(input)
+		if !ok {
+			return shellEvalResult{}, false
+		}
+		return shellEvalResult{stdout: out, exitCode: 0}, true
 	default:
 		return shellEvalResult{}, false
 	}
+}
+
+func formatComposedShellWCLineCount(n int) string {
+	if runtime.GOOS == "darwin" {
+		return fmt.Sprintf("%8d\n", n)
+	}
+	return fmt.Sprintf("%d\n", n)
+}
+
+func sortComposedShellLines(input []byte) ([]byte, bool) {
+	if len(input) == 0 {
+		return nil, true
+	}
+	lines := bytes.Split(input, []byte{'\n'})
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		return bytes.Compare(lines[i], lines[j]) < 0
+	})
+	var out []byte
+	for _, line := range lines {
+		out = append(out, line...)
+		out = append(out, '\n')
+		if len(out) > maxFastPathOutputBytes {
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 func parseComposedShellFilterLineCount(argv []string) (int, bool) {

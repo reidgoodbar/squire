@@ -473,6 +473,64 @@ static int helper_append_decimal_int(byte_buf *out, int value) {
 	return bytes_append(out, (const unsigned char *)buf, (size_t)n);
 }
 
+static int helper_append_wc_line_count(byte_buf *out, const unsigned char *content, size_t len) {
+	size_t lines = 0;
+	for (size_t i = 0; i < len; i++) {
+		if (content[i] == '\n') {
+			lines++;
+		}
+	}
+	char buf[64];
+#if defined(__APPLE__)
+	int n = snprintf(buf, sizeof(buf), "%8zu\n", lines);
+#else
+	int n = snprintf(buf, sizeof(buf), "%zu\n", lines);
+#endif
+	if (n <= 0 || n >= (int)sizeof(buf)) {
+		return 0;
+	}
+	return bytes_append(out, (const unsigned char *)buf, (size_t)n);
+}
+
+static int helper_append_sorted_lines(byte_buf *out, const unsigned char *content, size_t len) {
+	if (len == 0) {
+		return 1;
+	}
+	for (size_t i = 0; i < len; i++) {
+		if (content[i] == '\0') {
+			return 0;
+		}
+	}
+	string_list lines = {0};
+	size_t offset = 0;
+	while (offset < len) {
+		size_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		if (!list_add_bytes(&lines, content + offset, line_end - offset)) {
+			list_free(&lines);
+			return 0;
+		}
+		offset = line_end < len && content[line_end] == '\n' ? line_end + 1 : line_end;
+	}
+	list_sort(&lines);
+	int ok = 1;
+	for (size_t i = 0; i < lines.len; i++) {
+		if (!bytes_append(out, lines.items[i].data, lines.items[i].len) ||
+		    !bytes_append_byte(out, '\n')) {
+			ok = 0;
+			break;
+		}
+		if (out->len > MAX_FAST_OUTPUT_BYTES) {
+			ok = 0;
+			break;
+		}
+	}
+	list_free(&lines);
+	return ok;
+}
+
 static int helper_append_fixed_rg(byte_buf *out, const unsigned char *content, uint32_t len, const char *pattern, int quiet, int line_number, int *matched) {
 	*matched = 0;
 	size_t pattern_len = strlen(pattern);
@@ -586,6 +644,14 @@ static int helper_eval_filter(helper_node *node, const byte_buf *input, helper_r
 		}
 		out->exit_code = matched ? 0 : 1;
 		return 1;
+	}
+	if (strcmp(name, "wc") == 0 && node->argc == 2 && strcmp(node->argv[1], "-l") == 0) {
+		out->exit_code = 0;
+		return helper_append_wc_line_count(&out->stdout_buf, input->data, input->len);
+	}
+	if (strcmp(name, "sort") == 0 && node->argc == 1) {
+		out->exit_code = 0;
+		return helper_append_sorted_lines(&out->stdout_buf, input->data, input->len);
 	}
 	return 0;
 }

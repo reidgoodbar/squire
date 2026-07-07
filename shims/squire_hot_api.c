@@ -316,6 +316,12 @@ static int squire_hot_is_git_metadata_argv(int argc, const char *const *argv) {
 	if (argv == NULL || argc < 3 || argv[0] == NULL || argv[1] == NULL || argv[2] == NULL) {
 		return 0;
 	}
+	if (argc == 3 &&
+	    strcmp(base_name(argv[0]), "git") == 0 &&
+	    strcmp(argv[1], "branch") == 0 &&
+	    strcmp(argv[2], "--show-current") == 0) {
+		return 1;
+	}
 	if (strcmp(base_name(argv[0]), "git") != 0 || strcmp(argv[1], "rev-parse") != 0) {
 		return 0;
 	}

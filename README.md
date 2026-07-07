@@ -88,8 +88,10 @@ selected read-only shell compositions.
 Examples:
 
 - `git rev-parse HEAD`
+- `git branch --show-current`
 - `git status --short`
 - `git ls-files`
+- `git ls-files src`
 - `git diff --stat`
 - `cat src/app.js`
 - `sed -n '1,80p' src/app.js`
@@ -98,6 +100,8 @@ Examples:
 - `grep -F token src/app.js`
 - `rg -F token src/app.js`
 - `git status --short | head -n 5`
+- `git ls-files src | wc -l`
+- `git ls-files src | sort`
 
 Unsupported forms run natively.
 

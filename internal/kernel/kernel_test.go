@@ -80,6 +80,66 @@ func TestBranchFastPathInvalidatesOnCheckout(t *testing.T) {
 	}
 }
 
+func TestBranchShowCurrentFastPathInvalidatesOnCheckout(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	k := New(DefaultStoreRoot(repo))
+
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"git", "branch", "--show-current"}
+	replay := k.Run(ctx, "test", repo, argv)
+	if replay.Mode != ModeReplay {
+		t.Fatalf("branch --show-current was not replayed: %s diagnostics=%v", replay.Mode, replay.Diagnostics)
+	}
+	assertSameResult(t, replay.Stdout, replay.Stderr, replay.ExitCode, runNative(ctx, repo, argv))
+
+	if res := runNative(ctx, repo, []string{"git", "checkout", "-b", "feature"}); res.ExitCode != 0 {
+		t.Fatalf("checkout failed: %s", res.Stderr)
+	}
+	after := k.Run(ctx, "test", repo, argv)
+	if after.Mode == ModeReplay {
+		t.Fatalf("branch --show-current replayed across checkout boundary")
+	}
+	if got := strings.TrimSpace(string(after.Stdout)); got != "feature" {
+		t.Fatalf("branch --show-current = %q, want feature", got)
+	}
+}
+
+func TestGitLsFilesPathReplayMatchesNative(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src", "flask"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		filepath.Join("src", "flask", "app.py"):      "class Flask:\n    pass\n",
+		filepath.Join("src", "flask", "__init__.py"): "from .app import Flask\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if res := runNative(ctx, repo, []string{"git", "add", name}); res.ExitCode != 0 {
+			t.Fatalf("git add failed: %s", res.Stderr)
+		}
+	}
+	if res := runNative(ctx, repo, []string{"git", "commit", "-m", "add flask tree"}); res.ExitCode != 0 {
+		t.Fatalf("git commit failed: %s", res.Stderr)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"git", "ls-files", "src/flask"}
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode != ModeReplay {
+		t.Fatalf("git ls-files path mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+}
+
 func TestGitDirFastPathSurvivesSourceEdit(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)

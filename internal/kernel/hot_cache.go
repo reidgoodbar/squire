@@ -338,7 +338,7 @@ func fastPathHotProof(cwd string, argv []string) (map[string]string, string, boo
 	case "git rev-parse HEAD":
 		fp["head"] = hashString(head)
 		epoch = "hot-head:" + hashString(repoRoot+"|"+head)
-	case "git rev-parse --abbrev-ref HEAD":
+	case "git rev-parse --abbrev-ref HEAD", "git branch --show-current":
 		fp["head"] = hashString(head)
 		fp["branch"] = hashString(branch)
 		epoch = "hot-branch:" + hashString(repoRoot+"|"+branch+"|"+head)
@@ -378,7 +378,7 @@ func fastPathHotProofFromWorld(ws WorldState, argv []string) (map[string]string,
 		}
 		fp["head"] = hashString(ws.Head)
 		epoch = "hot-head:" + hashString(ws.RepoRoot+"|"+ws.Head)
-	case "git rev-parse --abbrev-ref HEAD":
+	case "git rev-parse --abbrev-ref HEAD", "git branch --show-current":
 		if ws.Head == "" || ws.Branch == "" {
 			return nil, "", false
 		}
