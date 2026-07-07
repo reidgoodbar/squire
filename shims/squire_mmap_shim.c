@@ -3158,7 +3158,11 @@ static int parse_fixed_rg_args(policy_invocation *inv, const char **pattern, con
 }
 
 static int warm_file_replay_enabled(void) {
+#ifdef SQUIRE_MMAP_HOT_API
+	return !env_truthy("SQUIRE_HOT_DISABLE_WARM_FILE_REPLAY");
+#else
 	return env_truthy("SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY") || env_truthy("SQUIRE_SHIM_REQUIRE_HIT");
+#endif
 }
 
 static int is_warm_file_candidate(policy_invocation *inv) {

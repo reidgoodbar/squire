@@ -714,9 +714,7 @@ def main() -> int:
     repo = make_repo(args.seed)
     env = os.environ.copy()
     env["GIT_OPTIONAL_LOCKS"] = "0"
-    env["SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"] = "1"
     os.environ["GIT_OPTIONAL_LOCKS"] = "0"
-    os.environ["SQUIRE_SHIM_ENABLE_WARM_FILE_REPLAY"] = "1"
     run([str(squire), "setup"], repo, env=env)
     run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
 

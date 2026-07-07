@@ -227,13 +227,13 @@ Results:
 
 | Bucket | Cases | Hits | Hot p50 | Hot p95 | Native p50 | Native p95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Git metadata | `49` | `49` | `299us` | `392us` | `14.329ms` | `17.643ms` |
-| Repo state | `39` | `37` | `1.589ms` | `2.595ms` | `15.423ms` | `20.747ms` |
-| File read | `37` | `35` | `554us` | `829us` | `3.722ms` | `8.657ms` |
-| Line window | `51` | `46` | `361us` | `471us` | `3.160ms` | `3.764ms` |
-| Fixed search | `53` | `47` | `403us` | `495us` | `3.806ms` | `5.209ms` |
-| Composed pipe | `39` | `35` | `574us` | `893us` | `8.479ms` | `21.463ms` |
-| Composed sequence | `50` | `48` | `1.267ms` | `2.996ms` | `26.419ms` | `51.737ms` |
+| Git metadata | `49` | `49` | `314us` | `398us` | `17.096ms` | `23.161ms` |
+| Repo state | `39` | `37` | `1.734ms` | `2.683ms` | `17.998ms` | `24.368ms` |
+| File read | `37` | `35` | `589us` | `893us` | `5.966ms` | `9.291ms` |
+| Line window | `51` | `46` | `407us` | `541us` | `3.441ms` | `3.928ms` |
+| Fixed search | `53` | `47` | `452us` | `531us` | `4.289ms` | `5.870ms` |
+| Composed pipe | `39` | `35` | `624us` | `955us` | `8.809ms` | `22.506ms` |
+| Composed sequence | `50` | `48` | `1.389ms` | `3.133ms` | `27.306ms` | `57.955ms` |
 
 The e2e columns include the helper/session envelope. The hot replay columns are
 the actual mmap proof-and-materialization events recorded by Squire.
