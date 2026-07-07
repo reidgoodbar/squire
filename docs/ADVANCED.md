@@ -134,9 +134,11 @@ Enabled fast paths:
 Proof-gated replay candidates:
 
 - `git ls-files` and safe path-filtered `git ls-files <path>`
+- `git log -1 --format=%H%n%s`
 - `git status --short`
 - `git status --porcelain`
 - supported `git diff` forms
+- `rg --files`
 - bounded safe `cat`, `sed -n`, `head`, `tail`, `grep -F`, and single-file `rg -F` workspace reads/searches
 - composed read-only filters including `head`, `tail`, `grep -F`, `wc -l`, and no-arg `sort`
 - common tool version probes
@@ -146,7 +148,6 @@ Native-only discovery:
 
 - `git remote -v`
 - `git remote get-url origin`
-- `rg --files`
 - recursive, regex, multi-path, or otherwise unbounded `rg` searches
 
 Never replay:

@@ -229,18 +229,20 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                 ]
             )
         elif bucket == "repo_state":
-            argv = rng.choice(
-                [
-                    ("git", "status", "--short"),
-                    ("git", "status", "--porcelain"),
-                    ("git", "ls-files"),
-                    ("git", "ls-files", "src"),
-                    ("git", "ls-files", "lib"),
-                    ("git", "diff"),
-                    ("git", "diff", "--stat"),
-                    ("git", "diff", "--", path),
-                ]
-            )
+            repo_state_choices = [
+                ("git", "status", "--short"),
+                ("git", "status", "--porcelain"),
+                ("git", "ls-files"),
+                ("git", "ls-files", "src"),
+                ("git", "ls-files", "lib"),
+                ("git", "log", "-1", "--format=%H%n%s"),
+                ("git", "diff"),
+                ("git", "diff", "--stat"),
+                ("git", "diff", "--", path),
+            ]
+            if shutil.which("rg"):
+                repo_state_choices.append(("rg", "--files"))
+            argv = rng.choice(repo_state_choices)
         elif bucket == "file_read":
             argv = rng.choice([("cat", path), ("file", path)])
         elif bucket == "line_window":
@@ -314,7 +316,7 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                 ]
             )
             if shutil.which("rg") and rng.random() < 0.25:
-                script = f"rg -F {pattern} {p1} | head -n {n}"
+                script = rng.choice([f"rg -F {pattern} {p1} | head -n {n}", f"rg --files | head -n {n}"])
             argv = ("/bin/sh", "-c", script)
         elif bucket == "composed_sequence":
             p1 = rng.choice(paths)

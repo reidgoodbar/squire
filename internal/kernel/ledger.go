@@ -554,6 +554,22 @@ func repoSummaryProof(cwd string, argv []string, ws WorldState) (map[string]stri
 		"tool_executable": toolSignal.FileHash,
 	}
 	switch {
+	case isGitHeadSubjectLog(argv):
+		if gitDirAbs == "" {
+			return nil, "", false
+		}
+		head, branch, ok := readHeadAndBranch(gitDirAbs)
+		if !ok {
+			return nil, "", false
+		}
+		configFP := gitConfigSummaryFingerprint(root, gitDirAbs)
+		viewFP := gitLogViewFingerprint(gitDirAbs)
+		fp["head"] = hashString(head)
+		fp["branch"] = hashString(branch)
+		fp["git_config"] = configFP
+		fp["git_log_view"] = viewFP
+		epoch := "repo-summary:git-log-head-subject:" + hashString(root+"|"+normalizeArgv(argv)+"|"+head+"|"+branch+"|"+configFP+"|"+viewFP+"|"+toolSignal.FileHash)
+		return fp, epoch, true
 	case isGitLsFiles(argv):
 		if gitDirAbs == "" {
 			return nil, "", false
@@ -851,6 +867,27 @@ func gitConfigSummaryFingerprint(repoRoot, gitDirAbs string) string {
 	parts = append(parts, gitConfigFileFingerprints("", filepath.Join(gitDirAbs, "config"))...)
 	parts = append(parts, filepath.Join(gitDirAbs, "info", "sparse-checkout")+"\x00"+fileHashOrMissing(filepath.Join(gitDirAbs, "info", "sparse-checkout")))
 	parts = append(parts, externalGitConfigFingerprints()...)
+	sort.Strings(parts)
+	return hashString(strings.Join(parts, "\n"))
+}
+
+func gitLogViewFingerprint(gitDirAbs string) string {
+	var parts []string
+	for _, path := range []string{
+		filepath.Join(gitDirAbs, "packed-refs"),
+		filepath.Join(gitDirAbs, "info", "grafts"),
+		filepath.Join(gitDirAbs, "refs", "replace"),
+	} {
+		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
+	}
+	replaceRoot := filepath.Join(gitDirAbs, "refs", "replace")
+	_ = filepath.WalkDir(replaceRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
+		return nil
+	})
 	sort.Strings(parts)
 	return hashString(strings.Join(parts, "\n"))
 }

@@ -1674,6 +1674,68 @@ static int git_config_summary_fingerprint(const char *repo_root, const char *git
 	return ok;
 }
 
+static int collect_tree_file_fingerprints(const char *dir, string_list *parts) {
+	DIR *d = opendir(dir);
+	if (d == NULL) {
+		return 1;
+	}
+	struct dirent *ent;
+	while ((ent = readdir(d)) != NULL) {
+		if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+			continue;
+		}
+		char path[PATH_BUF];
+		if (!join_path(path, sizeof(path), dir, ent->d_name)) {
+			closedir(d);
+			return 0;
+		}
+		struct stat st;
+		if (lstat(path, &st) != 0) {
+			continue;
+		}
+		if (S_ISDIR(st.st_mode)) {
+			if (!collect_tree_file_fingerprints(path, parts)) {
+				closedir(d);
+				return 0;
+			}
+			continue;
+		}
+		char fp[HASH_HEX + 16];
+		file_hash_or_missing(path, fp);
+		if (!list_add_path_hash_part(parts, path, fp)) {
+			closedir(d);
+			return 0;
+		}
+	}
+	closedir(d);
+	return 1;
+}
+
+static int git_log_view_fingerprint(const char *git_dir, char out[HASH_HEX]) {
+	string_list parts = {0};
+	char path[PATH_BUF], fp[HASH_HEX + 16];
+	static const char *direct_paths[] = {"packed-refs", "info/grafts", "refs/replace"};
+	for (size_t i = 0; i < sizeof(direct_paths) / sizeof(direct_paths[0]); i++) {
+		if (!join_path(path, sizeof(path), git_dir, direct_paths[i])) {
+			list_free(&parts);
+			return 0;
+		}
+		file_hash_or_missing(path, fp);
+		if (!list_add_path_hash_part(&parts, path, fp)) {
+			list_free(&parts);
+			return 0;
+		}
+	}
+	if (!join_path(path, sizeof(path), git_dir, "refs/replace") ||
+	    !collect_tree_file_fingerprints(path, &parts)) {
+		list_free(&parts);
+		return 0;
+	}
+	int ok = hash_joined_lines(&parts, out);
+	list_free(&parts);
+	return ok;
+}
+
 static int git_attribute_fingerprint(const char *repo_root, const char *git_dir, char out[HASH_HEX]) {
 	string_list parts = {0};
 	char path[PATH_BUF], fp[HASH_HEX + 16];
@@ -2253,6 +2315,20 @@ static int is_git_status(policy_invocation *inv) {
 	       (strcmp(inv->argv[2], "--short") == 0 || strcmp(inv->argv[2], "--porcelain") == 0);
 }
 
+static int is_git_head_subject_log(policy_invocation *inv) {
+	return inv->argc == 4 &&
+	       strcmp(inv->argv[0], "git") == 0 &&
+	       strcmp(inv->argv[1], "log") == 0 &&
+	       strcmp(inv->argv[2], "-1") == 0 &&
+	       strcmp(inv->argv[3], "--format=%H%n%s") == 0;
+}
+
+static int is_rg_files(policy_invocation *inv) {
+	return inv->argc == 2 &&
+	       strcmp(inv->argv[0], "rg") == 0 &&
+	       strcmp(inv->argv[1], "--files") == 0;
+}
+
 static int safe_relative_inspection_path_arg(const char *path) {
 	char rel[PATH_BUF];
 	return clean_relative_path(path, rel);
@@ -2284,7 +2360,7 @@ static int append_normalized_epoch_input(byte_buf *b, policy_invocation *inv) {
 }
 
 static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
-	if (!is_git_ls_files(inv) && !is_git_status(inv) && !is_git_read_only_diff(inv)) {
+	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) && !is_git_read_only_diff(inv) && !is_rg_files(inv)) {
 		return 0;
 	}
 	char repo_root[PATH_BUF], git_dir[PATH_BUF];
@@ -2292,7 +2368,8 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 		return 0;
 	}
 	executable_signal tool;
-	if (!executable_signal_for(inv->cwd, "git", &tool)) {
+	const char *tool_name = is_rg_files(inv) ? "rg" : "git";
+	if (!executable_signal_for(inv->cwd, tool_name, &tool)) {
 		return 0;
 	}
 	char index_path[PATH_BUF], index_fp[HASH_HEX + 16], config_fp[HASH_HEX], tree[HASH_HEX], content[HASH_HEX], input_hash[HASH_HEX];
@@ -2305,6 +2382,32 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 	}
 	byte_buf b = {0};
 	int ok = 0;
+	if (is_git_head_subject_log(inv)) {
+		char head[128], branch[PATH_BUF], log_view_fp[HASH_HEX];
+		if (!current_head_and_branch(git_dir, head, branch) || !git_log_view_fingerprint(git_dir, log_view_fp)) {
+			bytes_free(&b);
+			return 0;
+		}
+		ok = bytes_append_str(&b, repo_root) &&
+		     bytes_append_byte(&b, '|') &&
+		     append_normalized_epoch_input(&b, inv) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, head) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, branch) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, config_fp) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, log_view_fp) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, tool.file_hash);
+		if (ok) {
+			sha256_hex_buf(&b, input_hash);
+			snprintf(epoch, 256, "hot-repo-summary:git-log-head-subject:%s", input_hash);
+		}
+		bytes_free(&b);
+		return ok;
+	}
 	if (is_git_ls_files(inv)) {
 		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
 			fprintf(stderr, "squire mmap proof debug: ls-files index=%s config=%s tool=%s\n", index_fp, config_fp, tool.file_hash);
@@ -2321,6 +2424,28 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 		if (ok) {
 			sha256_hex_buf(&b, input_hash);
 			snprintf(epoch, 256, "hot-repo-summary:git-ls-files:%s", input_hash);
+		}
+		bytes_free(&b);
+		return ok;
+	}
+	if (is_rg_files(inv)) {
+		char ignore_fp[HASH_HEX];
+		if (!exact_workspace_epochs(repo_root, 10000, 0, tree, content) || !workspace_ignore_fingerprint(repo_root, git_dir, ignore_fp)) {
+			bytes_free(&b);
+			return 0;
+		}
+		ok = bytes_append_str(&b, repo_root) &&
+		     bytes_append_byte(&b, '|') &&
+		     append_normalized_epoch_input(&b, inv) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, ignore_fp) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, tree) &&
+		     bytes_append_byte(&b, '|') &&
+		     bytes_append_str(&b, tool.file_hash);
+		if (ok) {
+			sha256_hex_buf(&b, input_hash);
+			snprintf(epoch, 256, "hot-repo-summary:rg-files:%s", input_hash);
 		}
 		bytes_free(&b);
 		return ok;

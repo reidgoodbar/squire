@@ -69,7 +69,7 @@ pass a local proof against the current world:
   environment inputs, and executable identity match;
 - Git-sensitive outputs also prove cwd-relative boundaries plus external Git
   inputs such as included config files, global ignore files, global attributes,
-  `core.excludesFile`, and `core.attributesFile`;
+  `core.excludesFile`, `core.attributesFile`, replacement refs, and grafts;
 - cached stdout, stderr, and exit code come from an exact native observation or
   an exact hot-prepared observation;
 - the operation is still allowed by policy.
@@ -92,7 +92,9 @@ Examples:
 - `git status --short`
 - `git ls-files`
 - `git ls-files src`
+- `git log -1 --format=%H%n%s`
 - `git diff --stat`
+- `rg --files`
 - `cat src/app.js`
 - `sed -n '1,80p' src/app.js`
 - `head -n 20 src/app.js`

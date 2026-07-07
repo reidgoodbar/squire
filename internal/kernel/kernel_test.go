@@ -891,9 +891,13 @@ func TestProofGatedRepoSummaryReplaysAfterWarm(t *testing.T) {
 		{"git", "ls-files"},
 		{"git", "status", "--short"},
 		{"git", "status", "--porcelain"},
+		{"git", "log", "-1", "--format=%H%n%s"},
 		{"git", "diff"},
 		{"git", "diff", "--stat"},
 		{"git", "diff", "--", "src/app.js"},
+	}
+	if _, err := exec.LookPath("rg"); err == nil {
+		commands = append(commands, []string{"rg", "--files"})
 	}
 	for _, argv := range commands {
 		t.Run(displayCommand(argv), func(t *testing.T) {

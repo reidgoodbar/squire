@@ -135,6 +135,9 @@ func Classify(argv []string) OperatorFamily {
 		if isGitMetadata(argv) {
 			return FamilyLocalRepoMetadata
 		}
+		if isGitHeadSubjectLog(argv) {
+			return FamilyLocalRepoMetadata
+		}
 		if isGitRemoteMetadata(argv) {
 			return FamilyLocalRepoMetadata
 		}
@@ -201,7 +204,9 @@ func IsProofGatedReplayCandidate(argv []string) bool {
 	argv = normalizeArgvForPolicy(argv)
 	return isGitStatusState(argv) ||
 		isGitLsFiles(argv) ||
+		isGitHeadSubjectLog(argv) ||
 		isGitReadOnlyDiff(argv) ||
+		isRgFiles(argv) ||
 		isReplayableFileInspection(argv) ||
 		isToolVersionProbe(argv) ||
 		isCommandPathLookup(argv) ||
@@ -245,6 +250,14 @@ func isGitStatusState(argv []string) bool {
 	return len(argv) == 3 && filepath.Base(argv[0]) == "git" && argv[1] == "status" && (argv[2] == "--short" || argv[2] == "--porcelain")
 }
 
+func isGitHeadSubjectLog(argv []string) bool {
+	return len(argv) == 4 &&
+		filepath.Base(argv[0]) == "git" &&
+		argv[1] == "log" &&
+		argv[2] == "-1" &&
+		argv[3] == "--format=%H%n%s"
+}
+
 func isGitReadOnlyDiff(argv []string) bool {
 	if len(argv) < 2 || filepath.Base(argv[0]) != "git" || argv[1] != "diff" {
 		return false
@@ -268,7 +281,7 @@ func isGitReadOnlyDiff(argv []string) bool {
 
 func isRepoSummaryReplayCandidate(argv []string) bool {
 	argv = normalizeArgvForPolicy(argv)
-	return isGitRepoState(argv)
+	return isGitRepoState(argv) || isGitHeadSubjectLog(argv) || isRgFiles(argv)
 }
 
 func isRgFiles(argv []string) bool {

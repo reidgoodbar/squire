@@ -443,6 +443,7 @@ func proofGatedPrewarmCandidates(ws WorldState) [][]string {
 		add([]string{"git", "status", "--porcelain"})
 		add([]string{"git", "diff"})
 		add([]string{"git", "diff", "--stat"})
+		add([]string{"git", "log", "-1", "--format=%H%n%s"})
 		add([]string{"rg", "--files"})
 		for _, rel := range replayableGitLsFilesPrewarmTargets(ws.RepoRoot, 64) {
 			add([]string{"git", "ls-files", rel})
@@ -513,6 +514,8 @@ func proofGatedOutputPrivacy(argv []string) string {
 		return "selected non-sensitive environment variable output stored locally for exact session replay"
 	case isDirectoryListing(argv):
 		return "directory listing output stored locally for exact replay with directory/stat/env proof"
+	case isGitHeadSubjectLog(argv):
+		return "current HEAD commit metadata stored locally for exact replay"
 	default:
 		return "proof-gated output bytes stored locally for exact replay"
 	}
