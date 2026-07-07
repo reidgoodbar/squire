@@ -162,6 +162,7 @@ fn try_replay_with_library(
     }
     let stdout = ffi_bytes(result.stdout_data, result.stdout_len)?;
     let stderr = ffi_bytes(result.stderr_data, result.stderr_len)?;
+    let exit_code = result.exit_code;
     unsafe {
         (library.record_replay)(&mut result);
         (library.release)(&mut result);
@@ -170,7 +171,7 @@ fn try_replay_with_library(
     Some(ReplayOutput {
         stdout,
         stderr,
-        exit_code: result.exit_code,
+        exit_code,
     })
 }
 
@@ -609,6 +610,60 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    unsafe extern "C" fn fake_try_replay_command(
+        _cwd: *const c_char,
+        argc: c_int,
+        _argv: *const *const c_char,
+        _envc: c_int,
+        _env: *const *const c_char,
+        out: *mut SquireHotResultFFI,
+    ) -> c_int {
+        assert_eq!(argc, 3);
+        static STDOUT: &[u8] = b"";
+        static STDERR: &[u8] = b"";
+        unsafe {
+            *out = SquireHotResultFFI {
+                handle: std::ptr::dangling_mut::<c_void>(),
+                stdout_data: STDOUT.as_ptr(),
+                stdout_len: STDOUT.len() as u32,
+                stderr_data: STDERR.as_ptr(),
+                stderr_len: STDERR.len() as u32,
+                exit_code: 17,
+                native_wall_ms: 0,
+            };
+        }
+        1
+    }
+
+    unsafe extern "C" fn fake_record_replay(_result: *mut SquireHotResultFFI) {}
+
+    unsafe extern "C" fn fake_release(result: *mut SquireHotResultFFI) {
+        unsafe {
+            (*result).exit_code = 0;
+            (*result).stdout_data = std::ptr::null();
+            (*result).stderr_data = std::ptr::null();
+            (*result).handle = std::ptr::null_mut();
+        }
+    }
+
+    #[test]
+    fn replay_copies_exit_code_before_release() {
+        let library = SquireHotLibrary {
+            handle: std::ptr::null_mut(),
+            try_replay_command: fake_try_replay_command,
+            record_replay: fake_record_replay,
+            release: fake_release,
+        };
+        let command = argv(&["sh", "-c", "grep -F missing file.txt"]);
+        let env = HashMap::new();
+
+        let output = try_replay_with_library(&library, &command, Path::new("."), &env)
+            .expect("fake replay should hit");
+
+        assert_eq!(output.exit_code, 17);
+        std::mem::forget(library);
     }
 
     #[test]
