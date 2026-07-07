@@ -91,6 +91,10 @@ pub fn try_replay(
         command.len(),
         shell_join(command)
     ));
+    if !command_may_hit(command) {
+        trace("skip obvious non-candidate");
+        return None;
+    }
     let Some(library) = HOT_LIBRARY.get_or_init(load_hot_library).as_ref() else {
         trace("hot library unavailable");
         return None;
@@ -297,6 +301,167 @@ fn shell_join(command: &[String]) -> String {
         .join(" ")
 }
 
+fn command_may_hit(command: &[String]) -> bool {
+    let Some(program) = command.first() else {
+        return false;
+    };
+    if is_shell_name(program) {
+        if let Some(script) = shell_script_arg(command) {
+            return shell_script_may_hit(script);
+        }
+    }
+    direct_command_may_hit(command)
+}
+
+fn is_shell_name(program: &str) -> bool {
+    matches!(base_name_str(program), "sh" | "bash" | "zsh")
+}
+
+fn shell_script_arg(command: &[String]) -> Option<&str> {
+    let flag_index = command
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "-c" | "-lc"))?;
+    command.get(flag_index + 1).map(String::as_str)
+}
+
+fn shell_script_may_hit(script: &str) -> bool {
+    let mut token = String::new();
+    for byte in script.bytes() {
+        if is_shell_word_byte(byte) {
+            token.push(byte as char);
+            if token.len() > 128 {
+                token.clear();
+            }
+            continue;
+        }
+        if !token.is_empty() {
+            if shell_token_may_hit(&token) {
+                return true;
+            }
+            token.clear();
+        }
+    }
+    !token.is_empty() && shell_token_may_hit(&token)
+}
+
+fn shell_token_may_hit(token: &str) -> bool {
+    if matches!(
+        token,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "for"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "case"
+            | "esac"
+            | "in"
+            | "true"
+            | "false"
+    ) {
+        return false;
+    }
+    tool_may_hit(token)
+}
+
+fn direct_command_may_hit(command: &[String]) -> bool {
+    let Some(program) = command.first() else {
+        return false;
+    };
+    let tool = base_name_str(program);
+    if matches!(
+        tool,
+        "git"
+            | "cat"
+            | "sed"
+            | "head"
+            | "tail"
+            | "file"
+            | "grep"
+            | "rg"
+            | "ls"
+            | "which"
+            | "command"
+            | "printenv"
+            | "whoami"
+            | "uname"
+            | "id"
+            | "hostname"
+    ) {
+        return true;
+    }
+    is_version_probe(command)
+}
+
+fn is_version_probe(command: &[String]) -> bool {
+    let Some(program) = command.first() else {
+        return false;
+    };
+    if !matches!(
+        base_name_str(program),
+        "pip"
+            | "pip3"
+            | "python"
+            | "python3"
+            | "node"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "go"
+            | "cargo"
+            | "rustc"
+            | "make"
+    ) {
+        return false;
+    }
+    command.len() == 2 && matches!(command[1].as_str(), "--version" | "version")
+}
+
+fn is_shell_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+}
+
+fn tool_may_hit(tool: &str) -> bool {
+    matches!(
+        base_name_str(tool),
+        "git"
+            | "cat"
+            | "sed"
+            | "head"
+            | "tail"
+            | "file"
+            | "grep"
+            | "rg"
+            | "ls"
+            | "which"
+            | "command"
+            | "printenv"
+            | "whoami"
+            | "uname"
+            | "id"
+            | "hostname"
+            | "pip"
+            | "pip3"
+            | "python"
+            | "python3"
+            | "node"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "go"
+            | "cargo"
+            | "rustc"
+            | "make"
+    )
+}
+
+fn base_name_str(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 fn ffi_bytes(ptr: *const u8, len: u32) -> Option<Vec<u8>> {
     if len == 0 {
         return Some(Vec::new());
@@ -435,5 +600,57 @@ fn trace(message: &str) {
             use std::io::Write;
             let _ = writeln!(file, "squire-codex bridge: {message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn command_gate_allows_known_hit_shapes() {
+        assert!(command_may_hit(&argv(&["git", "rev-parse", "HEAD"])));
+        assert!(command_may_hit(&argv(&[
+            "sh",
+            "-c",
+            "git branch --show-current && git rev-parse HEAD",
+        ])));
+        assert!(command_may_hit(&argv(&[
+            "sh",
+            "-c",
+            "git ls-files src/flask | wc -l",
+        ])));
+        assert!(command_may_hit(&argv(&[
+            "sh",
+            "-c",
+            "sed -n '1,80p' src/flask/app.py | tail -n 20",
+        ])));
+        assert!(command_may_hit(&argv(&[
+            "/bin/zsh",
+            "-lc",
+            "rg -F token src/flask/app.py | head -n 1",
+        ])));
+    }
+
+    #[test]
+    fn command_gate_skips_obvious_non_candidates() {
+        assert!(!command_may_hit(&argv(&["nl", "-ba", "src/flask/app.py"])));
+        assert!(!command_may_hit(&argv(&[
+            "sh",
+            "-c",
+            "nl -ba src/flask/app.py",
+        ])));
+        assert!(!command_may_hit(&argv(
+            &["sh", "-c", "echo hello | wc -c",]
+        )));
+        assert!(!command_may_hit(&argv(&[
+            "python3",
+            "-c",
+            "print('fallback')",
+        ])));
     }
 }
