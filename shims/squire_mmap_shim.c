@@ -358,6 +358,7 @@ static void env_key_for_tool(const char *tool, char out[128]) {
 
 #if !defined(SQUIRE_MMAP_EMBEDDED) || defined(SQUIRE_MMAP_HELPER_REAL_EXEC)
 static void exec_real_command(int argc, char **argv) {
+	(void)argc;
 	const char *tool = base_name(argv[0]);
 	char env_key[128];
 	env_key_for_tool(tool, env_key);
@@ -2323,12 +2324,6 @@ static int is_git_head_subject_log(policy_invocation *inv) {
 	       strcmp(inv->argv[3], "--format=%H%n%s") == 0;
 }
 
-static int is_rg_files(policy_invocation *inv) {
-	return inv->argc == 2 &&
-	       strcmp(inv->argv[0], "rg") == 0 &&
-	       strcmp(inv->argv[1], "--files") == 0;
-}
-
 static int safe_relative_inspection_path_arg(const char *path) {
 	char rel[PATH_BUF];
 	return clean_relative_path(path, rel);
@@ -2360,7 +2355,7 @@ static int append_normalized_epoch_input(byte_buf *b, policy_invocation *inv) {
 }
 
 static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
-	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) && !is_git_read_only_diff(inv) && !is_rg_files(inv)) {
+	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) && !is_git_read_only_diff(inv)) {
 		return 0;
 	}
 	char repo_root[PATH_BUF], git_dir[PATH_BUF];
@@ -2368,8 +2363,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 		return 0;
 	}
 	executable_signal tool;
-	const char *tool_name = is_rg_files(inv) ? "rg" : "git";
-	if (!executable_signal_for(inv->cwd, tool_name, &tool)) {
+	if (!executable_signal_for(inv->cwd, "git", &tool)) {
 		return 0;
 	}
 	char index_path[PATH_BUF], index_fp[HASH_HEX + 16], config_fp[HASH_HEX], tree[HASH_HEX], content[HASH_HEX], input_hash[HASH_HEX];
@@ -2424,28 +2418,6 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 		if (ok) {
 			sha256_hex_buf(&b, input_hash);
 			snprintf(epoch, 256, "hot-repo-summary:git-ls-files:%s", input_hash);
-		}
-		bytes_free(&b);
-		return ok;
-	}
-	if (is_rg_files(inv)) {
-		char ignore_fp[HASH_HEX];
-		if (!exact_workspace_epochs(repo_root, 10000, 0, tree, content) || !workspace_ignore_fingerprint(repo_root, git_dir, ignore_fp)) {
-			bytes_free(&b);
-			return 0;
-		}
-		ok = bytes_append_str(&b, repo_root) &&
-		     bytes_append_byte(&b, '|') &&
-		     append_normalized_epoch_input(&b, inv) &&
-		     bytes_append_byte(&b, '|') &&
-		     bytes_append_str(&b, ignore_fp) &&
-		     bytes_append_byte(&b, '|') &&
-		     bytes_append_str(&b, tree) &&
-		     bytes_append_byte(&b, '|') &&
-		     bytes_append_str(&b, tool.file_hash);
-		if (ok) {
-			sha256_hex_buf(&b, input_hash);
-			snprintf(epoch, 256, "hot-repo-summary:rg-files:%s", input_hash);
 		}
 		bytes_free(&b);
 		return ok;

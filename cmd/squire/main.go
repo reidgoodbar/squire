@@ -53,13 +53,37 @@ func main() {
 		out, err = kernel.Setup(ctx, cwd, storeRoot)
 	case len(args) >= 1 && args[0] == "codex":
 		enableSquireOwnedGitReads()
-		code, runErr := runCodex(ctx, cwd, storeRoot, args[1:])
+		code, runErr := runProductCodex(ctx, cwd, storeRoot, args[1:])
 		if runErr != nil {
 			fmt.Fprintln(os.Stderr, runErr)
 			os.Exit(1)
 		}
 		os.Exit(code)
 		return
+	case len(args) >= 1 && args[0] == "status":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[1:], outputShort)
+		if err != nil {
+			break
+		}
+		out, err = runProductStatus(ctx, cwd, storeRoot, format)
+	case len(args) >= 1 && args[0] == "prepare":
+		enableSquireOwnedGitReads()
+		out, err = runProductPrepare(ctx, cwd, storeRoot, args[1:])
+	case len(args) >= 1 && args[0] == "doctor":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[1:], outputShort)
+		if err != nil {
+			break
+		}
+		var ready bool
+		out, ready, err = runProductDoctor(ctx, cwd, format)
+		if err == nil && !ready {
+			fmt.Print(out)
+			os.Exit(1)
+		}
+	case len(args) >= 1 && args[0] == "explain":
+		out, err = runProductExplain(ctx, cwd, args[1:])
 	case len(args) >= 1 && args[0] == "session":
 		enableSquireOwnedGitReads()
 		err = runSession(ctx, cwd, storeRoot, args[1:])
@@ -236,24 +260,26 @@ func squireCodexBridgeEnv() []string {
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		env = append(env, "SQUIRE_CODEX_SQUIRE="+exe)
 		if hotLib := squireHotLibraryNextTo(exe); hotLib != "" {
-			env = append(env, "SQUIRE_CODEX_HOT_LIB="+hotLib)
+			env = append(env, "SQUIRE_CODEX_RUNTIME_LIB="+hotLib)
 		}
 	}
 	return env
 }
 
 func squireHotLibraryNextTo(exe string) string {
-	name := "libsquire_hot.so"
+	names := []string{"libsquire_runtime.so", "libsquire_hot.so"}
 	if runtime.GOOS == "darwin" {
-		name = "libsquire_hot.dylib"
+		names = []string{"libsquire_runtime.dylib", "libsquire_hot.dylib"}
 	}
 	dir := filepath.Dir(exe)
-	for _, candidate := range []string{
-		filepath.Join(dir, name),
-		filepath.Join(dir, "lib", name),
-	} {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
+	for _, name := range names {
+		for _, candidate := range []string{
+			filepath.Join(dir, name),
+			filepath.Join(dir, "lib", name),
+		} {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
 		}
 	}
 	return ""
@@ -309,53 +335,29 @@ func boostUsageError(args []string) string {
 }
 
 func usageText() string {
-	return `Squire v1
+	return `Squire
 
 usage:
-  squire-codex [codex args...]
   squire codex [codex args...]
-  squire boost status --short
-
-advanced:
-  squire setup
-  squire session [--quiet] [--metadata-only|--no-warm] [--no-maintainer] [--enable-warm-file-replay] [--preload] [--preload-lib <path>] -- <command> [args...]
-  squire vm status [--short|--json]
-  squire vm session [--quiet] [--backend auto|linux-local|external-runner] [--runner <path>] -- <command> [args...]
+  squire status [--short|--json]
+  squire doctor [--short|--json]
+  squire explain -- <command> [args...]
+  squire prepare [--short|--json]
   squire version [--short|--json]
-  squire kernel status [--short]
-  squire kernel run -- <command> [args...]
-  squire kernel warm [--metadata-only] [--short|--json]
-  squire kernel maintain --once [--short|--json]
-  squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
-  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
-  squire kernel maintain --background-status [--short|--json]
-  squire kernel maintain --stop [--short|--json]
-  squire kernel adapter --stdio [--no-maintainer]
-  squire kernel shim-helper --socket <path>
-  squire boost status [--short|--json]
-  squire boost bench repo-metadata [--short|--json]
-  squire boost bench deep-local [--short|--json]
 
 principles:
-  Agent chooses. Squire serves.
-  Native fallback always exists.
-  Runtime decisions are replay or native.
-  Validation, edits, mutations, and package installs are never replayed.
+  Agents use ordinary commands.
+  Squire serves a result only when its current-state proof is valid.
+  Every miss follows the agent's original native execution path.
 
-first use:
-  cd your-repo
-  squire-codex
+start:
+  squire codex
 
 help:
   squire help codex
-  squire help session
-  squire help vm
-  squire help version
-  squire help kernel run
-  squire help kernel maintain
-  squire help kernel adapter
-  squire help kernel shim-helper
-  squire help boost
+  squire help status
+  squire help explain
+  squire help advanced
 `
 }
 
@@ -379,27 +381,70 @@ func helpTopic(topic []string) string {
 	switch strings.Join(topic, " ") {
 	case "codex":
 		return `usage:
-  squire-codex [codex args...]
   squire codex [codex args...]
+  squire-codex [codex args...]
 
-squire-codex is the recommended UX and normal product path. It is the real
-Codex fork built with the Squire execution bridge and does not require a
-separate setup command.
-
-squire codex is a compatibility and diagnostics wrapper around a separately
-installed codex executable. It is useful for local experiments, but it is not
-the primary release driver.
+squire codex is the canonical product path. It starts the maintained Codex
+fork with Squire's transparent execution client. Each eligible command uses its
+actual cwd to discover and asynchronously prepare the nearest repository.
+squire-codex is the direct convenience alias.
 
 The model still sees and emits ordinary commands. Squire scopes local store
 prep, warm state, the resident maintainer, hot snapshot access, exact replay,
-and native fallback below Codex. It does not add tools, alter prompts, suggest
-commands, stop for VM provisioning, or require Codex to call Squire.
+and native fallback below Codex. It does not add tools, alter prompts, replace
+the user's shell, stop for VM provisioning, or require a warm command.
 
 Examples:
   squire-codex
   squire codex
   squire codex exec "Explain this repo"
   squire codex --skip-git-repo-check exec "Print OK"
+`
+	case "status":
+		return `usage:
+  squire status [--short|--json]
+
+Shows the active workspace, preparation state, hit/miss counters, replay
+latency, correctness diagnostics, and native fallback readiness.
+`
+	case "prepare":
+		return `usage:
+  squire prepare [--short|--json]
+
+Requests background preparation for the current repository. Normal users do
+not need this command because squire codex prepares repositories automatically.
+`
+	case "doctor":
+		return `usage:
+  squire doctor [--short|--json]
+
+Checks the Squire runtime, Codex driver, required Codex helper, Git, runtime library,
+and current workspace without changing agent configuration.
+`
+	case "explain":
+		return `usage:
+  squire explain -- <command> [args...]
+
+Explains whether the command is eligible, which provider can serve it, what
+workspace it belongs to, and why the current decision is a hit or miss. The
+command is never executed natively by explain.
+`
+	case "advanced":
+		return `advanced compatibility and diagnostics:
+  squire session -- <command> [args...]
+  squire vm status [--short|--json]
+  squire vm session -- <command> [args...]
+  squire kernel status [--short]
+  squire kernel run -- <command> [args...]
+  squire kernel warm [--metadata-only] [--short|--json]
+  squire kernel maintain --background [--short|--json]
+  squire kernel adapter --stdio [--no-maintainer]
+  squire boost status [--short|--json]
+  squire boost bench repo-metadata [--short|--json]
+  squire boost bench deep-local [--short|--json]
+
+These interfaces remain for compatibility, release verification, and backend
+development. They are not required for normal Squire use.
 `
 	case "setup":
 		return `usage:
@@ -491,10 +536,9 @@ base64 plus the exact exit code. By default, the adapter starts or reuses the
 resident background maintainer before serving requests. --no-maintainer is a
 diagnostic escape hatch for measuring native-direct adapter overhead.
 
-This is now a compatibility path for host runtimes that can already integrate
-over stdio. The primary scoped foreground path is the preload session, which
-reads the maintainer-published hot snapshot from inside the launched process
-tree when preload can attach and falls back to native exec on any miss.
+This is a compatibility path for host runtimes that integrate over stdio. The
+primary product path is runtime ABI 1 inside Squire Codex; preload sessions are
+advanced diagnostics only.
 `
 	case "kernel shim-helper":
 		return `usage:
@@ -875,8 +919,8 @@ func versionOut(format outputFormat) string {
 		return jsonOut(report)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s\n", report.Product, report.Contract)
-	fmt.Fprintf(&b, "version: %s\n", report.Version)
+	fmt.Fprintf(&b, "%s %s\n", report.Product, report.Version)
+	fmt.Fprintf(&b, "contract: %s\n", report.Contract)
 	fmt.Fprintf(&b, "commit: %s\n", report.Commit)
 	fmt.Fprintf(&b, "date: %s\n", report.Date)
 	return b.String()

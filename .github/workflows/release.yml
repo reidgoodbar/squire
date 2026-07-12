@@ -42,6 +42,14 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+      - name: Native runtime warnings
+        run: |
+          cc -O3 -DNDEBUG -Wall -Wextra -Werror -Wno-unused-function \
+            -shared -fPIC \
+            -o .tmp/libsquire_runtime.so \
+            shims/squire_hot_api.c \
+            -ldl -lcrypto
+
       - name: Cache validity regressions
         run: |
           tests='TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges'
@@ -78,6 +86,9 @@ jobs:
 
       - name: Release smoke
         run: scripts/release_smoke.sh .tmp/squire
+
+      - name: Product install smoke
+        run: scripts/install_product_smoke.sh
 
       - name: Hot API squire-codex fuzz
         run: |

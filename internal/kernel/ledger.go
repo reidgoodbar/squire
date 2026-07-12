@@ -622,16 +622,6 @@ func repoSummaryProof(cwd string, argv []string, ws WorldState) (map[string]stri
 		fp["file_content_epoch"] = content
 		epoch := "repo-summary:git-diff:" + hashString(root+"|"+normalizeArgv(argv)+"|"+indexFP+"|"+configFP+"|"+attrFP+"|"+tree+"|"+content+"|"+toolSignal.FileHash)
 		return fp, epoch, true
-	case isRgFiles(argv):
-		tree, _, complete := exactWorkspaceEpochs(root, 10000, false)
-		if !complete {
-			return nil, "", false
-		}
-		ignoreFP := workspaceIgnoreFingerprint(root, gitDirAbs)
-		fp["file_tree_epoch"] = tree
-		fp["ignore_rules"] = ignoreFP
-		epoch := "repo-summary:rg-files:" + hashString(root+"|"+normalizeArgv(argv)+"|"+ignoreFP+"|"+tree+"|"+toolSignal.FileHash)
-		return fp, epoch, true
 	default:
 		return nil, "", false
 	}

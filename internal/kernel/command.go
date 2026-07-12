@@ -206,7 +206,6 @@ func IsProofGatedReplayCandidate(argv []string) bool {
 		isGitLsFiles(argv) ||
 		isGitHeadSubjectLog(argv) ||
 		isGitReadOnlyDiff(argv) ||
-		isRgFiles(argv) ||
 		isReplayableFileInspection(argv) ||
 		isToolVersionProbe(argv) ||
 		isCommandPathLookup(argv) ||
@@ -281,11 +280,7 @@ func isGitReadOnlyDiff(argv []string) bool {
 
 func isRepoSummaryReplayCandidate(argv []string) bool {
 	argv = normalizeArgvForPolicy(argv)
-	return isGitRepoState(argv) || isGitHeadSubjectLog(argv) || isRgFiles(argv)
-}
-
-func isRgFiles(argv []string) bool {
-	return len(argv) == 2 && filepath.Base(argv[0]) == "rg" && argv[1] == "--files"
+	return isGitRepoState(argv) || isGitHeadSubjectLog(argv)
 }
 
 func isReplayableFileInspection(argv []string) bool {

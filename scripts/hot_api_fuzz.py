@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fuzz the Squire-owned hot C API used by squire-codex.
+"""Fuzz the versioned Squire runtime API used by agent adapters.
 
-This test calls `squire_hot_try_replay_command(...)` directly. Native execution
+This test calls `squire_runtime_try_execute(...)` directly. Native execution
 is used only as the byte-for-byte reference for read-only commands. Mutations,
 validation commands, package setup, out-of-workspace symlinks, and env-mismatch
 probes must miss and are never executed natively by this script.
@@ -91,15 +91,19 @@ def compiler() -> str:
     return cc
 
 
-def resolve_squire(explicit: str | None) -> Path:
-    candidates = []
+def resolve_squire(explicit: str | None, work: Path) -> Path:
     if explicit:
-        candidates.append(Path(explicit))
-    candidates.extend([ROOT / "squire", Path(shutil.which("squire") or "")])
-    for candidate in candidates:
-        if str(candidate) and candidate.exists():
-            return candidate.resolve()
-    raise RuntimeError("squire binary not found; pass /path/to/squire")
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_file():
+            raise RuntimeError(f"squire binary not found: {candidate}")
+        return candidate.resolve()
+
+    go = shutil.which("go")
+    if not go:
+        raise RuntimeError("go is required to build the current Squire checkout")
+    output = work / "squire"
+    run([go, "build", "-o", str(output), "./cmd/squire"], ROOT, timeout=180)
+    return output
 
 
 def compile_hot_api(out: Path) -> None:
@@ -197,7 +201,7 @@ def path_cases() -> list[str]:
     ]
 
 
-def generate_cases(seed: int, count: int) -> list[Case]:
+def generate_cases(seed: int, count: int, selected_buckets: list[str] | None = None) -> list[Case]:
     rng = random.Random(seed)
     paths = path_cases()
     buckets = [
@@ -213,6 +217,11 @@ def generate_cases(seed: int, count: int) -> list[Case]:
         "safe_native_miss",
         "policy_must_miss",
     ]
+    if selected_buckets is not None:
+        unknown = sorted(set(selected_buckets) - set(buckets))
+        if unknown:
+            raise ValueError(f"unknown buckets: {', '.join(unknown)}")
+        buckets = selected_buckets
     cases: list[Case] = []
     for i in range(count):
         bucket = rng.choice(buckets)
@@ -240,8 +249,6 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                 ("git", "diff", "--stat"),
                 ("git", "diff", "--", path),
             ]
-            if shutil.which("rg"):
-                repo_state_choices.append(("rg", "--files"))
             argv = rng.choice(repo_state_choices)
         elif bucket == "file_read":
             argv = rng.choice([("cat", path), ("file", path)])
@@ -316,7 +323,7 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                 ]
             )
             if shutil.which("rg") and rng.random() < 0.25:
-                script = rng.choice([f"rg -F {pattern} {p1} | head -n {n}", f"rg --files | head -n {n}"])
+                script = f"rg -F {pattern} {p1} | head -n {n}"
             argv = ("/bin/sh", "-c", script)
         elif bucket == "composed_sequence":
             p1 = rng.choice(paths)
@@ -336,7 +343,9 @@ def generate_cases(seed: int, count: int) -> list[Case]:
                     ("printf", "fallback-control\n"),
                     ("wc", "-l", path),
                     ("python3", "-c", "print('fallback-python')"),
+                    ("rg", "--files"),
                     ("/bin/sh", "-c", "echo hello | wc -c"),
+                    ("/bin/sh", "-c", "rg --files | head -n 5"),
                     ("/bin/sh", "-c", "for i in 1 2; do git rev-parse HEAD; done"),
                 ]
             )
@@ -369,7 +378,11 @@ def bytes_from_ptr(ptr: ctypes.POINTER(ctypes.c_ubyte), length: int) -> bytes:
 class HotAPI:
     def __init__(self, library_path: Path) -> None:
         self.lib = ctypes.CDLL(str(library_path))
-        self.lib.squire_hot_try_replay_command.argtypes = [
+        self.lib.squire_runtime_abi_version.argtypes = []
+        self.lib.squire_runtime_abi_version.restype = ctypes.c_uint32
+        if self.lib.squire_runtime_abi_version() != 1:
+            raise RuntimeError("unsupported Squire runtime ABI")
+        self.lib.squire_runtime_try_execute.argtypes = [
             ctypes.c_char_p,
             ctypes.c_int,
             ctypes.POINTER(ctypes.c_char_p),
@@ -377,9 +390,9 @@ class HotAPI:
             ctypes.POINTER(ctypes.c_char_p),
             ctypes.POINTER(SquireHotResult),
         ]
-        self.lib.squire_hot_try_replay_command.restype = ctypes.c_int
-        self.lib.squire_hot_record_replay.argtypes = [ctypes.POINTER(SquireHotResult)]
-        self.lib.squire_hot_release.argtypes = [ctypes.POINTER(SquireHotResult)]
+        self.lib.squire_runtime_try_execute.restype = ctypes.c_int
+        self.lib.squire_runtime_record_hit.argtypes = [ctypes.POINTER(SquireHotResult)]
+        self.lib.squire_runtime_release.argtypes = [ctypes.POINTER(SquireHotResult)]
 
     def try_replay(self, cwd: Path, argv: tuple[str, ...], env: dict[str, str]) -> dict[str, Any]:
         argv_bytes = [arg.encode() for arg in argv]
@@ -388,7 +401,7 @@ class HotAPI:
         env_arr = (ctypes.c_char_p * len(env_items))(*env_items)
         result = SquireHotResult()
         start = time.perf_counter_ns()
-        hit = self.lib.squire_hot_try_replay_command(
+        decision = self.lib.squire_runtime_try_execute(
             str(cwd).encode(),
             len(argv_bytes),
             argv_arr,
@@ -396,15 +409,15 @@ class HotAPI:
             env_arr,
             ctypes.byref(result),
         )
-        if hit != 1 or not result.handle:
+        if decision != 1 or not result.handle:
             elapsed_us = (time.perf_counter_ns() - start) / 1000
-            return {"hit": False, "elapsed_us": elapsed_us}
+            return {"hit": False, "decision": int(decision), "elapsed_us": elapsed_us}
         stdout = bytes_from_ptr(result.stdout_data, result.stdout_len)
         stderr = bytes_from_ptr(result.stderr_data, result.stderr_len)
         exit_code = int(result.exit_code)
         native_wall_ms = int(result.native_wall_ms)
-        self.lib.squire_hot_record_replay(ctypes.byref(result))
-        self.lib.squire_hot_release(ctypes.byref(result))
+        self.lib.squire_runtime_record_hit(ctypes.byref(result))
+        self.lib.squire_runtime_release(ctypes.byref(result))
         elapsed_us = (time.perf_counter_ns() - start) / 1000
         return {
             "hit": True,
@@ -473,8 +486,13 @@ def record_bucket(summary: dict[str, Any], case: Case) -> dict[str, Any]:
             "native_compared": 0,
             "mismatches": 0,
             "must_miss_hits": 0,
+            "unsupported": 0,
+            "eligible_misses": 0,
             "native_us": [],
+            "native_hit_us": [],
             "hot_us": [],
+            "hit_us": [],
+            "miss_us": [],
         },
     )
     bucket["cases"] += 1
@@ -500,56 +518,196 @@ def run_case(api: HotAPI, repo: Path, case: Case, env: dict[str, str]) -> dict[s
     return {"case": case, "hot": hot, "native": native, "mismatch": mismatch}
 
 
+def replay_is_current(hot: dict[str, Any], native: dict[str, Any]) -> bool:
+    return (not hot["hit"]) or (
+        hot.get("exit_code") == native["exit_code"]
+        and hot.get("stdout") == native["stdout"]
+        and hot.get("stderr") == native["stderr"]
+    )
+
+
+def warm_short(squire: Path, repo: Path, env: dict[str, str]) -> None:
+    run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
+
+
+def append_invalidation_probe(
+    probes: list[dict[str, Any]],
+    api: HotAPI,
+    repo: Path,
+    env: dict[str, str],
+    *,
+    name: str,
+    argv: tuple[str, ...],
+    before_hit: bool,
+) -> None:
+    native = native_reference(repo, argv, env)
+    hot = api.try_replay(repo, argv, env)
+    probes.append(
+        {
+            "name": name,
+            "before_hit": before_hit,
+            "after_hit": hot["hit"],
+            "safe": replay_is_current(hot, native),
+        }
+    )
+
+
+def rewarm_probe(
+    probes: list[dict[str, Any]],
+    api: HotAPI,
+    squire: Path,
+    repo: Path,
+    env: dict[str, str],
+    argv: tuple[str, ...],
+) -> None:
+    warm_short(squire, repo, env)
+    rewarm = run_case(api, repo, Case(f"{probes[-1]['name']}_after_rewarm", "invalidation", argv), env)
+    probes[-1]["rewarm_hit"] = rewarm["hot"]["hit"]
+    probes[-1]["rewarm_exact"] = rewarm["mismatch"] is None and rewarm["hot"]["hit"]
+
+
 def run_invalidation_probes(api: HotAPI, squire: Path, repo: Path, env: dict[str, str]) -> list[dict[str, Any]]:
     probes: list[dict[str, Any]] = []
     file_case = Case("invalidation_file_before", "invalidation", ("cat", "src/module_01.js"))
     before = run_case(api, repo, file_case, env)
     target = repo / "src" / "module_01.js"
     target.write_text(target.read_text(encoding="utf-8") + "export const invalidated = true;\n", encoding="utf-8")
-    after_native = native_reference(repo, file_case.argv, env)
-    after_hot = api.try_replay(repo, file_case.argv, env)
-    probes.append(
-        {
-            "name": "file_content_epoch",
-            "before_hit": before["hot"]["hit"],
-            "after_hit": after_hot["hit"],
-            "safe": (not after_hot["hit"])
-            or (
-                after_hot.get("exit_code") == after_native["exit_code"]
-                and after_hot.get("stdout") == after_native["stdout"]
-                and after_hot.get("stderr") == after_native["stderr"]
-            ),
-        }
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="file_content_epoch",
+        argv=file_case.argv,
+        before_hit=before["hot"]["hit"],
     )
-    run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
-    rewarm = run_case(api, repo, Case("invalidation_file_after_rewarm", "invalidation", ("cat", "src/module_01.js")), env)
-    probes[-1]["rewarm_hit"] = rewarm["hot"]["hit"]
-    probes[-1]["rewarm_exact"] = rewarm["mismatch"] is None and rewarm["hot"]["hit"]
+    rewarm_probe(probes, api, squire, repo, env, file_case.argv)
+
+    atomic_target = repo / "src" / "module_07.js"
+    atomic_case = Case("invalidation_atomic_replace_before", "invalidation", ("cat", "src/module_07.js"))
+    atomic_before = run_case(api, repo, atomic_case, env)
+    original_stat = atomic_target.stat()
+    original_bytes = atomic_target.read_bytes()
+    replacement_bytes = original_bytes.replace(b"token_8", b"token_9", 1)
+    if len(replacement_bytes) != len(original_bytes) or replacement_bytes == original_bytes:
+        raise RuntimeError("failed to construct same-size replacement payload")
+    replacement = atomic_target.with_name(f".{atomic_target.name}.replacement")
+    replacement.write_bytes(replacement_bytes)
+    os.chmod(replacement, original_stat.st_mode)
+    os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    os.replace(replacement, atomic_target)
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="same_size_atomic_replace_restored_mtime",
+        argv=atomic_case.argv,
+        before_hit=atomic_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, atomic_case.argv)
+
+    index_case = Case("invalidation_index_before", "invalidation", ("git", "ls-files"))
+    index_before = run_case(api, repo, index_case, env)
+    (repo / "docs" / "index-only.md").write_text("index only boundary\n", encoding="utf-8")
+    run(["git", "add", "docs/index-only.md"], repo, env=env)
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="git_index_epoch",
+        argv=index_case.argv,
+        before_hit=index_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, index_case.argv)
+
+    status_case = Case("invalidation_untracked_before", "invalidation", ("git", "status", "--short"))
+    status_before = run_case(api, repo, status_case, env)
+    (repo / "docs" / "new-untracked.md").write_text("untracked boundary\n", encoding="utf-8")
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="untracked_workspace_epoch",
+        argv=status_case.argv,
+        before_hit=status_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, status_case.argv)
+
+    diff_case = Case(
+        "invalidation_same_size_diff_before",
+        "invalidation",
+        ("git", "diff", "--", "src/module_00.js"),
+    )
+    diff_before = run_case(api, repo, diff_case, env)
+    diff_target = repo / "src" / "module_00.js"
+    diff_stat = diff_target.stat()
+    diff_bytes = diff_target.read_bytes()
+    changed_diff_bytes = diff_bytes.replace(b"dirty_marker = 1", b"dirty_marker = 2", 1)
+    if len(changed_diff_bytes) != len(diff_bytes) or changed_diff_bytes == diff_bytes:
+        raise RuntimeError("failed to construct same-size diff payload")
+    diff_target.write_bytes(changed_diff_bytes)
+    os.utime(diff_target, ns=(diff_stat.st_atime_ns, diff_stat.st_mtime_ns))
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="same_size_diff_restored_mtime",
+        argv=diff_case.argv,
+        before_hit=diff_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, diff_case.argv)
+
+    config_case = Case("invalidation_config_before", "invalidation", ("git", "status", "--short"))
+    config_before = run_case(api, repo, config_case, env)
+    run(["git", "config", "--local", "status.showUntrackedFiles", "no"], repo, env=env)
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="git_config_epoch",
+        argv=config_case.argv,
+        before_hit=config_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, config_case.argv)
 
     head_case = Case("invalidation_head_before", "invalidation", ("git", "rev-parse", "HEAD"))
     before_head = run_case(api, repo, head_case, env)
     (repo / "docs" / "commit-boundary.md").write_text("commit boundary\n", encoding="utf-8")
     run(["git", "add", "docs/commit-boundary.md"], repo, env=env)
     run(["git", "commit", "-m", "boundary"], repo, env=env)
-    current_head = native_reference(repo, head_case.argv, env)
-    stale_hot = api.try_replay(repo, head_case.argv, env)
-    probes.append(
-        {
-            "name": "git_head_epoch",
-            "before_hit": before_head["hot"]["hit"],
-            "after_hit": stale_hot["hit"],
-            "safe": (not stale_hot["hit"])
-            or (
-                stale_hot.get("exit_code") == current_head["exit_code"]
-                and stale_hot.get("stdout") == current_head["stdout"]
-                and stale_hot.get("stderr") == current_head["stderr"]
-            ),
-        }
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="git_head_epoch",
+        argv=head_case.argv,
+        before_hit=before_head["hot"]["hit"],
     )
-    run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
-    rewarm_head = run_case(api, repo, Case("invalidation_head_after_rewarm", "invalidation", ("git", "rev-parse", "HEAD")), env)
-    probes[-1]["rewarm_hit"] = rewarm_head["hot"]["hit"]
-    probes[-1]["rewarm_exact"] = rewarm_head["mismatch"] is None and rewarm_head["hot"]["hit"]
+    rewarm_probe(probes, api, squire, repo, env, head_case.argv)
+
+    branch_case = Case(
+        "invalidation_branch_before",
+        "invalidation",
+        ("git", "rev-parse", "--abbrev-ref", "HEAD"),
+    )
+    branch_before = run_case(api, repo, branch_case, env)
+    run(["git", "branch", "-m", "renamed-by-invalidation-probe"], repo, env=env)
+    append_invalidation_probe(
+        probes,
+        api,
+        repo,
+        env,
+        name="symbolic_head_epoch",
+        argv=branch_case.argv,
+        before_hit=branch_before["hot"]["hit"],
+    )
+    rewarm_probe(probes, api, squire, repo, env, branch_case.argv)
 
     bad_env = dict(env)
     bad_env["PATH"] = "/definitely/not/the/current/path"
@@ -565,11 +723,10 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
     """Cover the real squire-codex typed-command path shape.
 
     Codex user-shell commands arrive at the hot API as `sh -c <command>` with a
-    per-command environment map. That env can contain benign locale/pager keys
-    that are absent from the squire-codex process environment. Git metadata and
-    proof-backed composed-shell replays must not be rejected for those
-    non-output-affecting differences, while env-inspection commands must still
-    miss.
+    per-command environment map. Git metadata can ignore proven-irrelevant
+    locale/pager additions. Environment-sensitive compositions and printenv
+    must reject any child environment that differs from the process which
+    prepared the snapshot.
     """
     keys = ("LC_ALL", "LC_CTYPE", "GIT_PAGER")
     saved = {key: os.environ.get(key) for key in keys}
@@ -597,12 +754,24 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
         composed_hot = composed_result["hot"]
         composed_native = composed_result["native"]
         env_probe = api.try_replay(repo, ("sh", "-c", "printenv LC_ALL"), command_env)
+        printenv_case = Case(
+            "codex_user_shell_printenv_baseline",
+            "codex_user_shell",
+            ("printenv", "PATH"),
+        )
+        baseline_env = os.environ.copy()
+        printenv_baseline = run_case(api, repo, printenv_case, baseline_env)
+        mismatched_path_env = dict(baseline_env)
+        mismatched_path_env["PATH"] = "/squire/child/path-mismatch"
+        printenv_mismatch = api.try_replay(repo, printenv_case.argv, mismatched_path_env)
         safe = (
             bool(hot["hit"])
             and result["mismatch"] is None
-            and bool(composed_hot["hit"])
-            and composed_result["mismatch"] is None
+            and not bool(composed_hot["hit"])
             and not bool(env_probe["hit"])
+            and bool(printenv_baseline["hot"]["hit"])
+            and printenv_baseline["mismatch"] is None
+            and not bool(printenv_mismatch["hit"])
         )
         return {
             "name": case.name,
@@ -629,6 +798,8 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
                 else None,
             },
             "env_probe_missed": not bool(env_probe["hit"]),
+            "printenv_baseline_hit": bool(printenv_baseline["hot"]["hit"]),
+            "printenv_mismatch_missed": not bool(printenv_mismatch["hit"]),
         }
     finally:
         for key, value in saved.items():
@@ -636,6 +807,66 @@ def run_codex_user_shell_regression(api: HotAPI, repo: Path, env: dict[str, str]
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def run_runtime_policy_regression(api: HotAPI, repo: Path, env: dict[str, str]) -> dict[str, Any]:
+    hit_cases = [
+        ("git", "rev-parse", "HEAD"),
+        ("sh", "-c", "git rev-parse HEAD"),
+        ("sh", "-c", "git ls-files | grep -F src"),
+    ]
+    unsupported_cases = [
+        ("go", "test", "./..."),
+        ("git", "--version"),
+        ("which", "python3"),
+        ("rg", "--files"),
+        ("file", "README.md"),
+        ("whoami",),
+        ("id",),
+        ("sh", "-c", "go test ./..."),
+        ("sh", "-c", "rg --files | head -n 5"),
+        ("sh", "-c", "git ls-files | python3 -c pass"),
+    ]
+    results: list[dict[str, Any]] = []
+    safe = True
+    for argv in hit_cases:
+        result = run_case(api, repo, Case("runtime_policy_hit", "runtime_policy", argv), env)
+        passed = result["hot"]["hit"] and result["mismatch"] is None
+        safe = safe and passed
+        results.append(
+            {
+                "argv": list(argv),
+                "expected": "hit",
+                "decision": result["hot"].get("decision", 1 if result["hot"]["hit"] else None),
+                "passed": passed,
+            }
+        )
+    for argv in unsupported_cases:
+        hot = api.try_replay(repo, argv, env)
+        passed = not hot["hit"] and hot.get("decision") == -1
+        safe = safe and passed
+        results.append(
+            {
+                "argv": list(argv),
+                "expected": "unsupported",
+                "decision": hot.get("decision"),
+                "passed": passed,
+            }
+        )
+    mismatched_env = dict(env)
+    mismatched_env["PATH"] = "/runtime/policy/mismatch"
+    hot = api.try_replay(repo, ("git", "rev-parse", "HEAD"), mismatched_env)
+    passed = not hot["hit"] and hot.get("decision") == 0
+    safe = safe and passed
+    results.append(
+        {
+            "argv": ["git", "rev-parse", "HEAD"],
+            "expected": "eligible_miss",
+            "decision": hot.get("decision"),
+            "passed": passed,
+        }
+    )
+    return {"safe": safe, "cases": results}
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -647,12 +878,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- generated cases: `{report['cases']}`",
         f"- hot hits: `{report['hot_hits']}`",
         f"- safe misses: `{report['safe_misses']}`",
+        f"- unsupported decisions: `{report['unsupported']}`",
+        f"- eligible cold/stale misses: `{report['eligible_misses']}`",
         f"- mismatches: `{report['mismatches']}`",
         f"- must-miss hits: `{report['must_miss_hits']}`",
         f"- compared native commands: `{report['native_compared']}`",
         f"- estimated native avoided on hits: `{report['estimated_native_avoided_ms']}` ms",
         f"- measured hot wall on hits: `{report['measured_hot_hit_wall_ms']}` ms",
         f"- Codex user-shell regression safe: `{report['codex_user_shell_regression']['safe']}`",
+        f"- runtime policy regression safe: `{report['runtime_policy_regression']['safe']}`",
         f"- invalidation probes safe: `{report['invalidation_safe']}`",
         "",
         "## Latency",
@@ -662,6 +896,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     for label, values in [
         ("native_us_compared", report["native_us"]),
+        ("native_us_matching_hits", report["native_hit_us"]),
         ("hot_us_all", report["hot_us_all"]),
         ("hot_us_hits", report["hot_us_hits"]),
         ("hot_us_misses", report["hot_us_misses"]),
@@ -669,10 +904,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"| {label} | {values.get('count', 0)} | {values.get('avg', 0)} | {values.get('p50', 0)} | {values.get('p95', 0)} | {values.get('p99', 0)} | {values.get('max', 0)} |"
         )
-    lines.extend(["", "## Buckets", "", "| bucket | cases | hits | misses | mismatches | must-miss hits | hot p95 us | native p95 us |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"])
+    lines.extend(["", "## Buckets", "", "| bucket | cases | hits | misses | unsupported | mismatches | hit p95 us | miss p95 us | matching native p95 us |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"])
     for bucket, data in sorted(report["by_bucket"].items()):
         lines.append(
-            f"| {bucket} | {data['cases']} | {data['hits']} | {data['misses']} | {data['mismatches']} | {data['must_miss_hits']} | {data['hot_us'].get('p95', 0)} | {data['native_us'].get('p95', 0)} |"
+            f"| {bucket} | {data['cases']} | {data['hits']} | {data['misses']} | {data['unsupported']} | {data['mismatches']} | {data['hit_us'].get('p95', 0)} | {data['miss_us'].get('p95', 0)} | {data['native_hit_us'].get('p95', 0)} |"
         )
     lines.extend(["", "## Codex User-Shell Regression", ""])
     lines.append("```json")
@@ -701,6 +936,7 @@ def main() -> int:
     parser.add_argument("squire_bin", nargs="?")
     parser.add_argument("--cases", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20260702)
+    parser.add_argument("--buckets", help="comma-separated generated bucket names")
     parser.add_argument("--json-out")
     parser.add_argument("--md-out")
     parser.add_argument("--keep-tmp", action="store_true")
@@ -709,9 +945,9 @@ def main() -> int:
         raise ValueError("--cases must be positive")
     os.environ.setdefault("TMPDIR", default_tmp_dir())
 
-    squire = resolve_squire(args.squire_bin)
     work = Path(tempfile.mkdtemp(prefix="squire-hot-api-fuzz-work.", dir=os.environ.get("TMPDIR") or default_tmp_dir()))
-    lib = work / ("libsquire_hot.dylib" if os.uname().sysname == "Darwin" else "libsquire_hot.so")
+    squire = resolve_squire(args.squire_bin, work)
+    lib = work / ("libsquire_runtime.dylib" if os.uname().sysname == "Darwin" else "libsquire_runtime.so")
     compile_hot_api(lib)
     repo = make_repo(args.seed)
     env = os.environ.copy()
@@ -722,7 +958,13 @@ def main() -> int:
 
     api = HotAPI(lib)
     codex_user_shell_regression = run_codex_user_shell_regression(api, repo, env)
-    cases = generate_cases(args.seed, args.cases)
+    runtime_policy_regression = run_runtime_policy_regression(api, repo, env)
+    selected_buckets = None
+    if args.buckets:
+        selected_buckets = [value.strip() for value in args.buckets.split(",") if value.strip()]
+        if not selected_buckets:
+            raise ValueError("--buckets requires at least one bucket")
+    cases = generate_cases(args.seed, args.cases, selected_buckets)
     summary: dict[str, Any] = {"by_bucket": {}}
     mismatch_examples: list[dict[str, Any]] = []
     miss_examples: list[dict[str, Any]] = []
@@ -731,6 +973,7 @@ def main() -> int:
     hot_us_hits: list[float] = []
     hot_us_misses: list[float] = []
     native_us: list[float] = []
+    native_hit_us: list[float] = []
     estimated_native_avoided_ms = 0.0
     measured_hot_hit_wall_ms = 0.0
     hot_hits = 0
@@ -738,6 +981,8 @@ def main() -> int:
     native_compared = 0
     mismatches = 0
     must_miss_hits = 0
+    unsupported = 0
+    eligible_misses = 0
 
     for case in cases:
         result = run_case(api, repo, case, env)
@@ -754,15 +999,25 @@ def main() -> int:
         if hot["hit"]:
             hot_hits += 1
             bucket["hits"] += 1
+            bucket["hit_us"].append(hot["elapsed_us"])
             hot_us_hits.append(hot["elapsed_us"])
             measured_hot_hit_wall_ms += hot["elapsed_us"] / 1000.0
             if native is not None:
                 estimated_native_avoided_ms += native["elapsed_us"] / 1000.0
+                native_hit_us.append(native["elapsed_us"])
+                bucket["native_hit_us"].append(native["elapsed_us"])
             if len(hit_examples) < 20:
                 hit_examples.append({"bucket": case.bucket, "argv": list(case.argv), "hot_us": round(hot["elapsed_us"], 3)})
         else:
             safe_misses += 1
             bucket["misses"] += 1
+            bucket["miss_us"].append(hot["elapsed_us"])
+            if hot.get("decision") == -1:
+                unsupported += 1
+                bucket["unsupported"] += 1
+            else:
+                eligible_misses += 1
+                bucket["eligible_misses"] += 1
             hot_us_misses.append(hot["elapsed_us"])
             if len(miss_examples) < 40:
                 miss_examples.append({"bucket": case.bucket, "argv": list(case.argv), "must_miss": case.must_miss})
@@ -794,12 +1049,22 @@ def main() -> int:
         by_bucket[bucket] = {
             key: value
             for key, value in data.items()
-            if key not in {"native_us", "hot_us"}
+            if key not in {"native_us", "native_hit_us", "hot_us", "hit_us", "miss_us"}
         }
         by_bucket[bucket]["native_us"] = stats(data["native_us"])
+        by_bucket[bucket]["native_hit_us"] = stats(data["native_hit_us"])
         by_bucket[bucket]["hot_us"] = stats(data["hot_us"])
+        by_bucket[bucket]["hit_us"] = stats(data["hit_us"])
+        by_bucket[bucket]["miss_us"] = stats(data["miss_us"])
 
-    status = "pass" if mismatches == 0 and invalidation_safe and codex_user_shell_regression["safe"] else "fail"
+    status = (
+        "pass"
+        if mismatches == 0
+        and invalidation_safe
+        and codex_user_shell_regression["safe"]
+        and runtime_policy_regression["safe"]
+        else "fail"
+    )
     report = {
         "status": status,
         "seed": args.seed,
@@ -810,6 +1075,8 @@ def main() -> int:
         "warm_file_replay_enabled": True,
         "hot_hits": hot_hits,
         "safe_misses": safe_misses,
+        "unsupported": unsupported,
+        "eligible_misses": eligible_misses,
         "native_compared": native_compared,
         "mismatches": mismatches,
         "must_miss_hits": must_miss_hits,
@@ -817,6 +1084,7 @@ def main() -> int:
         "measured_hot_hit_wall_ms": round(measured_hot_hit_wall_ms, 3),
         "net_hit_saved_ms": round(estimated_native_avoided_ms - measured_hot_hit_wall_ms, 3),
         "native_us": stats(native_us),
+        "native_hit_us": stats(native_hit_us),
         "hot_us_all": stats(hot_us_all),
         "hot_us_hits": stats(hot_us_hits),
         "hot_us_misses": stats(hot_us_misses),
@@ -824,6 +1092,7 @@ def main() -> int:
         "invalidation_safe": invalidation_safe,
         "invalidation_probes": invalidation_probes,
         "codex_user_shell_regression": codex_user_shell_regression,
+        "runtime_policy_regression": runtime_policy_regression,
         "hit_examples": hit_examples,
         "miss_examples": miss_examples,
         "mismatch_examples": mismatch_examples,

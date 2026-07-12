@@ -65,7 +65,6 @@ func ProofGatedReplayCandidates() []string {
 		"git ls-files",
 		"git log -1 --format=%H%n%s",
 		"git diff / git diff --stat / git diff -- <path>",
-		"rg --files",
 		"cat <bounded workspace source/config file>",
 		"sed -n <bounded-range>p <bounded workspace source/config file>",
 		"head -n <bounded-lines> <bounded workspace source/config file>",

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
@@ -10,10 +9,19 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
 
-static HOT_LIBRARY: OnceLock<Option<SquireHotLibrary>> = OnceLock::new();
-static AUTO_WARMED_REPOS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+const RUNTIME_ABI_VERSION: u32 = 1;
+const RUNTIME_HIT: c_int = 1;
+const RUNTIME_MISS: c_int = 0;
+#[cfg(unix)]
 const RTLD_NOW: c_int = 2;
+
+static RUNTIME_LIBRARY: OnceLock<Option<SquireRuntimeLibrary>> = OnceLock::new();
+static PREPARATION_REQUESTS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+const PREPARATION_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[link(name = "dl")]
@@ -23,7 +31,7 @@ unsafe extern "C" {
     fn dlclose(handle: *mut c_void) -> c_int;
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
@@ -31,7 +39,7 @@ unsafe extern "C" {
 }
 
 #[repr(C)]
-struct SquireHotResultFFI {
+struct SquireRuntimeResultFFI {
     handle: *mut c_void,
     stdout_data: *const u8,
     stdout_len: u32,
@@ -41,31 +49,35 @@ struct SquireHotResultFFI {
     native_wall_ms: u64,
 }
 
-type SquireHotTryReplayCommand = unsafe extern "C" fn(
+type SquireRuntimeABIVersion = unsafe extern "C" fn() -> u32;
+type SquireRuntimeTryExecute = unsafe extern "C" fn(
     cwd: *const c_char,
     argc: c_int,
     argv: *const *const c_char,
     envc: c_int,
     env: *const *const c_char,
-    out: *mut SquireHotResultFFI,
+    out: *mut SquireRuntimeResultFFI,
 ) -> c_int;
-type SquireHotRecordReplay = unsafe extern "C" fn(result: *mut SquireHotResultFFI);
-type SquireHotRelease = unsafe extern "C" fn(result: *mut SquireHotResultFFI);
+type SquireRuntimeRecordHit = unsafe extern "C" fn(result: *mut SquireRuntimeResultFFI);
+type SquireRuntimeRelease = unsafe extern "C" fn(result: *mut SquireRuntimeResultFFI);
 
-struct SquireHotLibrary {
+struct SquireRuntimeLibrary {
     handle: *mut c_void,
-    try_replay_command: SquireHotTryReplayCommand,
-    record_replay: SquireHotRecordReplay,
-    release: SquireHotRelease,
+    try_execute: SquireRuntimeTryExecute,
+    record_hit: SquireRuntimeRecordHit,
+    release: SquireRuntimeRelease,
 }
 
-unsafe impl Send for SquireHotLibrary {}
-unsafe impl Sync for SquireHotLibrary {}
+unsafe impl Send for SquireRuntimeLibrary {}
+unsafe impl Sync for SquireRuntimeLibrary {}
 
-impl Drop for SquireHotLibrary {
+impl Drop for SquireRuntimeLibrary {
     fn drop(&mut self) {
-        unsafe {
-            dlclose(self.handle);
+        #[cfg(unix)]
+        if !self.handle.is_null() {
+            unsafe {
+                dlclose(self.handle);
+            }
         }
     }
 }
@@ -76,65 +88,49 @@ pub struct ReplayOutput {
     pub exit_code: i32,
 }
 
+/// Attempts a behavior-preserving Squire execution. None always means that
+/// Codex must continue through its original native execution path.
 pub fn try_replay(
     command: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Option<ReplayOutput> {
-    if !bridge_enabled() {
-        trace("disabled");
+    if !bridge_enabled() || command.is_empty() {
         return None;
     }
-    trace(&format!(
-        "called cwd={} argc={} argv={}",
-        cwd.display(),
-        command.len(),
-        shell_join(command)
-    ));
-    if !command_may_hit(command) {
-        trace("skip obvious non-candidate");
-        return None;
-    }
-    let Some(library) = HOT_LIBRARY.get_or_init(load_hot_library).as_ref() else {
-        trace("hot library unavailable");
+    let Some(library) = RUNTIME_LIBRARY.get_or_init(load_runtime_library).as_ref() else {
+        trace("runtime unavailable");
         return None;
     };
-    if let Some(output) = try_replay_with_library(library, command, cwd, env) {
-        return Some(output);
+    let (decision, output) = try_execute_with_library(library, command, cwd, env);
+    if decision == RUNTIME_MISS {
+        request_preparation(cwd);
     }
-    if auto_warm_once(cwd) {
-        trace("retry after auto warm");
-        return try_replay_with_library(library, command, cwd, env);
-    }
-    None
+    output
 }
 
-fn try_replay_with_library(
-    library: &SquireHotLibrary,
+fn try_execute_with_library(
+    library: &SquireRuntimeLibrary,
     command: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
-) -> Option<ReplayOutput> {
-    let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok()?;
-    let argv_cstrings = command
+) -> (c_int, Option<ReplayOutput>) {
+    let Some(cwd) = CString::new(cwd.to_string_lossy().as_bytes()).ok() else {
+        return (RUNTIME_MISS, None);
+    };
+    let Some(argv) = cstring_list(command.iter().map(String::as_str)) else {
+        return (RUNTIME_MISS, None);
+    };
+    let env_values = env
         .iter()
-        .map(|arg| CString::new(arg.as_bytes()))
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    let argv_ptrs = argv_cstrings
-        .iter()
-        .map(|arg| arg.as_ptr())
+        .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>();
-    let env_cstrings = env
-        .iter()
-        .map(|(key, value)| CString::new(format!("{key}={value}")))
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    let env_ptrs = env_cstrings
-        .iter()
-        .map(|entry| entry.as_ptr())
-        .collect::<Vec<_>>();
-    let mut result = SquireHotResultFFI {
+    let Some(env) = cstring_list(env_values.iter().map(String::as_str)) else {
+        return (RUNTIME_MISS, None);
+    };
+    let argv_ptrs = argv.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+    let env_ptrs = env.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+    let mut result = SquireRuntimeResultFFI {
         handle: std::ptr::null_mut(),
         stdout_data: std::ptr::null(),
         stdout_len: 0,
@@ -143,8 +139,8 @@ fn try_replay_with_library(
         exit_code: 0,
         native_wall_ms: 0,
     };
-    let hit = unsafe {
-        (library.try_replay_command)(
+    let decision = unsafe {
+        (library.try_execute)(
             cwd.as_ptr(),
             argv_ptrs.len() as c_int,
             argv_ptrs.as_ptr(),
@@ -153,95 +149,184 @@ fn try_replay_with_library(
             &mut result,
         )
     };
-    if hit != 1 || result.handle.is_null() {
-        trace(&format!(
-            "miss code={hit} handle={}",
-            !result.handle.is_null()
-        ));
-        return None;
+    if decision != RUNTIME_HIT || result.handle.is_null() {
+        return (decision, None);
     }
-    let stdout = ffi_bytes(result.stdout_data, result.stdout_len)?;
-    let stderr = ffi_bytes(result.stderr_data, result.stderr_len)?;
+    let Some(stdout) = ffi_bytes(result.stdout_data, result.stdout_len) else {
+        unsafe { (library.release)(&mut result) };
+        return (RUNTIME_MISS, None);
+    };
+    let Some(stderr) = ffi_bytes(result.stderr_data, result.stderr_len) else {
+        unsafe { (library.release)(&mut result) };
+        return (RUNTIME_MISS, None);
+    };
     let exit_code = result.exit_code;
     unsafe {
-        (library.record_replay)(&mut result);
+        (library.record_hit)(&mut result);
         (library.release)(&mut result);
     }
-    trace("direct hot replay hit");
-    Some(ReplayOutput {
-        stdout,
-        stderr,
-        exit_code,
-    })
+    trace("hit");
+    (
+        decision,
+        Some(ReplayOutput {
+            stdout,
+            stderr,
+            exit_code,
+        }),
+    )
 }
 
-fn auto_warm_once(cwd: &Path) -> bool {
-    if !auto_warm_enabled() {
-        return false;
+fn cstring_list<'a>(values: impl Iterator<Item = &'a str>) -> Option<Vec<CString>> {
+    values
+        .map(|value| CString::new(value.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+fn request_preparation(cwd: &Path) {
+    if !auto_prepare_enabled() {
+        return;
     }
-    let Some(git_dir) = discover_git_dir(cwd) else {
-        trace("auto warm skipped: no git dir");
-        return false;
+    let Some(workspace) = discover_workspace(cwd) else {
+        return;
     };
-    let repo_key = git_dir.clone();
-    let warmed = AUTO_WARMED_REPOS.get_or_init(|| Mutex::new(HashSet::new()));
-    {
-        let Ok(mut guard) = warmed.lock() else {
-            return false;
-        };
-        if !guard.insert(repo_key) {
-            trace("auto warm skipped: repo already attempted");
-            return false;
-        }
-    }
     let Some(squire) = find_squire_binary() else {
-        trace("auto warm skipped: squire binary unavailable");
-        return false;
+        return;
     };
-    trace(&format!("auto warm start {}", cwd.display()));
-    let status = Command::new(squire)
-        .arg("kernel")
-        .arg("warm")
+    let requests = PREPARATION_REQUESTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut requests) = requests.lock() else {
+        return;
+    };
+    if !mark_preparation_request(&mut requests, workspace.clone(), Instant::now()) {
+        return;
+    }
+    drop(requests);
+    let child = Command::new(squire)
+        .arg("prepare")
         .arg("--short")
-        .current_dir(cwd)
+        .current_dir(&workspace)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    match status {
-        Ok(status) if status.success() => {
-            trace("auto warm ok");
-            true
+        .spawn();
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        trace("preparation requested");
+    } else if let Ok(mut requests) = PREPARATION_REQUESTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        requests.remove(&workspace);
+    }
+}
+
+fn mark_preparation_request(
+    requests: &mut HashMap<PathBuf, Instant>,
+    workspace: PathBuf,
+    now: Instant,
+) -> bool {
+    if requests
+        .get(&workspace)
+        .is_some_and(|last| now.saturating_duration_since(*last) < PREPARATION_RETRY_AFTER)
+    {
+        return false;
+    }
+    requests.insert(workspace, now);
+    true
+}
+
+fn discover_workspace(cwd: &Path) -> Option<PathBuf> {
+    let mut directory = std::fs::canonicalize(cwd)
+        .ok()
+        .unwrap_or_else(|| cwd.to_path_buf());
+    loop {
+        if directory.join(".git").exists() {
+            return Some(directory);
         }
-        Ok(status) => {
-            trace(&format!("auto warm failed status={status}"));
-            false
-        }
-        Err(err) => {
-            trace(&format!("auto warm failed err={err}"));
-            false
+        if !directory.pop() {
+            return None;
         }
     }
 }
 
-fn auto_warm_enabled() -> bool {
-    !matches!(
-        std::env::var("SQUIRE_CODEX_AUTO_WARM")
-            .ok()
-            .map(|value| value.to_ascii_lowercase()),
-        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off")
-    )
+fn auto_prepare_enabled() -> bool {
+    !is_false_env("SQUIRE_AUTO_PREPARE") && !is_false_env("SQUIRE_CODEX_AUTO_WARM")
+}
+
+fn load_runtime_library() -> Option<SquireRuntimeLibrary> {
+    for candidate in runtime_library_candidates() {
+        if let Some(library) = unsafe { load_runtime_library_at(&candidate) } {
+            trace(&format!("runtime loaded {}", candidate.display()));
+            return Some(library);
+        }
+    }
+    None
+}
+
+fn runtime_library_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for key in [
+        "SQUIRE_CODEX_RUNTIME_LIB",
+        "SQUIRE_RUNTIME_LIB",
+        "SQUIRE_CODEX_HOT_LIB",
+        "SQUIRE_HOT_LIB",
+    ] {
+        match std::env::var(key) {
+            Ok(path) if !path.is_empty() => {
+                push_candidate(&mut candidates, PathBuf::from(path));
+            }
+            _ => {}
+        }
+    }
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        push_runtime_candidates(&mut candidates, &parent);
+    }
+    if let Some(parent) =
+        find_squire_binary().and_then(|squire| squire.parent().map(Path::to_path_buf))
+    {
+        push_runtime_candidates(&mut candidates, &parent);
+    }
+    candidates
+}
+
+fn push_runtime_candidates(candidates: &mut Vec<PathBuf>, directory: &Path) {
+    for name in runtime_library_names() {
+        push_candidate(candidates, directory.join(name));
+        push_candidate(candidates, directory.join("lib").join(name));
+    }
+}
+
+fn runtime_library_names() -> [&'static str; 2] {
+    if cfg!(target_os = "macos") {
+        ["libsquire_runtime.dylib", "libsquire_hot.dylib"]
+    } else if cfg!(target_os = "windows") {
+        ["squire_runtime.dll", "squire_hot.dll"]
+    } else {
+        ["libsquire_runtime.so", "libsquire_hot.so"]
+    }
+}
+
+fn push_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.contains(&path) {
+        candidates.push(path);
+    }
 }
 
 fn find_squire_binary() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("SQUIRE_CODEX_SQUIRE") {
-        if !path.is_empty() {
-            let candidate = PathBuf::from(path);
-            if candidate.is_file() {
-                return Some(candidate);
+    match std::env::var("SQUIRE_CODEX_SQUIRE") {
+        Ok(path) if !path.is_empty() => {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return Some(path);
             }
         }
+        _ => {}
     }
     find_on_path(if cfg!(target_os = "windows") {
         "squire.exe"
@@ -250,335 +335,75 @@ fn find_squire_binary() -> Option<PathBuf> {
     })
 }
 
-fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
-    let mut dir = std::fs::canonicalize(cwd)
-        .ok()
-        .or_else(|| Some(cwd.to_path_buf()))?;
-    loop {
-        let dot_git = dir.join(".git");
-        if dot_git.is_dir() {
-            return Some(dot_git);
-        }
-        if dot_git.is_file() {
-            if let Some(path) = parse_gitdir_file(&dot_git, &dir) {
-                return Some(path);
-            }
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-fn parse_gitdir_file(path: &Path, worktree_dir: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let raw = content.strip_prefix("gitdir:")?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let candidate = PathBuf::from(raw);
-    let path = if candidate.is_absolute() {
-        candidate
-    } else {
-        worktree_dir.join(candidate)
-    };
-    Some(std::fs::canonicalize(&path).unwrap_or(path))
-}
-
-fn shell_join(command: &[String]) -> String {
-    command
-        .iter()
-        .map(|arg| {
-            if arg
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
-            {
-                arg.clone()
-            } else {
-                format!("{arg:?}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn command_may_hit(command: &[String]) -> bool {
-    let Some(program) = command.first() else {
-        return false;
-    };
-    if is_shell_name(program) {
-        if let Some(script) = shell_script_arg(command) {
-            return shell_script_may_hit(script);
-        }
-    }
-    direct_command_may_hit(command)
-}
-
-fn is_shell_name(program: &str) -> bool {
-    matches!(base_name_str(program), "sh" | "bash" | "zsh")
-}
-
-fn shell_script_arg(command: &[String]) -> Option<&str> {
-    let flag_index = command
-        .iter()
-        .position(|arg| matches!(arg.as_str(), "-c" | "-lc"))?;
-    command.get(flag_index + 1).map(String::as_str)
-}
-
-fn shell_script_may_hit(script: &str) -> bool {
-    let mut token = String::new();
-    for byte in script.bytes() {
-        if is_shell_word_byte(byte) {
-            token.push(byte as char);
-            if token.len() > 128 {
-                token.clear();
-            }
-            continue;
-        }
-        if !token.is_empty() {
-            if shell_token_may_hit(&token) {
-                return true;
-            }
-            token.clear();
-        }
-    }
-    !token.is_empty() && shell_token_may_hit(&token)
-}
-
-fn shell_token_may_hit(token: &str) -> bool {
-    if matches!(
-        token,
-        "if" | "then"
-            | "else"
-            | "elif"
-            | "fi"
-            | "for"
-            | "while"
-            | "until"
-            | "do"
-            | "done"
-            | "case"
-            | "esac"
-            | "in"
-            | "true"
-            | "false"
-    ) {
-        return false;
-    }
-    tool_may_hit(token)
-}
-
-fn direct_command_may_hit(command: &[String]) -> bool {
-    let Some(program) = command.first() else {
-        return false;
-    };
-    let tool = base_name_str(program);
-    if matches!(
-        tool,
-        "git"
-            | "cat"
-            | "sed"
-            | "head"
-            | "tail"
-            | "file"
-            | "grep"
-            | "rg"
-            | "ls"
-            | "which"
-            | "command"
-            | "printenv"
-            | "whoami"
-            | "uname"
-            | "id"
-            | "hostname"
-    ) {
-        return true;
-    }
-    is_version_probe(command)
-}
-
-fn is_version_probe(command: &[String]) -> bool {
-    let Some(program) = command.first() else {
-        return false;
-    };
-    if !matches!(
-        base_name_str(program),
-        "pip"
-            | "pip3"
-            | "python"
-            | "python3"
-            | "node"
-            | "npm"
-            | "pnpm"
-            | "yarn"
-            | "go"
-            | "cargo"
-            | "rustc"
-            | "make"
-    ) {
-        return false;
-    }
-    command.len() == 2 && matches!(command[1].as_str(), "--version" | "version")
-}
-
-fn is_shell_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
-}
-
-fn tool_may_hit(tool: &str) -> bool {
-    matches!(
-        base_name_str(tool),
-        "git"
-            | "cat"
-            | "sed"
-            | "head"
-            | "tail"
-            | "file"
-            | "grep"
-            | "rg"
-            | "ls"
-            | "which"
-            | "command"
-            | "printenv"
-            | "whoami"
-            | "uname"
-            | "id"
-            | "hostname"
-            | "pip"
-            | "pip3"
-            | "python"
-            | "python3"
-            | "node"
-            | "npm"
-            | "pnpm"
-            | "yarn"
-            | "go"
-            | "cargo"
-            | "rustc"
-            | "make"
-    )
-}
-
-fn base_name_str(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn ffi_bytes(ptr: *const u8, len: u32) -> Option<Vec<u8>> {
-    if len == 0 {
-        return Some(Vec::new());
-    }
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(ptr, len as usize).to_vec() })
-}
-
-fn load_hot_library() -> Option<SquireHotLibrary> {
-    for candidate in hot_library_candidates() {
-        if let Some(library) = unsafe { load_hot_library_at(&candidate) } {
-            trace(&format!(
-                "direct hot library loaded {}",
-                candidate.display()
-            ));
-            return Some(library);
-        }
-    }
-    None
-}
-
-fn hot_library_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for key in ["SQUIRE_CODEX_HOT_LIB", "SQUIRE_HOT_LIB"] {
-        if let Ok(path) = std::env::var(key) {
-            if !path.is_empty() {
-                push_candidate(&mut out, PathBuf::from(path));
-            }
-        }
-    }
-    if let Ok(squire) = std::env::var("SQUIRE_CODEX_SQUIRE") {
-        let path = PathBuf::from(squire);
-        if let Some(parent) = path.parent() {
-            push_candidate(&mut out, parent.join(hot_library_name()));
-            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            push_candidate(&mut out, parent.join(hot_library_name()));
-            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
-        }
-    }
-    if let Some(squire) = find_on_path(if cfg!(target_os = "windows") {
-        "squire.exe"
-    } else {
-        "squire"
-    }) {
-        if let Some(parent) = squire.parent() {
-            push_candidate(&mut out, parent.join(hot_library_name()));
-            push_candidate(&mut out, parent.join("lib").join(hot_library_name()));
-        }
-    }
-    out
-}
-
-fn hot_library_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "libsquire_hot.dylib"
-    } else if cfg!(target_os = "windows") {
-        "squire_hot.dll"
-    } else {
-        "libsquire_hot.so"
-    }
-}
-
-fn push_candidate(out: &mut Vec<PathBuf>, path: PathBuf) {
-    if !out.contains(&path) {
-        out.push(path);
-    }
-}
-
 fn find_on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(binary))
+        .map(|directory| directory.join(binary))
         .find(|candidate| candidate.is_file())
 }
 
-unsafe fn load_hot_library_at(path: &PathBuf) -> Option<SquireHotLibrary> {
+#[cfg(unix)]
+unsafe fn load_runtime_library_at(path: &Path) -> Option<SquireRuntimeLibrary> {
     let path = CString::new(path.to_string_lossy().as_bytes()).ok()?;
     let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW) };
     if handle.is_null() {
         return None;
     }
     unsafe fn symbol<T: Copy>(handle: *mut c_void, name: &[u8]) -> Option<T> {
-        let ptr = unsafe { dlsym(handle, name.as_ptr().cast()) };
-        if ptr.is_null() {
+        let pointer = unsafe { dlsym(handle, name.as_ptr().cast()) };
+        if pointer.is_null() {
             return None;
         }
-        Some(unsafe { std::mem::transmute_copy(&ptr) })
+        Some(unsafe { std::mem::transmute_copy(&pointer) })
     }
-    let try_replay_command = unsafe { symbol(handle, b"squire_hot_try_replay_command\0") };
-    let record_replay = unsafe { symbol(handle, b"squire_hot_record_replay\0") };
-    let release = unsafe { symbol(handle, b"squire_hot_release\0") };
-    let (Some(try_replay_command), Some(record_replay), Some(release)) =
-        (try_replay_command, record_replay, release)
-    else {
-        unsafe {
-            dlclose(handle);
-        }
+    let abi_version: Option<SquireRuntimeABIVersion> =
+        unsafe { symbol(handle, b"squire_runtime_abi_version\0") };
+    let try_execute = unsafe { symbol(handle, b"squire_runtime_try_execute\0") };
+    let record_hit = unsafe { symbol(handle, b"squire_runtime_record_hit\0") };
+    let release = unsafe { symbol(handle, b"squire_runtime_release\0") };
+    let Some(abi_version) = abi_version else {
+        unsafe { dlclose(handle) };
         return None;
     };
-    Some(SquireHotLibrary {
+    if unsafe { abi_version() } != RUNTIME_ABI_VERSION {
+        unsafe { dlclose(handle) };
+        return None;
+    }
+    let (Some(try_execute), Some(record_hit), Some(release)) = (try_execute, record_hit, release)
+    else {
+        unsafe { dlclose(handle) };
+        return None;
+    };
+    Some(SquireRuntimeLibrary {
         handle,
-        try_replay_command,
-        record_replay,
+        try_execute,
+        record_hit,
         release,
     })
 }
 
+#[cfg(not(unix))]
+unsafe fn load_runtime_library_at(_path: &Path) -> Option<SquireRuntimeLibrary> {
+    None
+}
+
+fn ffi_bytes(pointer: *const u8, length: u32) -> Option<Vec<u8>> {
+    if length == 0 {
+        return Some(Vec::new());
+    }
+    if pointer.is_null() {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(pointer, length as usize).to_vec() })
+}
+
 fn bridge_enabled() -> bool {
-    !matches!(
-        std::env::var("SQUIRE_CODEX_BRIDGE")
+    !is_false_env("SQUIRE_CODEX_BRIDGE")
+}
+
+fn is_false_env(key: &str) -> bool {
+    matches!(
+        std::env::var(key)
             .ok()
             .map(|value| value.to_ascii_lowercase()),
         Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off")
@@ -590,17 +415,7 @@ fn trace(message: &str) {
         std::env::var("SQUIRE_CODEX_BRIDGE_TRACE").ok().as_deref(),
         Some("1") | Some("true") | Some("yes")
     ) {
-        eprintln!("squire-codex bridge: {message}");
-        let path = std::env::var("SQUIRE_CODEX_BRIDGE_TRACE_FILE")
-            .unwrap_or_else(|_| "/tmp/squire-codex-bridge-trace.log".to_string());
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "squire-codex bridge: {message}");
-        }
+        eprintln!("squire runtime: {message}");
     }
 }
 
@@ -608,104 +423,89 @@ fn trace(message: &str) {
 mod tests {
     use super::*;
 
-    fn argv(args: &[&str]) -> Vec<String> {
-        args.iter().map(|arg| (*arg).to_string()).collect()
-    }
-
-    unsafe extern "C" fn fake_try_replay_command(
+    unsafe extern "C" fn fake_try_execute(
         _cwd: *const c_char,
-        argc: c_int,
+        _argc: c_int,
         _argv: *const *const c_char,
         _envc: c_int,
         _env: *const *const c_char,
-        out: *mut SquireHotResultFFI,
+        out: *mut SquireRuntimeResultFFI,
     ) -> c_int {
-        assert_eq!(argc, 3);
-        static STDOUT: &[u8] = b"";
-        static STDERR: &[u8] = b"";
+        static STDOUT: &[u8] = b"output\n";
         unsafe {
-            *out = SquireHotResultFFI {
-                handle: std::ptr::dangling_mut::<c_void>(),
-                stdout_data: STDOUT.as_ptr(),
-                stdout_len: STDOUT.len() as u32,
-                stderr_data: STDERR.as_ptr(),
-                stderr_len: STDERR.len() as u32,
-                exit_code: 17,
-                native_wall_ms: 0,
-            };
+            (*out).handle = std::ptr::dangling_mut::<c_void>();
+            (*out).stdout_data = STDOUT.as_ptr();
+            (*out).stdout_len = STDOUT.len() as u32;
+            (*out).exit_code = 7;
         }
-        1
+        RUNTIME_HIT
     }
 
-    unsafe extern "C" fn fake_record_replay(_result: *mut SquireHotResultFFI) {}
+    unsafe extern "C" fn fake_record_hit(_result: *mut SquireRuntimeResultFFI) {}
 
-    unsafe extern "C" fn fake_release(result: *mut SquireHotResultFFI) {
-        unsafe {
-            (*result).exit_code = 0;
-            (*result).stdout_data = std::ptr::null();
-            (*result).stderr_data = std::ptr::null();
-            (*result).handle = std::ptr::null_mut();
-        }
+    unsafe extern "C" fn fake_release(result: *mut SquireRuntimeResultFFI) {
+        unsafe { *result = std::mem::zeroed() };
     }
 
     #[test]
-    fn replay_copies_exit_code_before_release() {
-        let library = SquireHotLibrary {
+    fn result_is_copied_before_release() {
+        let library = SquireRuntimeLibrary {
             handle: std::ptr::null_mut(),
-            try_replay_command: fake_try_replay_command,
-            record_replay: fake_record_replay,
+            try_execute: fake_try_execute,
+            record_hit: fake_record_hit,
             release: fake_release,
         };
-        let command = argv(&["sh", "-c", "grep -F missing file.txt"]);
-        let env = HashMap::new();
-
-        let output = try_replay_with_library(&library, &command, Path::new("."), &env)
-            .expect("fake replay should hit");
-
-        assert_eq!(output.exit_code, 17);
-        std::mem::forget(library);
+        let command = vec![
+            "git".to_string(),
+            "rev-parse".to_string(),
+            "HEAD".to_string(),
+        ];
+        let (decision, output) =
+            try_execute_with_library(&library, &command, Path::new("/tmp"), &HashMap::new());
+        let output = output.expect("hit");
+        assert_eq!(decision, RUNTIME_HIT);
+        assert_eq!(output.stdout, b"output\n");
+        assert_eq!(output.stderr, b"");
+        assert_eq!(output.exit_code, 7);
     }
 
     #[test]
-    fn command_gate_allows_known_hit_shapes() {
-        assert!(command_may_hit(&argv(&["git", "rev-parse", "HEAD"])));
-        assert!(command_may_hit(&argv(&[
-            "sh",
-            "-c",
-            "git branch --show-current && git rev-parse HEAD",
-        ])));
-        assert!(command_may_hit(&argv(&[
-            "sh",
-            "-c",
-            "git ls-files src/flask | wc -l",
-        ])));
-        assert!(command_may_hit(&argv(&[
-            "sh",
-            "-c",
-            "sed -n '1,80p' src/flask/app.py | tail -n 20",
-        ])));
-        assert!(command_may_hit(&argv(&[
-            "/bin/zsh",
-            "-lc",
-            "rg -F token src/flask/app.py | head -n 1",
-        ])));
+    fn discovers_nearest_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "squire-runtime-workspace-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(root.join(".git")).expect("git directory");
+        std::fs::create_dir_all(&nested).expect("nested directory");
+        let discovered = discover_workspace(&nested).expect("workspace");
+        assert_eq!(
+            discovered,
+            std::fs::canonicalize(&root).expect("canonical root")
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
-    fn command_gate_skips_obvious_non_candidates() {
-        assert!(!command_may_hit(&argv(&["nl", "-ba", "src/flask/app.py"])));
-        assert!(!command_may_hit(&argv(&[
-            "sh",
-            "-c",
-            "nl -ba src/flask/app.py",
-        ])));
-        assert!(!command_may_hit(&argv(
-            &["sh", "-c", "echo hello | wc -c",]
-        )));
-        assert!(!command_may_hit(&argv(&[
-            "python3",
-            "-c",
-            "print('fallback')",
-        ])));
+    fn preparation_requests_are_deduplicated_then_retryable() {
+        let workspace = PathBuf::from("/tmp/squire-preparation-workspace");
+        let start = Instant::now();
+        let mut requests = HashMap::new();
+        assert!(mark_preparation_request(
+            &mut requests,
+            workspace.clone(),
+            start
+        ));
+        assert!(!mark_preparation_request(
+            &mut requests,
+            workspace.clone(),
+            start + Duration::from_secs(1)
+        ));
+        assert!(mark_preparation_request(
+            &mut requests,
+            workspace,
+            start + PREPARATION_RETRY_AFTER
+        ));
     }
 }

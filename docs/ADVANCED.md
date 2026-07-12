@@ -1,189 +1,179 @@
-# Squire Advanced Notes
+# Squire Architecture
 
-This document keeps implementation detail out of the top-level README.
+Squire separates command interception, proof evaluation, preparation, and
+native execution so the fast path stays small and adapters stay replaceable.
 
-## Architecture Levels
+## Runtime Flow
 
-Level 0, Observe:
-
-- Observe repo, file, and process state.
-- Record evidence quality.
-- No acceleration required.
-
-Level 1, Prepare:
-
-- Maintain repo and world state.
-- Precompute safe local metadata, hashes, and bounded read-only outputs.
-- Track invalidation epochs.
-- Do not alter command execution.
-
-Level 2, Transparent Fast Path:
-
-- Serve exact stdout, stderr, and exit code only for allowlisted or
-  proof-gated read-only operations.
-- Require a local invalidation proof.
-- Fall back to native execution on every miss or unsafe operation.
-
-## Foreground Product Path
-
-`squire-codex` is the normal user path and is equivalent to `squire codex`.
-It is a backend router:
-
-- On macOS, use the Linux microVM backend when it is already configured.
-- If the VM is unavailable or fails before Codex takes over, fall back to the
-  host scoped session.
-- On Linux, use the local scoped session path directly.
-- Do not stop the user to provision VM assets.
-
-The model-visible command surface stays unchanged. Codex still emits ordinary
-commands such as `git status`, `cat package.json`, and `python --version`.
-
-## Scoped Sessions
-
-`squire session -- <command>` is an advanced surface for wrapping an ordinary
-shell or agent command.
-
-The session:
-
-- starts or reuses the resident maintainer;
-- warms local proofs unless disabled;
-- uses scoped preload when the launcher supports it;
-- uses session-local mmap helpers for hardened launchers when needed;
-- never installs global command shims;
-- falls through to native execution on every unsupported or unsafe path.
-
-On macOS, SIP-protected launchers such as `/bin/sh`, `/bin/zsh`, `/bin/bash`,
-and `/usr/bin/env` ignore `DYLD_INSERT_LIBRARIES`, so they are preload-unsafe.
-
-## VM Mode
-
-`squire vm session -- <command>` is an advanced Linux-isolated execution mode.
-
-On macOS it uses the optional `squire-vm-darwin` helper built with
-Virtualization.framework. The helper shares the host workspace and Squire store
-with a Linux guest and sends the already-chosen command to a guest agent.
-
-VM mode is useful for release testing and Linux-compatible projects, but the
-default user command remains:
-
-```sh
-squire-codex
+```text
+Codex command request
+        |
+        v
+thin Squire-Codex hook
+        |
+        v
+runtime ABI 1 (cwd + argv + env)
+        |
+        +-- HIT --------> exact Codex result
+        |
+        +-- MISS -------+--> original Codex execution path
+        |
+        +-- UNSUPPORTED-+
 ```
 
-## Hot Replay Path
+The hook runs before Codex wraps a command in its sandbox launcher. That gives
+Squire the original command while leaving native misses under Codex's existing
+approval, sandbox, timeout, cancellation, streaming, and process management.
 
-The foreground hot path checks a daemon-published mmap snapshot before loading
-the full ledger or opening daemon sockets.
+Four upstream execution surfaces currently need small hooks because Codex has
+separate classic exec, shell runtime, user-shell, and unified-exec paths. All
+policy, mmap, proof, preparation, and library-loading behavior lives in the
+vendored Squire modules, whose source of truth is this repository.
 
-A replay requires:
+## Components
 
-- exact normalized operation key;
-- exact cwd/repo proof inputs;
-- unchanged invalidation epoch;
-- allowlisted or proof-gated operator policy;
-- exact stdout/stderr/exit-code bytes;
-- available native fallback.
+`squire` is the Go control plane:
 
-The mmap snapshot is a local owner-only file with fixed-size descriptors. It is
-not a literal operating-system bypass; native filesystem state remains
-authoritative.
-The cache can contain stale records; they are replayable only when these proof
-inputs match the current local world.
+- resolves repositories and Git common directories;
+- records native observations;
+- builds cryptographic proof inputs and invalidation epochs;
+- maintains bounded prepared state;
+- atomically publishes `hot_snapshot.bin`;
+- exposes `status`, `doctor`, `explain`, and background preparation.
 
-Git repo-summary replay has extra proof inputs because Git output can change
-without a source-file edit:
+`libsquire_runtime` is the C data plane:
 
-- cwd is part of the hot command key, so cwd-relative outputs such as
-  `git status --short` cannot cross directory boundaries;
-- Git config fingerprints include local, global, system, environment-provided,
-  and recursively included config files;
-- ignore proof includes workspace ignore files, `.git/info/exclude`, default
-  global Git ignore files, and configured `core.excludesFile` targets;
-- diff attribute proof includes workspace attributes, `.git/info/attributes`,
-  default global Git attributes files, and configured `core.attributesFile`
-  targets.
+- implements versioned runtime ABI 1;
+- rejects unsupported commands before snapshot discovery;
+- maps the prepared snapshot read-only;
+- recomputes the command's current proof;
+- copies exact result bytes into adapter-owned memory;
+- returns hit, miss, or unsupported.
 
-The regression suite intentionally mutates each of those external inputs after
-warming to confirm Squire falls back native or requires a fresh proof instead
-of serving stale bytes.
+`squire-codex` is the first agent adapter:
 
-## Background Maintainer
+- passes the command request into the runtime;
+- converts hits into native Codex result types;
+- asks `squire prepare` to start asynchronously after an eligible cold miss;
+- leaves every miss on the original Codex code path.
 
-The resident maintainer keeps local proofs warm and publishes hot snapshots.
-It may prewarm bounded read-only outputs during idle time, but it never changes
-the agent's command choice and never mutates workspace state.
+The agent-neutral Go runtime package defines the longer-term provider boundary.
+A provider may handle a request only when it can materialize complete stdout,
+stderr, and exit status. The initial provider is the validated local workspace;
+future providers can use the same exact-hit-or-native contract.
 
-Prepared outputs are split by eligibility:
+## Repository Lifecycle
 
-- replay eligible: exact Git metadata and proof-gated read-only observations;
-- read-image eligible: bounded safe workspace file bytes;
-- hash-only: tree indexes, project metadata fingerprints, PATH indexes,
-  ecosystem proof seeds, source symbol/import summaries, and process diagnostics.
+Repository identity is resolved from each command's cwd, not only the directory
+where the agent started. The registry keys workspaces by canonical Git storage
+root, so these requests share one prepared workspace:
 
-## Operator Sets
+- a command at the worktree root;
+- a command from any subdirectory;
+- an equivalent supported `git -C` request.
 
-Enabled fast paths:
+Different repositories in one Codex session remain isolated. Cold requests run
+natively immediately. Preparation requests are deduplicated per repository and
+do not run for unsupported commands.
 
-- `git rev-parse HEAD`
-- `git rev-parse --git-dir`
-- `git rev-parse --abbrev-ref HEAD`
-- `git rev-parse --show-toplevel`
-- `git rev-parse --is-inside-work-tree`
-- `git branch --show-current`
+## Snapshot And Proof
 
-Proof-gated replay candidates:
+The snapshot is an owner-only mmap file with a fixed header, fixed-size entry
+descriptors, exact proof epochs, and bounded payloads. Publication uses a new
+file plus atomic rename. Readers validate magic, version, sizes, offsets, and
+entry bounds before use.
 
-- `git ls-files` and safe path-filtered `git ls-files <path>`
-- `git log -1 --format=%H%n%s`
-- `git status --short`
-- `git status --porcelain`
-- supported `git diff` forms
-- `rg --files`
-- bounded safe `cat`, `sed -n`, `head`, `tail`, `grep -F`, and single-file `rg -F` workspace reads/searches
-- composed read-only filters including `head`, `tail`, `grep -F`, `wc -l`, and no-arg `sort`
-- common tool version probes
-- simple external PATH `which` and `command -v`
+Snapshot lookup is only an index operation. A matching record is still a miss
+unless the runtime can reproduce its current proof. Proof functions are
+command-specific:
 
-Native-only discovery:
+- metadata reads check current Git ref and configuration boundaries;
+- file reads hash current canonical file bytes and mode;
+- status and diff check the relevant index, tracked, untracked, config, ignore,
+  attributes, replacement-ref, and graft inputs;
+- environment probes compare their child environment;
+- compositions require a valid proof at every source node.
 
-- `git remote -v`
-- `git remote get-url origin`
-- recursive, regex, multi-path, or otherwise unbounded `rg` searches
+Environment-sensitive tools and filters require exact equality between the
+child environment and the preparation process, including unset versus empty
+values. Only narrow outputs with a command-specific proof, such as supported
+Git metadata, use a selective environment comparison.
 
-Never replay:
+The durable store can therefore be stale without creating stale hits. Epoch
+mismatch is invalidation.
 
-- validation/build/test commands;
-- edits and writing formatters;
-- mutating Git commands;
-- package installs/fetches;
-- sensitive reads, `.env`, shell aliases/functions, broad unknown shell, and
-  unknown binary reads.
+## Composition Engine
 
-## Production-Safe Levels 3-5
+The runtime parses a deliberately small shell grammar containing plain words,
+`|`, `&&`, `;`, grouping, and supported `/dev/null` redirection. It rejects
+expansion, globbing, command substitution, arbitrary redirection, background
+jobs, loops, functions, and unknown syntax.
 
-Level 3, Virtual Memory-Mapped Workspace:
+A plan contains proof-backed source commands and bounded in-memory filters.
+Typical filters are `cat`, `head`, `tail`, fixed `grep`, `wc -l`, and no-arg
+`sort`. Eligibility is checked structurally before snapshot work. If any node
+is unsupported or any proof misses, the entire original shell string runs
+natively. Squire does not mix replayed and native nodes inside one shell plan.
 
-- Implemented only as read-only workspace acceleration.
-- No virtual write layer, edit replay, async write flush, or rollback system in
-  v1.
+## Performance Tiers
 
-Level 4, Schema-Native IPC:
+Metadata proofs have constant-size inputs and are the strict low-latency lane.
+Bounded file proofs scale with the selected file. Repository proofs scale with
+the relevant worktree and intentionally have a separate tail distribution.
 
-- Implemented as internal binary hot-cache IPC and mmap descriptors.
-- Agent-visible command output remains exact stdout/stderr/exit-code bytes.
+Version and PATH lookup probes are not enabled in the production runtime. The
+strong proof hashes executable identity, which is unprofitable for large
+binaries. The legacy backend can still exercise those operators for research,
+but public status reports only production lanes.
 
-Level 5, Anticipatory Speculation:
+`file`, `whoami`, and `id` are also excluded from production because their
+outputs depend on mutable system magic or identity databases. Squire does not
+represent numeric IDs and file bytes alone as a complete proof of those
+outputs.
 
-- Implemented as bounded local idle-window prewarming.
-- No token-stream monitoring, prompt changes, suggestions, or workspace
-  mutation.
+Miss cost matters because most commands should remain native. Unsupported
+commands are rejected before map discovery. Eligible misses may inspect the
+snapshot and proof state, then return immediately while preparation runs in the
+background.
 
-## Privacy
+## Installation
 
-Standard mode preserves operational metadata such as durations, event names,
-operation hashes, file hashes, diff hashes, and repo fingerprints.
+Release archives are paired by version. The Squire-Codex archive contains:
 
-It should not persist raw prompts, raw completions, raw tool arguments, auth
-values, account identifiers, arbitrary stdout/stderr, or source file contents.
-Fast-path output storage is local, bounded, purgeable, and limited to eligible
-operations.
+- `squire-codex`;
+- `codex-code-mode-host`;
+- the platform-native Squire runtime library.
+
+The installer verifies archive checksums and places all components together.
+If an older archive lacks the runtime, local C compilation is a compatibility
+fallback. `squire doctor` validates the installed layout.
+
+Preload helpers and the macOS VM helper are installed only when
+`SQUIRE_INSTALL_ADVANCED=1` is explicitly set.
+
+## Optional Backends
+
+The scoped preload path remains useful for Linux process-interposition tests.
+macOS system shells strip dynamic-loader injection, so preload is not the
+product integration.
+
+The microVM path remains useful for Linux isolation and VM transport research.
+It requires explicit guest assets and must not receive host credentials
+implicitly. It is not started or provisioned by `squire codex`.
+
+Both backends obey the same exact-result-or-native contract but are outside the
+default installation and UX.
+
+## Diagnostics
+
+Normal commands:
+
+```sh
+squire doctor
+squire status --json
+squire explain -- git status --short
+```
+
+Backend diagnostics remain under `squire help advanced`, including legacy
+kernel, boost, scoped-session, benchmark, and VM commands. They are retained for
+release verification rather than normal use.

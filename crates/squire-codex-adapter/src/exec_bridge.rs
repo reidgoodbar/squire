@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::Event;
@@ -60,6 +61,26 @@ pub(crate) async fn try_replay_shell_command(
 ) -> Option<SquireReplayOutput> {
     let argv = ["sh".to_string(), "-c".to_string(), command.to_string()];
     try_replay_bytes(&argv, cwd, env).await
+}
+
+pub(crate) async fn try_replay_shell_output(
+    command: &str,
+    cwd: &AbsolutePathBuf,
+    env: &HashMap<String, String>,
+) -> Option<codex_protocol::exec_output::ExecToolCallOutput> {
+    let start = Instant::now();
+    let replay = try_replay_shell_command(command, cwd, env).await?;
+    let stdout = String::from_utf8_lossy(&replay.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&replay.stderr).to_string();
+    let aggregated_output = format!("{stdout}{stderr}");
+    Some(codex_protocol::exec_output::ExecToolCallOutput {
+        exit_code: replay.exit_code,
+        stdout: StreamOutput::new(stdout),
+        stderr: StreamOutput::new(stderr),
+        aggregated_output: StreamOutput::new(aggregated_output),
+        duration: start.elapsed(),
+        timed_out: false,
+    })
 }
 
 fn retain_output(bytes: Vec<u8>, max_bytes: Option<usize>) -> StreamOutput<Vec<u8>> {

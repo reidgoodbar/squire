@@ -31,7 +31,7 @@ func TestReplayCandidates(t *testing.T) {
 		{"ls p", []string{"ls", "-p"}, true, false, true, FamilySearchList},
 		{"ls la unsupported", []string{"ls", "-la"}, false, false, false, FamilyShellUnknown},
 		{"ls unsupported", []string{"ls", "-R"}, false, false, false, FamilyShellUnknown},
-		{"rg files", []string{"rg", "--files"}, true, false, true, FamilySearchList},
+		{"rg files", []string{"rg", "--files"}, false, false, false, FamilySearchList},
 		{"rg fixed file", []string{"rg", "-F", "rank_routes", "src/app.js"}, true, false, true, FamilySearchList},
 		{"rg fixed line numbers", []string{"rg", "-n", "-F", "rank_routes", "src/app.js"}, true, false, true, FamilySearchList},
 		{"rg fixed quiet", []string{"rg", "-q", "-F", "rank_routes", "src/app.js"}, true, false, true, FamilySearchList},

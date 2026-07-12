@@ -16,20 +16,18 @@ import (
 	"squire.run/internal/kernel"
 )
 
-func TestUsageTextDocumentsKernelContract(t *testing.T) {
+func TestUsageTextDocumentsProductContract(t *testing.T) {
 	text := usageText()
 	for _, want := range []string{
-		"Squire v1",
-		"squire-codex",
+		"Squire",
 		"squire codex",
+		"squire status",
+		"squire doctor",
+		"squire explain",
+		"squire prepare",
 		"squire version",
-		"squire session",
-		"Agent chooses. Squire serves.",
-		"Native fallback always exists.",
-		"Runtime decisions are replay or native.",
-		"squire kernel maintain --background",
-		"squire kernel adapter --stdio",
-		"squire kernel run -- <command>",
+		"Agents use ordinary commands.",
+		"original native execution path",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("usage text missing %q:\n%s", want, text)
@@ -45,7 +43,11 @@ func TestHelpTextForArgs(t *testing.T) {
 	}{
 		{name: "global long help", args: []string{"--help"}, want: "usage:"},
 		{name: "global help topic", args: []string{"help"}, want: "usage:"},
-		{name: "codex topic", args: []string{"help", "codex"}, want: "recommended UX"},
+		{name: "codex topic", args: []string{"help", "codex"}, want: "canonical product path"},
+		{name: "status topic", args: []string{"help", "status"}, want: "hit/miss counters"},
+		{name: "doctor topic", args: []string{"help", "doctor"}, want: "required Codex helper"},
+		{name: "explain topic", args: []string{"help", "explain"}, want: "never executed natively"},
+		{name: "advanced topic", args: []string{"help", "advanced"}, want: "compatibility and diagnostics"},
 		{name: "session topic", args: []string{"help", "session"}, want: "scoped Squire session"},
 		{name: "vm topic", args: []string{"help", "vm"}, want: "isolated Linux execution mode"},
 		{name: "vm session topic", args: []string{"vm", "session", "--help"}, want: "guest lifecycle runner"},
@@ -390,8 +392,8 @@ func TestVersionOutput(t *testing.T) {
 
 	text := versionOut(outputShort)
 	for _, want := range []string{
-		"Squire v1",
-		"version: 1.2.3",
+		"Squire 1.2.3",
+		"contract: v1",
 		"commit: abc123",
 		"date: 2026-06-18",
 	} {

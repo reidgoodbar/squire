@@ -115,6 +115,7 @@ pub(super) async fn try_exec_command(
         process_id: None,
         exit_code: Some(replay.exit_code),
         original_token_count: Some(original_token_count),
+        output_omitted_bytes: None,
         hook_command: Some(request.hook_command.clone()),
     }))
 }

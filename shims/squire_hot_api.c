@@ -121,8 +121,11 @@ static int squire_hot_sensitive_env_key(const char *entry, size_t key_len) {
 	return squire_hot_key_eq(entry, key_len, "PATH") ||
 	       squire_hot_key_eq(entry, key_len, "HOME") ||
 	       squire_hot_key_eq(entry, key_len, "LANG") ||
-	       squire_hot_key_eq(entry, key_len, "LC_ALL") ||
-	       squire_hot_key_eq(entry, key_len, "LC_CTYPE") ||
+	       squire_hot_key_has_prefix(entry, key_len, "LC_") ||
+	       squire_hot_key_eq(entry, key_len, "TZ") ||
+	       squire_hot_key_eq(entry, key_len, "TERM") ||
+	       squire_hot_key_eq(entry, key_len, "COLUMNS") ||
+	       squire_hot_key_eq(entry, key_len, "PAGER") ||
 	       squire_hot_key_eq(entry, key_len, "SQUIRE_KERNEL_STORE_ROOT") ||
 	       squire_hot_key_eq(entry, key_len, "SQUIRE_STORE_ROOT") ||
 	       squire_hot_key_eq(entry, key_len, "SQUIRE_SHIM_REAL_PATH") ||
@@ -187,34 +190,63 @@ static int squire_hot_shell_script_requires_full_env(const char *script) {
 		}
 		if (strcmp(tool, "printenv") == 0 ||
 		    strcmp(tool, "ls") == 0 ||
-		    strcmp(tool, "file") == 0) {
+		    strcmp(tool, "file") == 0 ||
+		    strcmp(tool, "grep") == 0 ||
+		    strcmp(tool, "rg") == 0 ||
+		    strcmp(tool, "sort") == 0) {
 			return 1;
 		}
 	}
 	return 0;
 }
 
-static const char *squire_hot_env_value(int envc, const char *const *env, const char *key) {
+static int squire_hot_env_lookup(int envc, const char *const *env, const char *key, const char **value) {
+	if (value != NULL) {
+		*value = NULL;
+	}
 	if (envc <= 0 || env == NULL || key == NULL) {
-		return NULL;
+		return 0;
 	}
 	size_t key_len = strlen(key);
 	for (int i = 0; i < envc; i++) {
 		const char *entry = env[i];
 		if (entry != NULL && strncmp(entry, key, key_len) == 0 && entry[key_len] == '=') {
-			return entry + key_len + 1;
+			if (value != NULL) {
+				*value = entry + key_len + 1;
+			}
+			return 1;
 		}
 	}
-	return NULL;
+	return 0;
+}
+
+static int squire_hot_process_env_lookup(const char *key, const char **value) {
+	if (value != NULL) {
+		*value = NULL;
+	}
+	if (environ == NULL || key == NULL) {
+		return 0;
+	}
+	size_t key_len = strlen(key);
+	for (size_t i = 0; environ[i] != NULL; i++) {
+		const char *entry = environ[i];
+		if (strncmp(entry, key, key_len) == 0 && entry[key_len] == '=') {
+			if (value != NULL) {
+				*value = entry + key_len + 1;
+			}
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static int squire_hot_env_values_match(int envc, const char *const *env, const char *key) {
-	const char *actual = getenv(key);
-	const char *expected = squire_hot_env_value(envc, env, key);
-	if (actual == NULL || actual[0] == '\0') {
-		return expected == NULL || expected[0] == '\0';
-	}
-	return expected != NULL && strcmp(actual, expected) == 0;
+	const char *actual = NULL;
+	const char *expected = NULL;
+	int actual_found = squire_hot_process_env_lookup(key, &actual);
+	int expected_found = squire_hot_env_lookup(envc, env, key, &expected);
+	return actual_found == expected_found &&
+	       (!actual_found || strcmp(actual, expected) == 0);
 }
 
 static int squire_hot_env_key_compatible(int envc, const char *const *env, const char *key, int (*selected)(const char *, size_t)) {
@@ -226,9 +258,11 @@ static int squire_hot_env_key_compatible(int envc, const char *const *env, const
 		return 1;
 	}
 	char msg[256];
-	const char *actual = getenv(key);
-	const char *expected = squire_hot_env_value(envc, env, key);
-	snprintf(msg, sizeof(msg), "env mismatch key=%s actual=%s expected=%s", key, actual == NULL ? "<unset>" : "<set>", expected == NULL ? "<unset>" : (expected[0] == '\0' ? "<empty>" : "<set>"));
+	const char *actual = NULL;
+	const char *expected = NULL;
+	int actual_found = squire_hot_process_env_lookup(key, &actual);
+	int expected_found = squire_hot_env_lookup(envc, env, key, &expected);
+	snprintf(msg, sizeof(msg), "env mismatch key=%s actual=%s expected=%s", key, actual_found ? (actual[0] == '\0' ? "<empty>" : "<set>") : "<unset>", expected_found ? (expected[0] == '\0' ? "<empty>" : "<set>") : "<unset>");
 	squire_hot_trace(msg);
 	return 0;
 }
@@ -283,6 +317,15 @@ static int squire_hot_env_compatible(int envc, const char *const *env) {
 	return squire_hot_env_compatible_for(envc, env, squire_hot_sensitive_env_key);
 }
 
+static int squire_hot_all_env_key(const char *entry, size_t key_len) {
+	(void)entry;
+	return key_len > 0;
+}
+
+static int squire_hot_full_env_compatible(int envc, const char *const *env) {
+	return squire_hot_env_compatible_for(envc, env, squire_hot_all_env_key);
+}
+
 static int squire_hot_git_metadata_env_compatible(int envc, const char *const *env) {
 	return squire_hot_env_compatible_for(envc, env, squire_hot_git_metadata_env_key);
 }
@@ -311,6 +354,19 @@ static int squire_hot_shell_script_index(int argc, const char *const *argv) {
 		return 3;
 	}
 	return -1;
+}
+
+static int squire_hot_direct_requires_full_env(int argc, const char *const *argv) {
+	if (argc <= 0 || argv == NULL || argv[0] == NULL) {
+		return 1;
+	}
+	const char *tool = base_name(argv[0]);
+	return tool != NULL &&
+	       (strcmp(tool, "printenv") == 0 ||
+	        strcmp(tool, "ls") == 0 ||
+	        strcmp(tool, "file") == 0 ||
+	        strcmp(tool, "grep") == 0 ||
+	        strcmp(tool, "rg") == 0);
 }
 
 static int squire_hot_is_git_metadata_argv(int argc, const char *const *argv) {
@@ -353,6 +409,95 @@ static int squire_hot_is_git_metadata_script(const char *script) {
 	return squire_hot_is_git_metadata_argv(node->argc, argv);
 }
 
+static int squire_runtime_direct_candidate(const char *cwd, int argc, const char *const *argv) {
+	if (cwd == NULL || argv == NULL || argc <= 0 || argc > MAX_ARGC) {
+		return 0;
+	}
+	char *mutable_argv[MAX_ARGC];
+	for (int i = 0; i < argc; i++) {
+		if (argv[i] == NULL) {
+			return 0;
+		}
+		mutable_argv[i] = (char *)argv[i];
+	}
+	policy_invocation inv;
+	if (!normalize_invocation_at_cwd(cwd, argc, mutable_argv, &inv)) {
+		return 0;
+	}
+	char target[PATH_BUF], flag[16];
+	int static_environment = is_static_environment_probe(&inv) &&
+	                         (strcmp(inv.argv[0], "hostname") == 0 || strcmp(inv.argv[0], "uname") == 0);
+	return is_git_metadata(&inv) ||
+	       is_git_ls_files(&inv) ||
+	       is_git_status(&inv) ||
+	       is_git_head_subject_log(&inv) ||
+	       is_git_read_only_diff(&inv) ||
+	       static_environment ||
+	       is_printenv_probe(&inv) ||
+	       parse_directory_listing(&inv, target, flag) ||
+	       is_warm_file_candidate(&inv);
+}
+
+static int squire_runtime_filter_candidate(helper_node *node) {
+	if (node == NULL || node->kind != HELPER_NODE_EXEC || node->argc <= 0) {
+		return 0;
+	}
+	const char *name = base_name(node->argv[0]);
+	if (name == NULL) {
+		return 0;
+	}
+	int count = 0;
+	const char *pattern = NULL;
+	int quiet = 0;
+	return (strcmp(name, "cat") == 0 && node->argc == 1) ||
+	       (strcmp(name, "head") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) ||
+	       (strcmp(name, "tail") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) ||
+	       (strcmp(name, "grep") == 0 && helper_parse_stdin_grep(node->argc, node->argv, &pattern, &quiet)) ||
+	       (strcmp(name, "wc") == 0 && node->argc == 2 && strcmp(node->argv[1], "-l") == 0) ||
+	       (strcmp(name, "sort") == 0 && node->argc == 1);
+}
+
+static int squire_runtime_plan_candidate(const char *cwd, helper_plan *plan, int idx, int has_input) {
+	if (plan == NULL || idx < 0 || idx >= plan->count) {
+		return 0;
+	}
+	helper_node *node = &plan->nodes[idx];
+	switch (node->kind) {
+	case HELPER_NODE_EXEC:
+		if (has_input) {
+			return squire_runtime_filter_candidate(node);
+		}
+		{
+			const char *argv[HELPER_SHELL_MAX_ARGS];
+			for (int i = 0; i < node->argc; i++) {
+				argv[i] = node->argv[i];
+			}
+			return squire_runtime_direct_candidate(cwd, node->argc, argv);
+		}
+	case HELPER_NODE_PIPE:
+		return squire_runtime_plan_candidate(cwd, plan, node->left, has_input) &&
+		       squire_runtime_plan_candidate(cwd, plan, node->right, 1);
+	case HELPER_NODE_AND:
+	case HELPER_NODE_SEQ:
+		return squire_runtime_plan_candidate(cwd, plan, node->left, has_input) &&
+		       squire_runtime_plan_candidate(cwd, plan, node->right, has_input);
+	case HELPER_NODE_REDIR_NULL:
+		return squire_runtime_plan_candidate(cwd, plan, node->left, has_input);
+	default:
+		return 0;
+	}
+}
+
+static int squire_runtime_candidate(const char *cwd, int argc, const char *const *argv) {
+	int script_idx = squire_hot_shell_script_index(argc, argv);
+	if (script_idx >= 0 && script_idx < argc && argv[script_idx] != NULL) {
+		helper_plan plan;
+		return helper_parse_shell_plan(argv[script_idx], &plan) &&
+		       squire_runtime_plan_candidate(cwd, &plan, plan.root, 0);
+	}
+	return squire_runtime_direct_candidate(cwd, argc, argv);
+}
+
 int squire_hot_try_replay_command(const char *cwd, int argc, const char *const *argv, int envc, const char *const *env, squire_hot_result *out) {
 	if (out == NULL || argc <= 0 || argv == NULL) {
 		return 0;
@@ -367,8 +512,16 @@ int squire_hot_try_replay_command(const char *cwd, int argc, const char *const *
 			return 0;
 		}
 	} else if (script_idx >= 0 && script_idx < argc && argv[script_idx] != NULL) {
-		if (!squire_hot_shell_script_env_compatible(argv[script_idx], envc, env)) {
+		int env_ok = squire_hot_shell_script_requires_full_env(argv[script_idx])
+		             ? squire_hot_full_env_compatible(envc, env)
+		             : squire_hot_shell_script_env_compatible(argv[script_idx], envc, env);
+		if (!env_ok) {
 			squire_hot_trace("miss shell-script-env-incompatible");
+			return 0;
+		}
+	} else if (squire_hot_direct_requires_full_env(argc, argv)) {
+		if (!squire_hot_full_env_compatible(envc, env)) {
+			squire_hot_trace("miss full-env-incompatible");
 			return 0;
 		}
 	} else if (!squire_hot_env_compatible(envc, env)) {
@@ -383,6 +536,22 @@ int squire_hot_try_replay_command(const char *cwd, int argc, const char *const *
 	return squire_hot_try_replay_argv(cwd, argc, argv, out);
 }
 
+uint32_t squire_runtime_abi_version(void) {
+	return SQUIRE_RUNTIME_ABI_VERSION;
+}
+
+int squire_runtime_try_execute(const char *cwd, int argc, const char *const *argv, int envc, const char *const *env, squire_runtime_result *out) {
+	if (!squire_runtime_candidate(cwd, argc, argv)) {
+		if (out != NULL) {
+			memset(out, 0, sizeof(*out));
+		}
+		return SQUIRE_RUNTIME_UNSUPPORTED;
+	}
+	return squire_hot_try_replay_command(cwd, argc, argv, envc, env, out) == 1
+	       ? SQUIRE_RUNTIME_HIT
+	       : SQUIRE_RUNTIME_MISS;
+}
+
 void squire_hot_record_replay(squire_hot_result *result) {
 	if (result == NULL || result->handle == NULL) {
 		return;
@@ -391,6 +560,10 @@ void squire_hot_record_replay(squire_hot_result *result) {
 	if (handle->kind == SQUIRE_HOT_HANDLE_EXACT) {
 		record_hot_replay_event(handle->exact.store_root, (long long)handle->exact.native_wall_ms, handle->exact.replay_start_ns);
 	}
+}
+
+void squire_runtime_record_hit(squire_runtime_result *result) {
+	squire_hot_record_replay(result);
 }
 
 void squire_hot_release(squire_hot_result *result) {
@@ -405,4 +578,8 @@ void squire_hot_release(squire_hot_result *result) {
 	}
 	free(handle);
 	memset(result, 0, sizeof(*result));
+}
+
+void squire_runtime_release(squire_runtime_result *result) {
+	squire_hot_release(result);
 }

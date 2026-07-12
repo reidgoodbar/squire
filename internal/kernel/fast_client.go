@@ -7,11 +7,18 @@ import (
 )
 
 func FastStoreRoot(cwd string) (string, bool) {
-	_, gitDirAbs, ok := discoverGitDir(cwd)
+	_, storeRoot, ok := FastWorkspace(cwd)
+	return storeRoot, ok
+}
+
+// FastWorkspace resolves the canonical repository identity without spawning
+// Git. It is the shared workspace boundary used by agent runtime adapters.
+func FastWorkspace(cwd string) (repoRoot, storeRoot string, ok bool) {
+	repoRoot, gitDirAbs, ok := discoverGitDir(cwd)
 	if !ok || gitDirAbs == "" {
-		return "", false
+		return "", "", false
 	}
-	return hotStoreRoot(gitDirAbs), true
+	return repoRoot, hotStoreRoot(gitDirAbs), true
 }
 
 func hotStoreRoot(gitDirAbs string) string {

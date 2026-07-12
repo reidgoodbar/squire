@@ -896,9 +896,6 @@ func TestProofGatedRepoSummaryReplaysAfterWarm(t *testing.T) {
 		{"git", "diff", "--stat"},
 		{"git", "diff", "--", "src/app.js"},
 	}
-	if _, err := exec.LookPath("rg"); err == nil {
-		commands = append(commands, []string{"rg", "--files"})
-	}
 	for _, argv := range commands {
 		t.Run(displayCommand(argv), func(t *testing.T) {
 			if !IsProofGatedReplayCandidate(argv) || !isHotPreparedReplayCandidate(argv) {

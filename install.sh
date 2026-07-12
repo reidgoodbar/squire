@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${SQUIRE_REPO:-${SQUIRE_KERNEL_REPO:-reidgoodbar/squire}}"
+repo="${SQUIRE_REPO:-reidgoodbar/squire}"
 codex_repo="${SQUIRE_CODEX_REPO:-reidgoodbar/squire-codex}"
-version="${SQUIRE_VERSION:-${SQUIRE_KERNEL_VERSION:-}}"
+version="${SQUIRE_VERSION:-}"
 codex_version="${SQUIRE_CODEX_VERSION:-}"
 install_dir="${SQUIRE_INSTALL_DIR:-${HOME:-}/.local/bin}"
 github_base="${GITHUB_BASE_URL:-https://github.com}"
 github_api="${GITHUB_API_URL:-https://api.github.com}"
-artifact_dir="${SQUIRE_ARTIFACT_DIR:-${SQUIRE_KERNEL_ARTIFACT_DIR:-}}"
+artifact_dir="${SQUIRE_ARTIFACT_DIR:-}"
 codex_artifact_dir="${SQUIRE_CODEX_ARTIFACT_DIR:-}"
 
 fail() {
@@ -100,39 +100,83 @@ compile_hot_api() {
   stage="$1"
   hot_src="$stage/shims/squire_hot_api.c"
   if [ ! -f "$hot_src" ]; then
-    echo "squire install: hot API source not present in archive"
-    return 0
+    echo "squire install: runtime source not present in archive"
+    return 1
   fi
   if ! have cc; then
-    echo "squire install: cc not found; skipped optional squire-codex hot library"
-    return 0
+    echo "squire install: cc not found; cannot build the Squire runtime"
+    return 1
   fi
   case "$os" in
     darwin)
-      hot_out="$install_dir/libsquire_hot.dylib"
-      tmp_hot="$install_dir/.libsquire_hot.dylib.tmp.$$"
+      hot_out="$install_dir/libsquire_runtime.dylib"
+      compat_hot_out="$install_dir/libsquire_hot.dylib"
+      tmp_hot="$install_dir/.libsquire_runtime.dylib.tmp.$$"
       if cc -O3 -DNDEBUG -dynamiclib -o "$tmp_hot" "$hot_src"; then
         chmod 0755 "$tmp_hot"
         mv "$tmp_hot" "$hot_out"
+        cp "$hot_out" "$compat_hot_out"
+        printf '1\n' > "$install_dir/.squire-runtime-abi"
         echo "squire install: installed $hot_out"
       else
         rm -f "$tmp_hot"
-        echo "squire install: optional squire-codex hot library build failed; native fallback remains available"
+        echo "squire install: Squire runtime build failed; native fallback remains available"
+        return 1
       fi
       ;;
     linux)
-      hot_out="$install_dir/libsquire_hot.so"
-      tmp_hot="$install_dir/.libsquire_hot.so.tmp.$$"
+      hot_out="$install_dir/libsquire_runtime.so"
+      compat_hot_out="$install_dir/libsquire_hot.so"
+      tmp_hot="$install_dir/.libsquire_runtime.so.tmp.$$"
       if cc -O3 -DNDEBUG -shared -fPIC -o "$tmp_hot" "$hot_src" -ldl -lcrypto; then
         chmod 0755 "$tmp_hot"
         mv "$tmp_hot" "$hot_out"
+        cp "$hot_out" "$compat_hot_out"
+        printf '1\n' > "$install_dir/.squire-runtime-abi"
         echo "squire install: installed $hot_out"
       else
         rm -f "$tmp_hot"
-        echo "squire install: optional squire-codex hot library build failed; install libssl headers to enable it"
+        echo "squire install: Squire runtime build failed; install libssl headers to enable it"
+        return 1
       fi
       ;;
+    *)
+      return 1
+      ;;
   esac
+}
+
+install_prebuilt_runtime() {
+  squire_stage="$1"
+  squire_codex_stage="$2"
+  case "$os" in
+    darwin)
+      runtime_name="libsquire_runtime.dylib"
+      compatibility_name="libsquire_hot.dylib"
+      ;;
+    linux)
+      runtime_name="libsquire_runtime.so"
+      compatibility_name="libsquire_hot.so"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  for runtime_stage in "$squire_codex_stage" "$squire_stage"; do
+    runtime_source="$runtime_stage/$runtime_name"
+    runtime_abi_source="$runtime_stage/SQUIRE_RUNTIME_ABI"
+    if [ -f "$runtime_source" ] && [ -f "$runtime_abi_source" ] && [ "$(tr -d '\r\n' < "$runtime_abi_source")" = "1" ]; then
+      runtime_tmp="$install_dir/.$runtime_name.tmp.$$"
+      cp "$runtime_source" "$runtime_tmp"
+      chmod 0755 "$runtime_tmp"
+      mv "$runtime_tmp" "$install_dir/$runtime_name"
+      cp "$install_dir/$runtime_name" "$install_dir/$compatibility_name"
+      cp "$runtime_abi_source" "$install_dir/.squire-runtime-abi"
+      echo "squire install: installed $install_dir/$runtime_name"
+      return 0
+    fi
+  done
+  return 1
 }
 
 compile_vm_darwin() {
@@ -178,20 +222,7 @@ print_macos_shell_note() {
   if [ "$os" != "darwin" ]; then
     return 0
   fi
-
-  if [ -x /opt/homebrew/bin/zsh ]; then
-    echo "squire install: macOS note: Homebrew zsh detected at /opt/homebrew/bin/zsh"
-    echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
-    return 0
-  fi
-  if [ -x /usr/local/bin/zsh ]; then
-    echo "squire install: macOS note: Homebrew zsh detected at /usr/local/bin/zsh"
-    echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
-    return 0
-  fi
-
-  echo "squire install: macOS note: Apple /bin/zsh ignores DYLD_INSERT_LIBRARIES"
-  echo "squire install: Codex acceleration uses the Linux VM preload path on macOS"
+  echo "squire install: macOS uses the host-native Squire runtime; no VM or shell injection is required"
 }
 
 print_codex_note() {
@@ -315,30 +346,23 @@ tar -xzf "$tmp/$asset" -C "$tmp"
 stage="$tmp/squire_${version}_${os}_${arch}"
 codex_stage="$tmp/squire-codex_${codex_version}_${os}_${arch}"
 binary="$stage/squire"
-if [ "$os" = "windows" ]; then
-  binary="$stage/squire.exe"
-fi
 if [ ! -f "$binary" ]; then
   fail "archive did not contain squire binary"
 fi
 
 codex_binary="$codex_stage/squire-codex"
-legacy_codex_binary="$stage/squire-codex"
-if [ "$os" = "windows" ]; then
-  codex_binary="$codex_stage/squire-codex.exe"
-  legacy_codex_binary="$stage/squire-codex.exe"
-fi
+codex_helper="$codex_stage/codex-code-mode-host"
 if fetch_codex_archive; then
   verify_checksum "$tmp" "$codex_asset" SQUIRE_CODEX_SHA256SUMS
   tar -xzf "$tmp/$codex_asset" -C "$tmp"
-elif [ -f "$legacy_codex_binary" ]; then
-  codex_binary="$legacy_codex_binary"
-  echo "squire install: using legacy squire-codex bundled in $asset"
 else
   fail "could not fetch matching squire-codex release artifact"
 fi
 if [ ! -f "$codex_binary" ]; then
   fail "archive did not contain squire-codex binary"
+fi
+if [ ! -f "$codex_helper" ]; then
+  fail "archive did not contain the required codex-code-mode-host runtime helper"
 fi
 
 mkdir -p "$install_dir"
@@ -350,14 +374,32 @@ tmp_codex_binary="$install_dir/.squire-codex.tmp.$$"
 cp "$codex_binary" "$tmp_codex_binary"
 chmod 0755 "$tmp_codex_binary"
 mv "$tmp_codex_binary" "$install_dir/squire-codex"
+codex_helper_name="codex-code-mode-host"
+tmp_codex_helper="$install_dir/.${codex_helper_name}.tmp.$$"
+cp "$codex_helper" "$tmp_codex_helper"
+chmod 0755 "$tmp_codex_helper"
+mv "$tmp_codex_helper" "$install_dir/$codex_helper_name"
 
 echo "squire install: installed $install_dir/squire"
 echo "squire install: installed $install_dir/squire-codex"
+echo "squire install: installed $install_dir/$codex_helper_name"
 "$install_dir/squire" version --short || true
-compile_hot_api "$stage"
-compile_preload "$stage"
-compile_preload_helper "$stage"
-compile_vm_darwin "$stage"
+runtime_ready=0
+if install_prebuilt_runtime "$stage" "$codex_stage"; then
+  runtime_ready=1
+elif compile_hot_api "$stage"; then
+  runtime_ready=1
+fi
+if [ "$runtime_ready" -ne 1 ]; then
+  echo "squire install: warning: runtime unavailable; squire-codex will preserve native execution without acceleration" >&2
+fi
+case "${SQUIRE_INSTALL_ADVANCED:-0}" in
+  1|true|yes)
+    compile_preload "$stage"
+    compile_preload_helper "$stage"
+    compile_vm_darwin "$stage"
+    ;;
+esac
 print_macos_shell_note
 print_codex_note
 
@@ -371,5 +413,6 @@ esac
 
 echo "squire install: no global command shims installed"
 echo "squire install: repo state is created locally when Squire runs in a workspace"
+"$install_dir/squire" doctor --short
 echo "squire install: start with:"
-echo "  squire-codex"
+echo "  squire codex"

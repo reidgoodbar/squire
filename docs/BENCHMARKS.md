@@ -1,347 +1,166 @@
 # Squire Benchmarks
 
-All numbers here are scoped local measurements. They are not broad Codex or
-agent-speedup claims.
+These are local command-serving measurements. They do not include model
+thinking, API latency, network time, or a broad task-speedup claim.
 
-## Current Claim
+## Production ABI Fuzz Panel
 
-Squire accelerates repeated local Git metadata plus hot-prepared
-deterministic read-only discovery operations with:
+Run date: July 13, 2026
 
-- exact stdout/stderr/exit-code preservation;
-- local validity proof;
-- native fallback;
-- no prompt/tool/model changes.
-
-Squire reports command-serving measurements. These benchmarks do not include
-model thinking time, API/network latency, or broad end-to-end Codex task time.
-
-## Mixed Scoped-Session UX
-
-Run date: `2026-06-24`
-
-Workload:
-
-- fresh Python/TypeScript repo in `/private/tmp`;
-- one normal scoped zsh session;
-- plain commands across Git metadata, repo summaries, bounded file reads, tool
-  probes, literal file searches, and native-control commands;
-- no agent-visible Squire command inside the measured session.
-
-Results:
-
-- commands: `270`
-- exactness: `true`
-- exact stdout/stderr/exit-code mismatches: `0`
-- hot mmap replays: `204`
-- native fallbacks remained available for every miss and never-replay command
-- native total: `3797.337ms`
-- Squire session total: `816.421ms`
-- workload delta: `2980.916ms`
-- speedup: `4.651x`
-- replay p50/p95/p99/max: `132us` / `880us` / `1243us` / `1428us`
-
-Interpretation:
-
-- `204/270` commands were served from exact hot mmap replay.
-- The remaining commands either were native-control operations or did not have a
-  complete cheap proof.
-- The reported `4.651x` is for this local command-serving workload only.
-
-Script:
+Command:
 
 ```sh
-python3 scripts/session_mixed_bench.py /private/tmp/squire-ux --json
+python3 scripts/hot_api_fuzz.py /path/to/squire \
+  --cases 500 \
+  --seed 20260712 \
+  --json-out /tmp/squire-runtime-500.json \
+  --md-out /tmp/squire-runtime-500.md
 ```
 
-## VM/Codex Preload Samples
+The harness creates a fresh mixed JavaScript/Python Git repository, prepares a
+snapshot, compiles `libsquire_runtime` from the current source, and calls
+runtime ABI 1 directly with the same cwd/argv/environment shape used by the
+Codex bridge.
 
-Live macOS VM/Codex session using production preload settings produced fresh
-plain `git rev-parse HEAD` replay samples:
+When no Squire binary is supplied, the harness builds `./cmd/squire` from the
+same checkout into its temporary directory. This prevents an installed older
+CLI from preparing snapshots for a newer runtime under test.
 
-- `486us`
-- `619us`
-- `929us`
-- `587us`
-- `555us`
+For each safe command, it also runs the native command and compares stdout,
+stderr, and exit status byte-for-byte. Runtime execution happens first, so the
+native reference can benefit from any OS page-cache warming caused by Squire.
+This is conservative for the reported Squire/native comparison.
 
-These were exact `c-mmap-hot-snapshot` replays and below the 1ms target.
-Release checks should evaluate a fresh post-start window rather than lifetime
-averages that may contain pre-optimization entries.
+### Summary
 
-## Scoped Preload Full Panel
+- generated commands: `500`
+- exact Squire hits: `296`
+- safe native fallbacks: `204`
+- unsupported decisions before snapshot work: `183`
+- eligible cold/stale misses: `21`
+- byte-for-byte native comparisons: `458`
+- output/exit mismatches: `0`
+- unsafe must-miss hits: `0`
+- Codex user-shell request-shape regression: passed
+- invalidation matrix: passed
+- measured net command-serving time avoided on hits: `3450.353ms`
 
-Run date: `2026-07-01`
+Overall matching distributions:
 
-Workload:
-
-- fresh Git repo in `/private/tmp`;
-- scoped preload transport only, no PATH shims;
-- `31` commands across Git metadata/state, bounded file reads, native
-  precomputed `file(1)`, literal grep, directory listings, safe environment
-  probes, static system probes, and selected shell compositions;
-- `1000` operations per command per e2e sample;
-- `5` e2e samples per command;
-- `1000` native direct samples per command.
-
-Results:
-
-- exactness: `31/31`;
-- native fallback remained available;
-- direct command group: native p50 sum `167.549ms`, Squire p50 sum
-  `3.172ms`, `52.8x`;
-- composed shell group: native p50 sum `155.398ms`, Squire p50 sum
-  `21.420ms`, `7.3x`;
-- full panel: native p50 sum `322.948ms`, Squire p50 sum `24.591ms`,
-  `13.1x`.
-
-Direct commands use synthetic completed-child replay where the stdout pipe,
-wait status, stderr emptiness, exit code, output size, and hot-snapshot proof
-are all compatible. Composed shell commands use the helper-owned shell-plan path
-so pipe EOF and wait semantics stay native-shaped; they improve substantially,
-but remain milliseconds e2e because the shell composition envelope still exists.
-
-| Command | Native p50 | Native p95 | Native p99 | Squire p50 | Squire p95 | Squire p99 | Speedup |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `git rev-parse HEAD` | `13.777ms` | `13.874ms` | `13.874ms` | `0.092ms` | `0.097ms` | `0.097ms` | `150.0x` |
-| `git rev-parse --git-dir` | `13.762ms` | `13.928ms` | `13.928ms` | `0.095ms` | `0.100ms` | `0.100ms` | `145.4x` |
-| `git rev-parse --abbrev-ref HEAD` | `13.613ms` | `13.668ms` | `13.668ms` | `0.092ms` | `0.102ms` | `0.102ms` | `148.0x` |
-| `git rev-parse --show-toplevel` | `13.584ms` | `13.748ms` | `13.748ms` | `0.091ms` | `0.103ms` | `0.103ms` | `149.4x` |
-| `git rev-parse --is-inside-work-tree` | `13.433ms` | `13.493ms` | `13.493ms` | `0.089ms` | `0.095ms` | `0.095ms` | `151.5x` |
-| `git status --short` | `14.913ms` | `14.998ms` | `14.998ms` | `0.373ms` | `0.379ms` | `0.379ms` | `40.0x` |
-| `git status --porcelain` | `15.007ms` | `15.090ms` | `15.090ms` | `0.357ms` | `0.384ms` | `0.384ms` | `42.0x` |
-| `git ls-files` | `13.697ms` | `13.784ms` | `13.784ms` | `0.143ms` | `0.156ms` | `0.156ms` | `96.1x` |
-| `git diff` | `13.661ms` | `13.693ms` | `13.693ms` | `0.228ms` | `0.237ms` | `0.237ms` | `59.9x` |
-| `git diff --stat` | `13.792ms` | `13.801ms` | `13.801ms` | `0.218ms` | `0.230ms` | `0.230ms` | `63.2x` |
-| `cat src/app.js` | `1.770ms` | `1.788ms` | `1.788ms` | `0.117ms` | `0.129ms` | `0.129ms` | `15.1x` |
-| `sed -n '1,2p' src/app.js` | `1.746ms` | `1.791ms` | `1.791ms` | `0.114ms` | `0.130ms` | `0.130ms` | `15.4x` |
-| `head -n 2 src/app.js` | `1.631ms` | `1.666ms` | `1.666ms` | `0.116ms` | `0.120ms` | `0.120ms` | `14.1x` |
-| `tail -n 2 src/app.js` | `1.666ms` | `1.675ms` | `1.675ms` | `0.113ms` | `0.120ms` | `0.120ms` | `14.8x` |
-| `file src/app.js` | `4.777ms` | `4.790ms` | `4.790ms` | `0.114ms` | `0.126ms` | `0.126ms` | `41.8x` |
-| `grep -F two src/app.js` | `1.893ms` | `1.920ms` | `1.920ms` | `0.120ms` | `0.122ms` | `0.122ms` | `15.7x` |
-| `grep -q -F two src/app.js` | `1.882ms` | `1.920ms` | `1.920ms` | `0.123ms` | `0.130ms` | `0.130ms` | `15.3x` |
-| `ls src` | `1.855ms` | `1.868ms` | `1.868ms` | `0.179ms` | `0.186ms` | `0.186ms` | `10.4x` |
-| `printenv PATH` | `1.608ms` | `1.624ms` | `1.624ms` | `0.077ms` | `0.080ms` | `0.080ms` | `20.8x` |
-| `uname -m` | `1.627ms` | `1.636ms` | `1.636ms` | `0.079ms` | `0.085ms` | `0.085ms` | `20.7x` |
-| `whoami` | `2.383ms` | `2.385ms` | `2.385ms` | `0.078ms` | `0.089ms` | `0.089ms` | `30.4x` |
-| `hostname` | `1.635ms` | `1.714ms` | `1.714ms` | `0.081ms` | `0.085ms` | `0.085ms` | `20.1x` |
-| `id` | `3.837ms` | `3.879ms` | `3.879ms` | `0.082ms` | `0.091ms` | `0.091ms` | `46.6x` |
-| `git rev-parse HEAD | cat` | `17.959ms` | `18.059ms` | `18.059ms` | `2.428ms` | `2.433ms` | `2.433ms` | `7.4x` |
-| `git rev-parse HEAD >/dev/null && git status --short >/dev/null && cat src/app.js >/dev/null` | `33.453ms` | `33.717ms` | `33.717ms` | `3.075ms` | `3.091ms` | `3.091ms` | `10.9x` |
-| `(git ls-files | grep -F app >/dev/null) && (sed -n '1,4p' src/app.js | tail -n 2 >/dev/null)` | `21.253ms` | `21.648ms` | `21.648ms` | `2.691ms` | `2.710ms` | `2.710ms` | `7.9x` |
-| `git status --short | head -n 5` | `19.344ms` | `19.374ms` | `19.374ms` | `2.892ms` | `2.924ms` | `2.924ms` | `6.7x` |
-| `git ls-files | grep -F src` | `17.984ms` | `18.034ms` | `18.034ms` | `2.568ms` | `2.587ms` | `2.587ms` | `7.0x` |
-| `cat src/app.js | grep -F two | head -n 1` | `6.593ms` | `6.624ms` | `6.624ms` | `2.524ms` | `2.536ms` | `2.536ms` | `2.6x` |
-| `sed -n '1,4p' src/app.js | tail -n 2` | `6.151ms` | `6.193ms` | `6.193ms` | `2.502ms` | `2.536ms` | `2.536ms` | `2.5x` |
-| `git rev-parse HEAD >/dev/null; git ls-files >/dev/null; cat src/app.js >/dev/null` | `32.660ms` | `32.925ms` | `32.925ms` | `2.740ms` | `2.769ms` | `2.769ms` | `11.9x` |
-
-Script:
-
-```sh
-python3 scripts/preload_ops_bench.py /path/to/squire \
-  --rounds 1000 \
-  --native-direct-rounds 1000 \
-  --native-batch-rounds 1000 \
-  --e2e-samples 5 \
-  --json
-```
-
-## Replay Fuzz
-
-Run date: `2026-07-02`
-
-The replay fuzzer generates deterministic random read-only command plans and
-compares native execution against Squire byte-for-byte. It covers Git metadata,
-repo summaries, bounded file reads, moving `sed/head/tail` windows, fixed
-`grep`/`rg`, directory/env probes, tool probes, composed `sh -c` commands, and
-safe native-fallback controls.
-
-Long-format `ls -la` is intentionally excluded from the stable equivalence pool
-because it observes `.`/`..` directory metadata that can change between two
-sequential benchmark passes in `/private/tmp`; it remains native-only.
-
-Latest stable seeds:
-
-- seed `20260702`: `3000` cases, exactness `true`, mismatches `0`, hot replays
-  `2171`, speedup `2.048x`, delta `14221.677ms`
-- seed `777`: `3000` cases, exactness `true`, mismatches `0`, hot replays
-  `2172`, speedup `1.959x`, delta `13279.218ms`
-
-Script:
-
-```sh
-python3 scripts/replay_fuzz.py /path/to/squire \
-  --cases 3000 \
-  --seed 20260702 \
-  --json
-```
-
-## Fixed-String Ripgrep Lane
-
-Run date: `2026-07-02`
-
-Workload:
-
-- fresh Git repo in `/private/tmp`;
-- scoped preload transport only, no PATH shims;
-- `rg -F` direct forms and one composed `rg -F ... | head` form;
-- `200` operations per command per e2e sample;
-- `3` e2e samples per command;
-- `20` native direct samples per command.
-
-Results:
-
-- exactness: `4/4`;
-- native mismatches: `0`;
-- native fallback remained available;
-- hot replay events all used the mmap warm-file proof path.
-
-| Command | Native p50 | Squire e2e p50 | Hot replay p50 | Hot replay p95 | Hot replay p99 |
+| Path | Samples | p50 | p95 | p99 | max |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `rg -F two src/app.js` | `3.424ms` | `2.541ms` | `124us` | `156us` | `178us` |
-| `rg -n -F two src/app.js` | `3.310ms` | `2.525ms` | `125us` | `155us` | `169us` |
-| `rg -q -F two src/app.js` | `3.287ms` | `2.525ms` | `120us` | `150us` | `167us` |
-| `rg -F two src/app.js | head -n 1` | `8.364ms` | `2.691ms` | `154us` | `182us` | `210us` |
+| Squire hits | 296 | 0.528ms | 2.516ms | 3.169ms | 3.319ms |
+| Same commands, native | 296 | 8.194ms | 34.760ms | 52.433ms | 64.108ms |
+| Squire misses | 204 | 0.092ms | 0.297ms | 0.998ms | 2.822ms |
 
-## Hot API Fuzz Stress
+The overall hit tail mixes proof tiers. Metadata and bounded operations are the
+strict low-latency lanes; repository and composed commands intentionally report
+their scaling proof cost separately.
 
-Run date: `2026-07-07`
+### Dedicated Metadata Tail
 
-Workload:
-
-- `500` generated direct and composed commands;
-- included Git metadata, repo state, source reads, line windows, fixed search,
-  directory/env probes, version probes, safe native misses, and policy must-misses;
-- included `git branch --show-current`, path-filtered `git ls-files`,
-  `git ls-files <path> | wc -l`, and `git ls-files <path> | sort`;
-- compared replay output against native output for safe commands.
-
-Results:
-
-- status: `pass`;
-- hot hits: `390`;
-- safe misses: `110`;
-- mismatches: `0`;
-- must-miss hits: `0`;
-- invalidation probes: safe.
-
-| Bucket | Cases | Hits | Hot p50 | Hot p95 | Native p50 | Native p95 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Git metadata | `49` | `49` | `314us` | `398us` | `17.096ms` | `23.161ms` |
-| Repo state | `39` | `37` | `1.734ms` | `2.683ms` | `17.998ms` | `24.368ms` |
-| File read | `37` | `35` | `589us` | `893us` | `5.966ms` | `9.291ms` |
-| Line window | `51` | `46` | `407us` | `541us` | `3.441ms` | `3.928ms` |
-| Fixed search | `53` | `47` | `452us` | `531us` | `4.289ms` | `5.870ms` |
-| Composed pipe | `39` | `35` | `624us` | `955us` | `8.809ms` | `22.506ms` |
-| Composed sequence | `50` | `48` | `1.389ms` | `3.133ms` | `27.306ms` | `57.955ms` |
-
-The e2e columns include the helper/session envelope. The hot replay columns are
-the actual mmap proof-and-materialization events recorded by Squire.
-
-Script:
+The mixed panel contains only 41 metadata samples, so its nearest-rank p99 is
+too sensitive to a single scheduler pause. A separate 2,000-command run used
+only the six production Git metadata forms:
 
 ```sh
-python3 scripts/preload_ops_bench.py /path/to/squire \
-  --rounds 200 \
-  --native-direct-rounds 20 \
-  --native-batch-rounds 20 \
-  --e2e-samples 3 \
-  --only rg_fixed,rg_fixed_n,rg_fixed_q,shell_rg_head \
-  --json
+python3 scripts/hot_api_fuzz.py /path/to/squire \
+  --cases 2000 \
+  --seed 20260715 \
+  --buckets git_metadata
 ```
 
-## Concurrent Echo Stress
+| Path | Samples | p50 | p95 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Squire metadata hit | 2000 | 0.434ms | 0.648ms | 0.893ms | 9.922ms |
+| Same commands, native | 2000 | 19.438ms | 24.008ms | 52.886ms | 68.252ms |
 
-Workload:
+All 2,000 results matched native bytes and exit status. The p99 target is below
+1ms on this machine; the maximum is not. Squire does not claim a p100 bound
+against host scheduling pauses.
 
-- `/private/tmp`
-- 40 concurrent normal-UX requests
+### Hit Latency By Class
 
-Results:
+Native columns contain only commands that hit Squire in that class.
 
-- adapter hot replay p95: `293us`
-- process CLI hot replay p95: `341us`
-- budget: `1000us`
-- violations: `0`
+| Class | Hits | Squire p50 | Squire p95 | Squire p99 | Native p50 | Native p95 | Native p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Git metadata | 41 | 0.378ms | 0.451ms | 0.467ms | 14.841ms | 19.261ms | 39.073ms |
+| Line windows | 38 | 0.449ms | 0.553ms | 0.571ms | 3.190ms | 5.115ms | 7.954ms |
+| Fixed search | 48 | 0.486ms | 0.570ms | 0.599ms | 3.627ms | 5.635ms | 7.159ms |
+| Bounded file reads | 20 | 0.459ms | 0.542ms | 0.576ms | 3.476ms | 7.509ms | 7.963ms |
+| Directory/environment | 31 | 0.594ms | 0.943ms | 1.036ms | 3.486ms | 6.022ms | 24.847ms |
+| Repository state | 41 | 0.870ms | 2.572ms | 3.319ms | 16.430ms | 22.412ms | 32.610ms |
+| Composed pipelines | 31 | 0.704ms | 1.162ms | 2.847ms | 8.671ms | 20.906ms | 23.306ms |
+| Composed sequences | 46 | 1.518ms | 3.150ms | 3.170ms | 28.544ms | 52.433ms | 64.108ms |
 
-## Cache-Break Stress
+Repository-state outliers come from synchronous hashing of the relevant
+worktree proof. They are still materially faster than matched native commands
+in this fixture, but they are not represented as sub-millisecond metadata hits.
 
-Run date: `2026-06-30`
+### Native-Fallback Decision Cost
 
-Target:
+| Class | Misses | p50 | p95 | p99 |
+| --- | ---: | ---: | ---: | ---: |
+| Ordinary unsupported controls | 43 | 0.094ms | 0.182ms | 0.580ms |
+| Tool version/PATH probes | 54 | 0.079ms | 0.117ms | 0.126ms |
+| Unsafe policy cases | 42 | 0.089ms | 0.309ms | 0.339ms |
 
-- intentionally create cache entries that would be stale if cwd or external Git
-  behavior inputs were not part of the replay proof.
+Tool version and PATH probes are deliberately unsupported in production. A
+strong executable-content proof was slower than native execution for large
+binaries, so the profitable behavior is an early native decision.
 
-Reproduced and fixed stale replay candidates:
+## Invalidation Matrix
 
-- root-prepared `git status --short` reused from a subdirectory with different
-  cwd-relative bytes;
-- default global Git ignore file changes affecting `git status`;
-- included Git config file changes affecting `git status`;
-- default global Git attributes file changes affecting `git diff`;
-- configured `core.excludesFile` target changes affecting `git status`;
-- configured `core.attributesFile` target changes affecting `git diff`.
+The same run starts from a known hit, mutates one authority boundary, and then
+requires either a miss or a result exactly equal to the new native state. After
+fresh preparation, the command must hit with exact bytes again.
 
-Verification:
+| Probe | Stale result accepted | Rewarm exact |
+| --- | --- | --- |
+| File content change | no | yes |
+| Same-size atomic file replacement with restored mtime | no | yes |
+| Git index-only change | no | yes |
+| New untracked file | no | yes |
+| Same-size diff change with restored mtime | no | yes |
+| Local Git config change | no | yes |
+| New commit/HEAD change | no | yes |
+| Symbolic HEAD/branch rename | no | yes |
+| Child `PATH` mismatch | no | n/a |
+| Symlink outside workspace | no | n/a |
 
-- targeted regressions pass;
-- preload proof-engine smoke hits at repo root and misses safely from a subdir
-  when only the root proof was prepared;
-- `go test ./...` passes.
+The run passes only if every row is safe. A stale byte, wrong exit status, or
+unsafe hit makes the script exit nonzero.
 
-## Multi-Agent Normal UX A/B
+## What This Does And Does Not Measure
 
-Workload:
+This is a true measurement of Squire's local decision and result-serving work:
 
-- mixed local discovery plus one never-replay native command;
-- no agent-visible Squire command;
-- exact stdout/stderr/exit-code mismatches: `0`.
+- the production C ABI and mmap proof path are exercised;
+- real native commands provide the exactness and latency reference;
+- direct and composed command shapes are varied deterministically;
+- safe misses and rejected mutations are included;
+- native samples are matched to actual hits for comparison.
 
-Results:
+It is not a complete Codex task benchmark. Model output varies, model latency
+dominates many turns, and Codex may use internal file-reading tools that do not
+cross the terminal boundary. Separate fork tests compile the bridge inside
+current upstream Codex, and the product install smoke verifies release layout,
+but neither is folded into the microsecond ABI table.
 
-- 1 agent, 80 commands: `4.780x`, `650.765ms` wall delta
-- 2 agents, 160 commands: `4.559x`, `528.408ms` wall delta
-- 4 agents, 320 commands: `4.730x`, `753.041ms` wall delta
-- 8 agents, 640 commands: `5.533x`, `1301.093ms` wall delta
-- 16 agents, 1280 commands: `5.793x`, `2247.894ms` wall delta
+## Release Commands
 
-## Deep-Local Profile
+```sh
+go test ./... -count=1
+scripts/install_product_smoke.sh
+python3 scripts/hot_api_fuzz.py --cases 500 --seed 20260712
+```
 
-Workload:
+In the Codex fork:
 
-- runs: `1219`
-- packages: `48`
-- tracked files: `341`
-- commits: `39`
-- incremental turns: `36`
-
-Safety:
-
-- safety gates: `pass`
-- enabled fast-path exactness: `true`
-- enabled fast-path mismatches: `0`
-- stale HEAD replays: `0`
-- stale branch replays: `0`
-- validation replays: `0`
-
-Performance:
-
-- metadata workload delta: `+2.550s`
-- metadata fast-path p95: `1641us`
-- older standalone `kernel run` native-fallback overhead profile:
-  `needs_optimization`
-
-## Policy Notes
-
-Benchmark reports separate:
-
-- enabled metadata fast paths;
-- proof-gated replay candidates;
-- warm-file materialized reads/searches;
-- repo-summary fallback;
-- native-only discovery;
-- never-replay validation/build/test workloads.
-
-Validation, build, and test commands are never replayed, even when their output
-could be compared exactly.
+```sh
+just fmt
+just test -p codex-core squire_codex_bridge
+cargo build -p codex-cli --bin codex
+cargo build -p codex-code-mode-host --bin codex-code-mode-host
+```
