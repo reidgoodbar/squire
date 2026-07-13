@@ -269,11 +269,80 @@ detect_arch() {
   esac
 }
 
-latest_version_for() {
+release_versions_for() {
   release_repo="$1"
-  fetch_stdout "$github_api/repos/$release_repo/releases?per_page=1" |
-    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-    head -n 1
+  fetch_stdout "$github_api/repos/$release_repo/releases?per_page=100" |
+    tr ',' '\n' |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+latest_semantic_version() {
+  awk '
+    function channel_rank(channel) {
+      if (channel == "") return 4
+      if (channel == "rc") return 3
+      if (channel == "beta") return 2
+      if (channel == "alpha") return 1
+      return 0
+    }
+    function is_newer(major, minor, patch, rank, sequence, channel) {
+      if (!found) return 1
+      if (major != best_major) return major > best_major
+      if (minor != best_minor) return minor > best_minor
+      if (patch != best_patch) return patch > best_patch
+      if (rank != best_rank) return rank > best_rank
+      if (rank == 0 && channel != best_channel) return channel > best_channel
+      return sequence > best_sequence
+    }
+    {
+      tag = $0
+      value = tag
+      sub(/^v/, "", value)
+      part_count = split(value, parts, "-")
+      core_count = split(parts[1], core, ".")
+      if (core_count != 3 ||
+          core[1] !~ /^[0-9]+$/ ||
+          core[2] !~ /^[0-9]+$/ ||
+          core[3] !~ /^[0-9]+$/) next
+
+      channel = ""
+      sequence = 0
+      if (part_count > 1) {
+        pre_count = split(parts[2], prerelease, ".")
+        channel = prerelease[1]
+        if (pre_count > 1 && prerelease[2] ~ /^[0-9]+$/) {
+          sequence = prerelease[2] + 0
+        }
+      }
+      rank = channel_rank(channel)
+      major = core[1] + 0
+      minor = core[2] + 0
+      patch = core[3] + 0
+      if (is_newer(major, minor, patch, rank, sequence, channel)) {
+        found = 1
+        best_tag = tag
+        best_major = major
+        best_minor = minor
+        best_patch = patch
+        best_rank = rank
+        best_sequence = sequence
+        best_channel = channel
+      }
+    }
+    END {
+      if (found) print best_tag
+    }
+  '
+}
+
+latest_compatible_version() {
+  release_versions_for "$repo" > "$tmp/squire-releases"
+  release_versions_for "$codex_repo" > "$tmp/squire-codex-releases"
+  awk '
+    NR == FNR { codex[$0] = 1; next }
+    $0 in codex { print }
+  ' "$tmp/squire-codex-releases" "$tmp/squire-releases" |
+    latest_semantic_version
 }
 
 verify_checksum() {
@@ -314,12 +383,15 @@ fi
 
 os="$(detect_os)"
 arch="$(detect_arch)"
+tmp="${TMPDIR:-/tmp}/squire-install.$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 if [ -z "$version" ]; then
-  version="$(latest_version_for "$repo")"
+  version="$(latest_compatible_version)"
 fi
 if [ -z "$version" ]; then
-  fail "could not resolve latest release; set SQUIRE_VERSION"
+  fail "could not resolve a release published by both Squire and Squire Codex; set SQUIRE_VERSION and SQUIRE_CODEX_VERSION"
 fi
 if [ -z "$codex_version" ]; then
   codex_version="$version"
@@ -327,9 +399,6 @@ fi
 
 asset="squire_${version}_${os}_${arch}.tar.gz"
 codex_asset="squire-codex_${codex_version}_${os}_${arch}.tar.gz"
-tmp="${TMPDIR:-/tmp}/squire-install.$$"
-mkdir -p "$tmp"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 if [ -n "$artifact_dir" ]; then
   cp "$artifact_dir/$asset" "$tmp/$asset"

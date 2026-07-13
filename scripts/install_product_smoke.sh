@@ -3,7 +3,7 @@ set -eu
 
 root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 work="${TMPDIR:-/tmp}/squire-install-product-smoke.$$"
-version="v0.0.0-smoke"
+version="v0.7.0-beta.10"
 
 cleanup() {
   rm -rf "$work"
@@ -21,7 +21,13 @@ case "$(uname -m)" in
   *) echo "install product smoke: unsupported architecture" >&2; exit 0 ;;
 esac
 
-mkdir -p "$work/squire-artifacts" "$work/codex-artifacts" "$work/install" "$work/go-cache"
+mkdir -p \
+  "$work/squire-artifacts" \
+  "$work/codex-artifacts" \
+  "$work/install" \
+  "$work/go-cache" \
+  "$work/api/repos/reidgoodbar/squire" \
+  "$work/api/repos/reidgoodbar/squire-codex"
 (
   cd "$root"
   GOCACHE="$work/go-cache" \
@@ -60,8 +66,22 @@ printf '1\n' > "$codex_stage/SQUIRE_RUNTIME_ABI"
   fi
 )
 
-SQUIRE_VERSION="$version" \
-  SQUIRE_CODEX_VERSION="$version" \
+cat > "$work/api/repos/reidgoodbar/squire/releases" <<'EOF'
+[
+  {"tag_name":"v0.7.0-beta.9"},
+  {"tag_name":"v0.7.0-beta.8"},
+  {"tag_name":"v0.7.0-beta.10"},
+  {"tag_name":"v0.6.5"}
+]
+EOF
+cat > "$work/api/repos/reidgoodbar/squire-codex/releases" <<'EOF'
+[
+  {"tag_name":"v0.7.0-beta.10"},
+  {"tag_name":"v0.7.0-beta.7"}
+]
+EOF
+
+GITHUB_API_URL="file://$work/api" \
   SQUIRE_ARTIFACT_DIR="$work/squire-artifacts" \
   SQUIRE_CODEX_ARTIFACT_DIR="$work/codex-artifacts" \
   SQUIRE_INSTALL_DIR="$work/install" \
