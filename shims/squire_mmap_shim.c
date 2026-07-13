@@ -13,7 +13,7 @@
 //   - static environment probes, printenv <safe-var>, and tight directory listings
 //
 // Required/optional launcher environment:
-//   SQUIRE_STORE_ROOT       optional; otherwise discovered as <gitdir>/squire/kernel
+//   SQUIRE_STORE_ROOT       optional; otherwise discovered as <gitdir>/squire/state
 //   SQUIRE_SHIM_REAL_PATH   optional native PATH used for proof and fallback
 //   SQUIRE_REAL_<TOOL>      optional exact native binary path, e.g. SQUIRE_REAL_GIT
 
@@ -3759,12 +3759,13 @@ static int output_fixed_rg(const unsigned char *content, uint32_t len, const cha
 }
 
 static int discover_store_root(const char *cwd, char store_root[PATH_BUF]) {
-	const char *env = getenv("SQUIRE_KERNEL_STORE_ROOT");
+	const char *env = getenv("SQUIRE_STORE_ROOT");
 	if (env != NULL && env[0] != '\0') {
 		snprintf(store_root, PATH_BUF, "%s", env);
 		return 1;
 	}
-	env = getenv("SQUIRE_STORE_ROOT");
+	/* Compatibility with pre-1.0 Squire sessions. */
+	env = getenv("SQUIRE_KERNEL_STORE_ROOT");
 	if (env != NULL && env[0] != '\0') {
 		snprintf(store_root, PATH_BUF, "%s", env);
 		return 1;
@@ -3773,7 +3774,7 @@ static int discover_store_root(const char *cwd, char store_root[PATH_BUF]) {
 	if (!discover_git_dir(cwd, repo_root, git_dir)) {
 		return 0;
 	}
-	return join_path(store_root, PATH_BUF, git_dir, "squire/kernel");
+	return join_path(store_root, PATH_BUF, git_dir, "squire/state");
 }
 
 static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const char epoch[256], const char *store_root, long long replay_start_ns) {

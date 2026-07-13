@@ -11,14 +11,14 @@ import (
 	"os"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 var shimHelperMagic = [8]byte{'S', 'Q', 'S', 'H', 'I', 'M', '1', 0}
 
 const shimHelperMaxRequestBytes = 1 << 20
 
-func runKernelShimHelper(ctx context.Context, defaultCWD string, args []string) error {
+func runRuntimeShimHelper(ctx context.Context, defaultCWD string, args []string) error {
 	socketPath, err := parseShimHelperSocket(args)
 	if err != nil {
 		return err
@@ -37,7 +37,7 @@ func runKernelShimHelper(ctx context.Context, defaultCWD string, args []string) 
 	}()
 	_ = os.Chmod(socketPath, 0o600)
 
-	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
+	sessionID := preferredEnv("SQUIRE_SESSION_ID", "SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "shim-helper"
 	}
@@ -45,7 +45,7 @@ func runKernelShimHelper(ctx context.Context, defaultCWD string, args []string) 
 		defaultCWD:       defaultCWD,
 		defaultSessionID: sessionID,
 		ensureMaintainer: true,
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -70,14 +70,14 @@ func runKernelShimHelper(ctx context.Context, defaultCWD string, args []string) 
 func parseShimHelperSocket(args []string) (string, error) {
 	for i := 0; i < len(args); i++ {
 		if args[i] != "--socket" {
-			return "", fmt.Errorf("unknown kernel shim-helper option %q", args[i])
+			return "", fmt.Errorf("unknown runtime shim-helper option %q", args[i])
 		}
 		if i+1 >= len(args) || args[i+1] == "" {
-			return "", fmt.Errorf("kernel shim-helper --socket requires a path")
+			return "", fmt.Errorf("runtime shim-helper --socket requires a path")
 		}
 		return args[i+1], nil
 	}
-	return "", fmt.Errorf("kernel shim-helper requires --socket <path>")
+	return "", fmt.Errorf("runtime shim-helper requires --socket <path>")
 }
 
 func handleShimHelperConn(ctx context.Context, server *adapterServer, conn net.Conn) {
@@ -138,13 +138,13 @@ func writeShimHelperResponse(w io.Writer, resp adapterResponse) error {
 	return writeShimHelperFrame(w, resp.ExitCode, shimHelperMode(resp.Mode), stdout, stderr)
 }
 
-func shimHelperMode(mode kernel.Mode) uint32 {
+func shimHelperMode(mode proofcache.Mode) uint32 {
 	switch mode {
-	case kernel.ModeReplay:
+	case proofcache.ModeReplay:
 		return 1
-	case kernel.ModeNever:
+	case proofcache.ModeNever:
 		return 3
-	case kernel.ModeNative:
+	case proofcache.ModeNative:
 		return 2
 	default:
 		return 0

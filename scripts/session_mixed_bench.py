@@ -317,7 +317,7 @@ def stats_us(values: list[int]) -> dict[str, float | int]:
 
 
 def hot_event_counts(repo: Path) -> tuple[Counter[str], list[int]]:
-    log = repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    log = repo / ".git" / "squire" / "state" / "hot_client_events.log"
     counts: Counter[str] = Counter()
     replay_us: list[int] = []
     if not log.exists():
@@ -425,7 +425,7 @@ def main() -> int:
     native_records = run_driver(shell, driver, plan, repo)
 
     run([str(squire), "setup"], repo)
-    run([str(squire), "kernel", "warm", "--short"], repo)
+    run([str(squire), "runtime", "warm", "--short"], repo)
     before_counts, before_us = hot_event_counts(repo)
     session_args = [
         str(squire),

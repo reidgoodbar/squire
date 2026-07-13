@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 var sessionShimNames = []string{
@@ -115,7 +115,7 @@ func parseSessionOptions(args []string) (sessionOptions, error) {
 }
 
 func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOptions) (int, error) {
-	env := append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_STORE_ROOT="+storeRoot)
+	env := append(os.Environ(), "SQUIRE_STORE_ROOT="+storeRoot)
 	if sessionCommandIsCodex(opts.Command) {
 		env = append(env, squireCodexBridgeEnv()...)
 	}
@@ -146,20 +146,20 @@ func runScopedSession(ctx context.Context, cwd, storeRoot string, opts sessionOp
 		}
 	}
 
-	if _, err := kernel.Setup(ctx, cwd, storeRoot); err != nil {
+	if _, err := proofcache.Setup(ctx, cwd, storeRoot); err != nil {
 		return 0, err
 	}
 	if !opts.NoMaintainer {
-		if _, err := kernel.StartBackgroundMaintainer(ctx, cwd, storeRoot, kernel.DefaultBackgroundMaintainerOptions()); err != nil {
+		if _, err := proofcache.StartBackgroundMaintainer(ctx, cwd, storeRoot, proofcache.DefaultBackgroundMaintainerOptions()); err != nil {
 			return 0, err
 		}
 	}
 	if !opts.NoWarm {
 		if opts.MetadataOnly {
-			if _, err := kernel.WarmMetadata(ctx, cwd, storeRoot); err != nil {
+			if _, err := proofcache.WarmMetadata(ctx, cwd, storeRoot); err != nil {
 				return 0, err
 			}
-		} else if _, err := kernel.Warm(ctx, cwd, storeRoot); err != nil {
+		} else if _, err := proofcache.Warm(ctx, cwd, storeRoot); err != nil {
 			return 0, err
 		}
 	}
@@ -316,7 +316,7 @@ func startHotEventPipe(storeRoot string) *hotEventPipe {
 		scanner := bufio.NewScanner(reader)
 		scanner.Buffer(make([]byte, 0, 1024), 16*1024)
 		for scanner.Scan() {
-			_ = kernel.AppendHotClientEventLine(storeRoot, scanner.Bytes())
+			_ = proofcache.AppendHotClientEventLine(storeRoot, scanner.Bytes())
 		}
 	}()
 	return pipe

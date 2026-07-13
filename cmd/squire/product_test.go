@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 	squireruntime "squire.run/internal/runtime"
 )
 
@@ -49,8 +49,8 @@ func TestRunnableFileRequiresExecutableRegularFile(t *testing.T) {
 
 func TestProductStatusReportsProductionRuntimeLanes(t *testing.T) {
 	repo := initAdapterGitRepo(t)
-	storeRoot := kernel.DefaultStoreRoot(repo)
-	if _, err := kernel.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
+	storeRoot := proofcache.DefaultStoreRoot(repo)
+	if _, err := proofcache.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runProductStatus(context.Background(), repo, storeRoot, outputJSON)

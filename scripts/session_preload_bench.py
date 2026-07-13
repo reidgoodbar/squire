@@ -317,7 +317,7 @@ def summary_us(values: list[int]) -> dict[str, float | int]:
 
 
 def hot_client_replay_us(repo: Path) -> list[int]:
-    log = repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    log = repo / ".git" / "squire" / "state" / "hot_client_events.log"
     if not log.exists():
         return []
     values: list[int] = []
@@ -353,7 +353,7 @@ def main() -> int:
     compile_driver(work / "driver.c", driver, shell_launcher=args.shell_launcher)
 
     run([str(squire), "setup"], repo)
-    run([str(squire), "kernel", "warm", "--metadata-only", "--short"], repo)
+    run([str(squire), "runtime", "warm", "--metadata-only", "--short"], repo)
     head = run(["git", "rev-parse", "HEAD"], repo).stdout.decode().strip()
 
     exact_env = os.environ.copy()
@@ -415,7 +415,7 @@ def main() -> int:
     hot_events = hot_client_replay_us(repo)[hot_events_before:]
 
     try:
-        run([str(squire), "kernel", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
+        run([str(squire), "runtime", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
     except Exception:
         pass
 

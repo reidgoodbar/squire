@@ -3,7 +3,7 @@
 
 The measured Squire workload uses ordinary command argv sent through long-lived
 terminal adapter sessions. The measured command stream does not contain
-`squire kernel run -- ...`.
+`squire runtime run -- ...`.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ class Adapter:
         self.repo = repo
         self.agent_id = agent_id
         self.proc = subprocess.Popen(
-            [str(squire), "kernel", "adapter", "--stdio"],
+            [str(squire), "runtime", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -295,13 +295,13 @@ def bench_level(squire: Path, agents: int, rounds: int) -> dict[str, Any]:
     commands = workload()
     try:
         run([str(squire), "setup"], repo)
-        run([str(squire), "kernel", "maintain", "--background", "--short"], repo)
-        run([str(squire), "kernel", "warm", "--short"], repo, timeout=60)
+        run([str(squire), "runtime", "maintain", "--background", "--short"], repo)
+        run([str(squire), "runtime", "warm", "--short"], repo, timeout=60)
 
         expected = expected_outputs(repo, commands)
         native = run_native_agents(repo, commands, expected, agents, rounds)
         squire_result = run_squire_agents(repo, squire, commands, expected, agents, rounds)
-        run([str(squire), "kernel", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
+        run([str(squire), "runtime", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
 
         native_wall = float(native["wall_ms"])
         squire_wall = float(squire_result["wall_ms"])
@@ -315,7 +315,7 @@ def bench_level(squire: Path, agents: int, rounds: int) -> dict[str, Any]:
             "ux": {
                 "mode": "invisible_terminal_adapter",
                 "agent_visible_squire_command": False,
-                "hidden_backend": "squire kernel adapter --stdio",
+                "hidden_backend": "squire runtime adapter --stdio",
                 "measured_command_stream_contains_squire": False,
             },
             "native": {
@@ -336,7 +336,7 @@ def bench_level(squire: Path, agents: int, rounds: int) -> dict[str, Any]:
             "no_broad_agent_speedup_claim": True,
         }
     finally:
-        run([str(squire), "kernel", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
+        run([str(squire), "runtime", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
         shutil.rmtree(repo, ignore_errors=True)
 
 

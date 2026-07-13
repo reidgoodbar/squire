@@ -102,6 +102,10 @@ Git metadata, use a selective environment comparison.
 The durable store can therefore be stale without creating stale hits. Epoch
 mismatch is invalidation.
 
+Prepared state lives under `<git-common-dir>/squire/state` for Git workspaces
+and `.squire/state` for non-Git workspaces. `SQUIRE_STORE_ROOT` may override
+that location for isolated tests and advanced deployments.
+
 ## Composition Engine
 
 The runtime parses a deliberately small shell grammar containing plain words,
@@ -174,6 +178,6 @@ squire status --json
 squire explain -- git status --short
 ```
 
-Backend diagnostics remain under `squire help advanced`, including legacy
-kernel, boost, scoped-session, benchmark, and VM commands. They are retained for
+Backend diagnostics remain under `squire help advanced`, including runtime,
+boost, scoped-session, benchmark, and VM commands. They are retained for
 release verification rather than normal use.

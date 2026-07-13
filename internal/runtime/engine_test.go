@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 func TestEngineReplaysPreparedGitMetadata(t *testing.T) {
 	repo := initRepo(t)
-	storeRoot := kernel.DefaultStoreRoot(repo)
-	if _, err := kernel.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
+	storeRoot := proofcache.DefaultStoreRoot(repo)
+	if _, err := proofcache.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
 		t.Fatal(err)
 	}
 	engine := NewEngine(NewRegistry(func(context.Context, *Workspace) error { return nil }))
@@ -179,8 +179,8 @@ func TestEngineDoesNotPrepareUnsupportedCommands(t *testing.T) {
 
 func TestEngineRejectsDifferentExecutionEnvironmentWithoutPreparing(t *testing.T) {
 	repo := initRepo(t)
-	storeRoot := kernel.DefaultStoreRoot(repo)
-	if _, err := kernel.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
+	storeRoot := proofcache.DefaultStoreRoot(repo)
+	if _, err := proofcache.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
@@ -208,8 +208,8 @@ func TestEngineRejectsDifferentExecutionEnvironmentWithoutPreparing(t *testing.T
 
 func TestEngineAcceptsExactExecutionEnvironment(t *testing.T) {
 	repo := initRepo(t)
-	storeRoot := kernel.DefaultStoreRoot(repo)
-	if _, err := kernel.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
+	storeRoot := proofcache.DefaultStoreRoot(repo)
+	if _, err := proofcache.WarmMetadata(context.Background(), repo, storeRoot); err != nil {
 		t.Fatal(err)
 	}
 	engine := NewEngine(NewRegistry(func(context.Context, *Workspace) error { return nil }))

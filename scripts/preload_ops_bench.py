@@ -264,14 +264,14 @@ def summary_us(values: list[int]) -> dict[str, float | int]:
 
 
 def event_lines(repo: Path) -> list[str]:
-    log = repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    log = repo / ".git" / "squire" / "state" / "hot_client_events.log"
     if not log.exists():
         return []
     return log.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
 def clear_event_log(repo: Path) -> None:
-    log = repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    log = repo / ".git" / "squire" / "state" / "hot_client_events.log"
     if log.exists():
         log.unlink()
 
@@ -335,7 +335,7 @@ def main() -> int:
     compile_driver(work / "driver.c", driver)
 
     run([str(squire), "setup"], repo)
-    run([str(squire), "kernel", "warm", "--short"], repo)
+    run([str(squire), "runtime", "warm", "--short"], repo)
 
     commands = {
         "git_rev_parse_head": ["git", "rev-parse", "HEAD"],

@@ -46,7 +46,7 @@ class AdapterSession:
     def __init__(self, sq: list[str], repo: Path):
         self.repo = repo
         self.proc = subprocess.Popen(
-            sq + ["kernel", "adapter", "--stdio"],
+            sq + ["runtime", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -195,14 +195,14 @@ def squire_debug(
 ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any] | None]:
     if USE_NORMAL_UX:
         return adapter_for(sq, repo).request(command, cwd=repo, env=env, debug=True)
-    debug_env = {"SQUIRE_KERNEL_DEBUG_RESULT": "1"}
+    debug_env = {"SQUIRE_DEBUG_RESULT": "1"}
     if env:
         debug_env.update(env)
-    proc = squire(sq, repo, ["kernel", "run", "--"] + command, env=debug_env, timeout=timeout)
+    proc = squire(sq, repo, ["runtime", "run", "--"] + command, env=debug_env, timeout=timeout)
     debug = None
     real_stderr: list[str] = []
     for line in proc.stderr.decode(errors="replace").splitlines(keepends=True):
-        prefix = "SQUIRE_KERNEL_RESULT "
+        prefix = "SQUIRE_RESULT "
         stripped = line.rstrip("\r\n")
         if stripped.startswith(prefix):
             debug = json.loads(stripped[len(prefix) :])
@@ -249,20 +249,20 @@ def make_repo(prefix: str, keep_tmp: bool) -> Path:
     return repo
 
 
-def setup_kernel(sq: list[str], repo: Path, *, background: bool = True, env: dict[str, str] | None = None) -> int | None:
+def setup_runtime(sq: list[str], repo: Path, *, background: bool = True, env: dict[str, str] | None = None) -> int | None:
     squire(sq, repo, ["setup"], env=env, check=True)
     if background:
-        start = squire(sq, repo, ["kernel", "maintain", "--background", "--short"], env=env, check=True)
+        start = squire(sq, repo, ["runtime", "maintain", "--background", "--short"], env=env, check=True)
         pid = parse_pid(start.stdout.decode(errors="replace"))
-        squire(sq, repo, ["kernel", "warm", "--short"], env=env, check=True, timeout=60)
+        squire(sq, repo, ["runtime", "warm", "--short"], env=env, check=True, timeout=60)
         return pid
-    squire(sq, repo, ["kernel", "warm", "--short"], env=env, check=True, timeout=60)
+    squire(sq, repo, ["runtime", "warm", "--short"], env=env, check=True, timeout=60)
     return None
 
 
-def stop_kernel(sq: list[str], repo: Path) -> None:
+def stop_runtime(sq: list[str], repo: Path) -> None:
     close_adapter(repo)
-    squire(sq, repo, ["kernel", "maintain", "--stop", "--short"], timeout=10)
+    squire(sq, repo, ["runtime", "maintain", "--stop", "--short"], timeout=10)
 
 
 def parse_pid(text: str) -> int | None:
@@ -281,7 +281,7 @@ def parse_pid(text: str) -> int | None:
 
 
 def event_path(repo: Path) -> Path:
-    return repo / ".git" / "squire" / "kernel" / "hot_client_events.log"
+    return repo / ".git" / "squire" / "state" / "hot_client_events.log"
 
 
 def replay_us(repo: Path) -> list[int]:
@@ -401,7 +401,7 @@ def low_fd_preexec(limit: int):
 def scenario_echo(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
     repo = make_repo("squire-edge-echo.", args.keep_tmp)
     try:
-        setup_kernel(sq, repo)
+        setup_runtime(sq, repo)
         expected = run(["git", "rev-parse", "--show-toplevel"], cwd=repo, check=True).stdout
         before = len(replay_us(repo))
 
@@ -410,7 +410,7 @@ def scenario_echo(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             if USE_NORMAL_UX:
                 proc, _ = adapter_for(sq, repo).request(["git", "rev-parse", "--show-toplevel"], cwd=repo)
             else:
-                proc = squire(sq, repo, ["kernel", "run", "--", "git", "rev-parse", "--show-toplevel"])
+                proc = squire(sq, repo, ["runtime", "run", "--", "git", "rev-parse", "--show-toplevel"])
             elapsed = (time.perf_counter_ns() - start) // 1000
             return elapsed, proc
 
@@ -439,7 +439,7 @@ def scenario_echo(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "strict_performance": args.strict_performance,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -454,13 +454,13 @@ def scenario_warm_race(sq: list[str], args: argparse.Namespace) -> dict[str, Any
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "race seed"], cwd=repo, check=True)
 
-        setup_kernel(sq, repo, background=False)
+        setup_runtime(sq, repo, background=False)
         old, old_debug = squire_debug(sq, repo, ["cat", "src/target.py"])
         if old.returncode != 0 or old.stdout != b"VALUE = 'old'\n":
             raise StressFailure(f"warm race setup failed: {old.returncode} {old.stdout!r} {old.stderr!r}")
 
         warm = subprocess.Popen(
-            sq + ["kernel", "warm", "--short"],
+            sq + ["runtime", "warm", "--short"],
             cwd=str(repo),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -506,14 +506,14 @@ def scenario_warm_race(sq: list[str], args: argparse.Namespace) -> dict[str, Any
 def scenario_sigterm(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
     repo = make_repo("squire-edge-sigterm.", args.keep_tmp)
     try:
-        pid = setup_kernel(sq, repo)
+        pid = setup_runtime(sq, repo)
         baseline_fd = fd_count(pid)
         baseline_rss = rss_kb(pid)
         hot_children: list[subprocess.Popen[bytes]] = []
         for _ in range(args.sigterm_clients):
             hot_children.append(
                 subprocess.Popen(
-                    sq + ["kernel", "run", "--", "git", "rev-parse", "--show-toplevel"],
+                    sq + ["runtime", "run", "--", "git", "rev-parse", "--show-toplevel"],
                     cwd=str(repo),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -537,7 +537,7 @@ def scenario_sigterm(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         for _ in range(args.sigterm_clients):
             slow_children.append(
                 subprocess.Popen(
-                    sq + ["kernel", "run", "--", "sh", "-c", "sleep 5; git status --short"],
+                    sq + ["runtime", "run", "--", "sh", "-c", "sleep 5; git status --short"],
                     cwd=str(repo),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -562,11 +562,11 @@ def scenario_sigterm(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         time.sleep(0.25)
         final_fd = fd_count(pid)
         final_rss = rss_kb(pid)
-        follow = squire(sq, repo, ["kernel", "status", "--short"], check=True)
+        follow = squire(sq, repo, ["runtime", "status", "--short"], check=True)
         if b"native_fallback: available" not in follow.stdout:
             raise StressFailure(f"sigterm: follow-up status unhealthy\n{follow.stdout.decode(errors='replace')}")
         native = run(["git", "rev-parse", "HEAD"], cwd=repo, check=True)
-        squire_head = squire(sq, repo, ["kernel", "run", "--", "git", "rev-parse", "HEAD"], check=True)
+        squire_head = squire(sq, repo, ["runtime", "run", "--", "git", "rev-parse", "HEAD"], check=True)
         require_exact("sigterm follow-up HEAD", squire_head, native)
         fd_delta = None if baseline_fd is None or final_fd is None else final_fd - baseline_fd
         fd_pass = fd_delta is None or fd_delta <= args.fd_delta_budget
@@ -588,7 +588,7 @@ def scenario_sigterm(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "rss_kb_final": final_rss,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -596,7 +596,7 @@ def scenario_sigterm(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
 def scenario_gitignore(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
     repo = make_repo("squire-edge-gitignore.", args.keep_tmp)
     try:
-        setup_kernel(sq, repo)
+        setup_runtime(sq, repo)
         scratch = repo / "scratch.tmp"
         scratch.write_text("scratch\n", encoding="utf-8")
         native_before = run(["git", "status", "--porcelain"], cwd=repo, check=True)
@@ -610,7 +610,7 @@ def scenario_gitignore(sq: list[str], args: argparse.Namespace) -> dict[str, Any
         if b"scratch.tmp" in squire_after.stdout:
             raise StressFailure("gitignore: stale status exposed ignored scratch.tmp")
 
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
         squire_warmed, warmed_debug = squire_debug(sq, repo, ["git", "status", "--porcelain"])
         require_exact("gitignore warmed after", squire_warmed, native_after)
         return {
@@ -622,7 +622,7 @@ def scenario_gitignore(sq: list[str], args: argparse.Namespace) -> dict[str, Any
             "ignored_file_exposed_after": False,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -644,7 +644,7 @@ def scenario_env(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         env_a = {"PATH": f"{bin_a.parent}{os.pathsep}{base_path}"}
         env_b = {"PATH": f"{bin_b.parent}{os.pathsep}{base_path}"}
 
-        setup_kernel(sq, repo, background=False, env=env_a)
+        setup_runtime(sq, repo, background=False, env=env_a)
         native_a = run(["which", "python3"], cwd=repo, env=env_a, check=True)
         squire_a, debug_a = squire_debug(sq, repo, ["which", "python3"], env=env_a)
         require_exact("env A which python3", squire_a, native_a)
@@ -655,7 +655,7 @@ def scenario_env(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         if squire_b_cold.stdout == squire_a.stdout:
             raise StressFailure("env variants: PATH B received PATH A result")
 
-        squire(sq, repo, ["kernel", "warm", "--short"], env=env_b, check=True, timeout=60)
+        squire(sq, repo, ["runtime", "warm", "--short"], env=env_b, check=True, timeout=60)
         squire_b_warm, debug_b_warm = squire_debug(sq, repo, ["which", "python3"], env=env_b)
         require_exact("env B warmed which python3", squire_b_warm, native_b_cold)
         return {
@@ -684,9 +684,9 @@ def scenario_cwd(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "cwd seed"], cwd=repo, check=True)
 
-        setup_kernel(sq, repo)
+        setup_runtime(sq, repo)
         for cwd in (repo, core, integration):
-            squire(sq, cwd, ["kernel", "warm", "--short"], check=True, timeout=60)
+            squire(sq, cwd, ["runtime", "warm", "--short"], check=True, timeout=60)
 
         commands: list[tuple[str, Path, list[str]]] = [
             ("root_git_dir", repo, ["git", "rev-parse", "--git-dir"]),
@@ -726,7 +726,7 @@ def scenario_cwd(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "observed_modes": modes,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -756,7 +756,7 @@ def scenario_symlink(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "symlink seed"], cwd=repo, check=True)
 
-        setup_kernel(sq, repo)
+        setup_runtime(sq, repo)
         cases = [
             ("inside_file_symlink", ["cat", "src/app.json"], True),
             ("inside_dir_symlink", ["cat", "linked_src/config.json"], True),
@@ -780,7 +780,7 @@ def scenario_symlink(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "observed_modes": modes,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         shutil.rmtree(outside, ignore_errors=True)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
@@ -807,16 +807,16 @@ def scenario_sigpipe(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         (repo / "long_file.json").write_bytes(payload)
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "sigpipe seed"], cwd=repo, check=True)
-        pid = setup_kernel(sq, repo)
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        pid = setup_runtime(sq, repo)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
         baseline_fd = fd_count(pid)
 
         native_rc, native_first = early_close_returncode(["cat", "long_file.json"], repo)
-        squire_rc, squire_first = early_close_returncode(sq + ["kernel", "run", "--", "cat", "long_file.json"], repo)
+        squire_rc, squire_first = early_close_returncode(sq + ["runtime", "run", "--", "cat", "long_file.json"], repo)
         if native_first != squire_first:
             raise StressFailure(f"sigpipe: first byte mismatch native={native_first!r} squire={squire_first!r}")
         follow_native = run(["git", "rev-parse", "HEAD"], cwd=repo, check=True)
-        follow_squire = squire(sq, repo, ["kernel", "run", "--", "git", "rev-parse", "HEAD"], check=True)
+        follow_squire = squire(sq, repo, ["runtime", "run", "--", "git", "rev-parse", "HEAD"], check=True)
         require_exact("sigpipe follow-up HEAD", follow_squire, follow_native)
         final_fd = fd_count(pid)
         fd_delta = None if baseline_fd is None or final_fd is None else final_fd - baseline_fd
@@ -835,7 +835,7 @@ def scenario_sigpipe(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "fd_delta": fd_delta,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -847,8 +847,8 @@ def scenario_ansi(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         (repo / "ansi.json").write_bytes(payload)
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "ansi seed"], cwd=repo, check=True)
-        setup_kernel(sq, repo)
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        setup_runtime(sq, repo)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
         native = run(["cat", "ansi.json"], cwd=repo, check=True)
         observed, debug = squire_debug(sq, repo, ["cat", "ansi.json"])
         require_exact("ansi byte fidelity", observed, native)
@@ -864,7 +864,7 @@ def scenario_ansi(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "contains_ansi_escape": b"\x1b[31m" in observed.stdout,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -880,8 +880,8 @@ def scenario_mtime(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         target.write_bytes(old)
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "mtime seed"], cwd=repo, check=True)
-        setup_kernel(sq, repo)
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        setup_runtime(sq, repo)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
         before, before_debug = squire_debug(sq, repo, ["cat", "src/skew.py"])
         if before.stdout != old:
             raise StressFailure(f"mtime setup read mismatch: {before.stdout!r}")
@@ -909,20 +909,20 @@ def scenario_mtime(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "stale_output_replayed": False,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
 
 def scenario_storage(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
     repo = make_repo("squire-edge-storage.", args.keep_tmp)
-    store = repo / ".git" / "squire" / "kernel"
+    store = repo / ".git" / "squire" / "state"
     try:
         target = repo / "src" / "storage.py"
         target.write_text("VALUE = 'old'\n", encoding="utf-8")
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "storage seed"], cwd=repo, check=True)
-        setup_kernel(sq, repo, background=False)
+        setup_runtime(sq, repo, background=False)
         before, before_debug = squire_debug(sq, repo, ["cat", "src/storage.py"])
         if before.returncode != 0 or before.stdout != b"VALUE = 'old'\n":
             raise StressFailure(f"storage setup read mismatch: {before.returncode} {before.stdout!r}")
@@ -933,13 +933,13 @@ def scenario_storage(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
                 old_modes[path] = stat.S_IMODE(path.stat().st_mode)
                 path.chmod(0o500)
         target.write_text("VALUE = 'new'\n", encoding="utf-8")
-        warm = squire(sq, repo, ["kernel", "warm", "--short"], timeout=30)
+        warm = squire(sq, repo, ["runtime", "warm", "--short"], timeout=30)
         observed, debug = squire_debug(sq, repo, ["cat", "src/storage.py"])
         native = run(["cat", "src/storage.py"], cwd=repo, check=True)
         require_exact("storage write-denial fallback", observed, native)
         if observed.stdout == b"VALUE = 'old'\n":
             raise StressFailure("storage: stale old bytes replayed after store write denial")
-        status = squire(sq, repo, ["kernel", "status", "--short"])
+        status = squire(sq, repo, ["runtime", "status", "--short"])
         if status.returncode != 0:
             raise StressFailure(f"storage: status failed after write denial: {status.stderr!r}")
         return {
@@ -950,7 +950,7 @@ def scenario_storage(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "before_mode": (before_debug or {}).get("mode"),
             "after_mode": (debug or {}).get("mode"),
             "stale_output_replayed": False,
-            "kernel_status_ok": True,
+            "runtime_status_ok": True,
         }
     finally:
         for path, mode in sorted(old_modes.items(), key=lambda item: len(str(item[0]))):
@@ -967,13 +967,13 @@ def scenario_emfile(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         return {"scenario": "emfile_fd_limit", "status": "skip", "reason": "resource limits unavailable"}
     repo = make_repo("squire-edge-emfile.", args.keep_tmp)
     try:
-        setup_kernel(sq, repo)
+        setup_runtime(sq, repo)
         expected = run(["git", "rev-parse", "--show-toplevel"], cwd=repo, check=True).stdout
         preexec = low_fd_preexec(args.emfile_limit)
 
         def one() -> tuple[int, bytes, bytes]:
             proc = subprocess.run(
-                sq + ["kernel", "run", "--", "git", "rev-parse", "--show-toplevel"],
+                sq + ["runtime", "run", "--", "git", "rev-parse", "--show-toplevel"],
                 cwd=str(repo),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -990,9 +990,9 @@ def scenario_emfile(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
                 failures += 1
         if failures:
             raise StressFailure(f"emfile: {failures} clients failed exact output under fd limit {args.emfile_limit}")
-        follow = squire(sq, repo, ["kernel", "status", "--short"], check=True)
+        follow = squire(sq, repo, ["runtime", "status", "--short"], check=True)
         if b"native_fallback: available" not in follow.stdout:
-            raise StressFailure("emfile: kernel status lost native fallback")
+            raise StressFailure("emfile: runtime status lost native fallback")
         return {
             "scenario": "emfile_fd_limit",
             "status": "pass",
@@ -1001,7 +1001,7 @@ def scenario_emfile(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "exact_failures": failures,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -1015,14 +1015,14 @@ def scenario_signalflood(sq: list[str], args: argparse.Namespace) -> dict[str, A
         (repo / "signal.json").write_bytes(payload)
         run(["git", "add", "."], cwd=repo, check=True)
         run(["git", "commit", "-m", "signal seed"], cwd=repo, check=True)
-        setup_kernel(sq, repo)
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        setup_runtime(sq, repo)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
 
         children: list[subprocess.Popen[bytes]] = []
         signals_sent = 0
         for _ in range(args.signal_clients):
             child = subprocess.Popen(
-                sq + ["kernel", "run", "--", "cat", "signal.json"],
+                sq + ["runtime", "run", "--", "cat", "signal.json"],
                 cwd=str(repo),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1073,7 +1073,7 @@ def scenario_signalflood(sq: list[str], args: argparse.Namespace) -> dict[str, A
             "mismatches": mismatches,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -1085,8 +1085,8 @@ def scenario_giant(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         payload = payload[: args.giant_bytes]
         target = repo / "giant.json"
         target.write_bytes(payload)
-        setup_kernel(sq, repo)
-        squire(sq, repo, ["kernel", "warm", "--short"], check=True, timeout=60)
+        setup_runtime(sq, repo)
+        squire(sq, repo, ["runtime", "warm", "--short"], check=True, timeout=60)
         observed, debug = squire_debug(sq, repo, ["cat", "giant.json"], timeout=60)
         if observed.returncode != 0:
             raise StressFailure(f"giant: squire returned {observed.returncode} stderr={observed.stderr!r}")
@@ -1104,7 +1104,7 @@ def scenario_giant(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             "oversized_payload_replayed": False,
         }
     finally:
-        stop_kernel(sq, repo)
+        stop_runtime(sq, repo)
         if not args.keep_tmp:
             shutil.rmtree(repo, ignore_errors=True)
 
@@ -1133,7 +1133,7 @@ def scenario_zombie(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
         env = {"PATH": f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
         squire(sq, repo, ["setup"], env=env, check=True)
         proc = subprocess.Popen(
-            sq + ["kernel", "warm", "--short"],
+            sq + ["runtime", "warm", "--short"],
             cwd=str(repo),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1162,7 +1162,7 @@ def scenario_zombie(sq: list[str], args: argparse.Namespace) -> dict[str, Any]:
             terminate_pid(pid)
         if alive:
             raise StressFailure(f"zombie cleanup: child tool processes still alive after warm termination: {alive}")
-        status = squire(sq, repo, ["kernel", "status", "--short"], env=env)
+        status = squire(sq, repo, ["runtime", "status", "--short"], env=env)
         return {
             "scenario": "zombie_process_cleanup",
             "status": "pass",

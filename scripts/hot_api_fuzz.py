@@ -527,7 +527,7 @@ def replay_is_current(hot: dict[str, Any], native: dict[str, Any]) -> bool:
 
 
 def warm_short(squire: Path, repo: Path, env: dict[str, str]) -> None:
-    run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
+    run([str(squire), "runtime", "warm", "--short"], repo, env=env, timeout=120)
 
 
 def append_invalidation_probe(
@@ -954,7 +954,7 @@ def main() -> int:
     env["GIT_OPTIONAL_LOCKS"] = "0"
     os.environ["GIT_OPTIONAL_LOCKS"] = "0"
     run([str(squire), "setup"], repo, env=env)
-    run([str(squire), "kernel", "warm", "--short"], repo, env=env, timeout=120)
+    run([str(squire), "runtime", "warm", "--short"], repo, env=env, timeout=120)
 
     api = HotAPI(lib)
     codex_user_shell_regression = run_codex_user_shell_regression(api, repo, env)

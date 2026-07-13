@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 	squireruntime "squire.run/internal/runtime"
 )
 
@@ -70,9 +70,9 @@ type productStatusReport struct {
 
 func runProductStatus(ctx context.Context, cwd, storeRoot string, format outputFormat) (string, error) {
 	workspace := productStatusWorkspace{State: "outside_workspace"}
-	if root, resolvedStore, ok := kernel.FastWorkspace(cwd); ok {
+	if root, resolvedStore, ok := proofcache.FastWorkspace(cwd); ok {
 		storeRoot = resolvedStore
-		snapshot := kernel.HotSnapshotStatsForStore(storeRoot)
+		snapshot := proofcache.HotSnapshotStatsForStore(storeRoot)
 		workspace = productStatusWorkspace{
 			State:           "cold",
 			Root:            root,
@@ -84,7 +84,7 @@ func runProductStatus(ctx context.Context, cwd, storeRoot string, format outputF
 			workspace.State = "ready"
 		}
 	}
-	metrics, err := kernel.BoostStatusReportForStore(ctx, cwd, storeRoot)
+	metrics, err := proofcache.BoostStatusReportForStore(ctx, cwd, storeRoot)
 	if err != nil {
 		return "", err
 	}
@@ -163,16 +163,16 @@ func runProductCodex(ctx context.Context, cwd, storeRoot string, args []string) 
 	if err != nil {
 		return 1, err
 	}
-	if repoRoot, resolvedStore, ok := kernel.FastWorkspace(cwd); ok {
+	if repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd); ok {
 		if resolvedStore != "" {
 			storeRoot = resolvedStore
 		}
 		go func() {
-			_, _ = kernel.StartBackgroundMaintainer(
+			_, _ = proofcache.StartBackgroundMaintainer(
 				context.Background(),
 				repoRoot,
 				storeRoot,
-				kernel.DefaultBackgroundMaintainerOptions(),
+				proofcache.DefaultBackgroundMaintainerOptions(),
 			)
 		}()
 	}
@@ -246,16 +246,16 @@ func runProductPrepare(ctx context.Context, cwd, storeRoot string, args []string
 	if err != nil {
 		return "", err
 	}
-	repoRoot, resolvedStore, ok := kernel.FastWorkspace(cwd)
+	repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd)
 	if !ok {
 		return "", fmt.Errorf("current directory is not inside a supported Git worktree")
 	}
 	storeRoot = resolvedStore
-	status, err := kernel.StartBackgroundMaintainer(
+	status, err := proofcache.StartBackgroundMaintainer(
 		ctx,
 		repoRoot,
 		storeRoot,
-		kernel.DefaultBackgroundMaintainerOptions(),
+		proofcache.DefaultBackgroundMaintainerOptions(),
 	)
 	if err != nil {
 		return "", err
@@ -328,7 +328,7 @@ func runProductDoctor(ctx context.Context, cwd string, format outputFormat) (str
 	add("codex-runtime-helper", true, helperPath != "", helperPath)
 	gitPath, gitErr := exec.LookPath("git")
 	add("git", true, gitErr == nil, gitPath)
-	if repoRoot, storeRoot, ok := kernel.FastWorkspace(cwd); ok {
+	if repoRoot, storeRoot, ok := proofcache.FastWorkspace(cwd); ok {
 		report.RepoRoot = repoRoot
 		report.StoreRoot = storeRoot
 		add("workspace", false, true, repoRoot)

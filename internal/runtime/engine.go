@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 type Outcome string
@@ -36,20 +36,20 @@ type Result struct {
 	Stdout       []byte
 	Stderr       []byte
 	ExitCode     int
-	Family       kernel.OperatorFamily
+	Family       proofcache.OperatorFamily
 	ProofID      string
 	NativeWallMS int64
 }
 
 type Explanation struct {
-	Outcome       Outcome               `json:"outcome"`
-	Eligible      bool                  `json:"eligible"`
-	Provider      string                `json:"provider,omitempty"`
-	Reason        string                `json:"reason,omitempty"`
-	Family        kernel.OperatorFamily `json:"family"`
-	WorkspaceRoot string                `json:"workspace_root,omitempty"`
-	StoreRoot     string                `json:"store_root,omitempty"`
-	ProofID       string                `json:"proof_id,omitempty"`
+	Outcome       Outcome                   `json:"outcome"`
+	Eligible      bool                      `json:"eligible"`
+	Provider      string                    `json:"provider,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	Family        proofcache.OperatorFamily `json:"family"`
+	WorkspaceRoot string                    `json:"workspace_root,omitempty"`
+	StoreRoot     string                    `json:"store_root,omitempty"`
+	ProofID       string                    `json:"proof_id,omitempty"`
 }
 
 func Miss(reason string) Result {
@@ -68,7 +68,7 @@ type Workspace struct {
 	ID        string
 	Root      string
 	StoreRoot string
-	Kernel    *kernel.Kernel
+	Cache     *proofcache.Engine
 }
 
 type PreparationStatus struct {
@@ -88,7 +88,7 @@ type workspaceEntry struct {
 	prepare   PreparationStatus
 }
 
-// Registry shares one prepared workspace and kernel instance across every
+// Registry shares one prepared workspace and proof-cache instance across every
 // agent request in a process. Repositories are keyed by their resolved Git
 // directory store, so subdirectories and git -C requests converge correctly.
 type Registry struct {
@@ -108,8 +108,8 @@ func NewRegistry(prepare PrepareFunc) *Registry {
 }
 
 func (r *Registry) Resolve(cwd string, argv []string) (*Workspace, bool) {
-	inv := kernel.NormalizeInvocation(cwd, argv)
-	root, storeRoot, ok := kernel.FastWorkspace(inv.PolicyCWD)
+	inv := proofcache.NormalizeInvocation(cwd, argv)
+	root, storeRoot, ok := proofcache.FastWorkspace(inv.PolicyCWD)
 	if !ok {
 		return nil, false
 	}
@@ -123,7 +123,7 @@ func (r *Registry) Resolve(cwd string, argv []string) (*Workspace, bool) {
 		ID:        key,
 		Root:      root,
 		StoreRoot: storeRoot,
-		Kernel:    kernel.New(storeRoot),
+		Cache:     proofcache.New(storeRoot),
 	}
 	r.workspaces[key] = &workspaceEntry{workspace: workspace}
 	return workspace, true
@@ -211,11 +211,11 @@ func (r *Registry) finishPreparation(workspaceID string, err error) {
 }
 
 func startMaintainer(ctx context.Context, workspace *Workspace) error {
-	status, err := kernel.StartBackgroundMaintainer(
+	status, err := proofcache.StartBackgroundMaintainer(
 		ctx,
 		workspace.Root,
 		workspace.StoreRoot,
-		kernel.DefaultBackgroundMaintainerOptions(),
+		proofcache.DefaultBackgroundMaintainerOptions(),
 	)
 	if err != nil {
 		return err
@@ -256,10 +256,10 @@ func (e *Engine) TryExecutePassive(ctx context.Context, request Request) Result 
 }
 
 func (e *Engine) Explain(ctx context.Context, request Request) Explanation {
-	inv := kernel.NormalizeInvocation(request.CWD, request.Argv)
+	inv := proofcache.NormalizeInvocation(request.CWD, request.Argv)
 	explanation := Explanation{
 		Eligible: eligible(inv),
-		Family:   kernel.Classify(inv.PolicyArgv),
+		Family:   proofcache.Classify(inv.PolicyArgv),
 	}
 	if workspace, ok := e.registry.Resolve(request.CWD, request.Argv); ok {
 		explanation.WorkspaceRoot = workspace.Root
@@ -277,21 +277,21 @@ func (e *Engine) tryExecute(ctx context.Context, request Request, prepare bool) 
 	if request.CWD == "" || len(request.Argv) == 0 {
 		return Miss("invalid execution request")
 	}
-	inv := kernel.NormalizeInvocation(request.CWD, request.Argv)
+	inv := proofcache.NormalizeInvocation(request.CWD, request.Argv)
 	if !eligible(inv) {
 		result := Miss("operation is not eligible for transparent acceleration")
-		result.Family = kernel.Classify(inv.PolicyArgv)
+		result.Family = proofcache.Classify(inv.PolicyArgv)
 		return result
 	}
 	if !environmentMatchesProcess(request.Env) {
 		result := Miss("execution environment differs from the prepared runtime")
-		result.Family = kernel.Classify(inv.PolicyArgv)
+		result.Family = proofcache.Classify(inv.PolicyArgv)
 		return result
 	}
 	workspace, ok := e.registry.Resolve(request.CWD, request.Argv)
 	if !ok {
 		result := Miss("no supported workspace")
-		result.Family = kernel.Classify(inv.PolicyArgv)
+		result.Family = proofcache.Classify(inv.PolicyArgv)
 		return result
 	}
 	for _, provider := range e.providers {
@@ -305,7 +305,7 @@ func (e *Engine) tryExecute(ctx context.Context, request Request, prepare bool) 
 		e.registry.EnsurePrepared(workspace)
 	}
 	result := Miss("workspace result is not prepared or no longer valid")
-	result.Family = kernel.Classify(inv.PolicyArgv)
+	result.Family = proofcache.Classify(inv.PolicyArgv)
 	return result
 }
 
@@ -335,8 +335,8 @@ func environmentMatchesProcess(env map[string]string) bool {
 	return true
 }
 
-func eligible(inv kernel.CommandInvocation) bool {
-	return kernel.IsProductionRuntimeInvocationAllowed(inv.OriginalCWD, inv.OriginalArgv)
+func eligible(inv proofcache.CommandInvocation) bool {
+	return proofcache.IsProductionRuntimeInvocationAllowed(inv.OriginalCWD, inv.OriginalArgv)
 }
 
 type snapshotProvider struct{}
@@ -346,19 +346,19 @@ func (snapshotProvider) Name() string {
 }
 
 func (snapshotProvider) Try(ctx context.Context, request Request, workspace *Workspace) (Result, bool) {
-	inv := kernel.NormalizeInvocation(request.CWD, request.Argv)
-	var replay *kernel.RunResult
+	inv := proofcache.NormalizeInvocation(request.CWD, request.Argv)
+	var replay *proofcache.RunResult
 	var ok bool
-	if script, scriptOK := kernel.ComposedShellArgvScript(inv.OriginalArgv); scriptOK {
-		value, replayOK := workspace.Kernel.ReplayComposedShell(ctx, request.SessionID, inv.PolicyCWD, script)
+	if script, scriptOK := proofcache.ComposedShellArgvScript(inv.OriginalArgv); scriptOK {
+		value, replayOK := workspace.Cache.ReplayComposedShell(ctx, request.SessionID, inv.PolicyCWD, script)
 		if replayOK {
 			replay = &value
 			ok = true
 		}
 	} else {
-		replay, ok = workspace.Kernel.FastReplayInvocation(ctx, request.SessionID, inv)
+		replay, ok = workspace.Cache.FastReplayInvocation(ctx, request.SessionID, inv)
 	}
-	if !ok || replay == nil || replay.Mode != kernel.ModeReplay {
+	if !ok || replay == nil || replay.Mode != proofcache.ModeReplay {
 		return Result{}, false
 	}
 	result := Result{

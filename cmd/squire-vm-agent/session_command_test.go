@@ -77,11 +77,8 @@ func TestGuestCommandEnvAllowsOnlySquireDiagnostics(t *testing.T) {
 	t.Setenv("SQUIRE_PRELOAD_TRACE", "0")
 	got := guestCommandEnv(req)
 	env := envMap(got)
-	if env["SQUIRE_KERNEL_STORE_ROOT"] != "/store" {
-		t.Fatalf("store root not set: %#v", env)
-	}
 	if env["SQUIRE_STORE_ROOT"] != "/store" {
-		t.Fatalf("legacy store root not set: %#v", env)
+		t.Fatalf("store root not set: %#v", env)
 	}
 	if env["SQUIRE_VM_GUEST_SESSION_TRANSPORT"] != "preload" {
 		t.Fatalf("guest transport not forwarded: %#v", env)

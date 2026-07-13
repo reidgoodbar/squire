@@ -39,7 +39,7 @@ stopped=0
 
 cleanup() {
   if [ "$stopped" -eq 0 ] && [ -d "$tmpdir/.git" ]; then
-    (cd "$tmpdir" && "$squire_bin" kernel maintain --stop --short >/dev/null 2>&1) || true
+    (cd "$tmpdir" && "$squire_bin" runtime maintain --stop --short >/dev/null 2>&1) || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -72,31 +72,31 @@ setup_out=$("$squire_bin" setup)
 require_contains "$setup_out" "privacy_mode: standard" "setup"
 require_contains "$setup_out" "global_shims: not installed" "setup"
 
-start_out=$("$squire_bin" kernel maintain --background --short)
+start_out=$("$squire_bin" runtime maintain --background --short)
 require_contains "$start_out" "status: started" "maintainer start"
 require_contains "$start_out" "running: true" "maintainer start"
 require_contains "$start_out" "native_fallback: true" "maintainer start"
 require_contains "$start_out" "agent_visible_suggestions: false" "maintainer start"
 
-warm_out=$("$squire_bin" kernel warm --short)
+warm_out=$("$squire_bin" runtime warm --short)
 require_contains "$warm_out" "privacy_mode: standard" "warm"
 require_contains "$warm_out" "replay_set_unchanged: true" "warm"
 
-status_out=$("$squire_bin" kernel status --short)
-require_contains "$status_out" "repo_oracle: available" "kernel status"
-require_contains "$status_out" "native_fallback: available" "kernel status"
-require_contains "$status_out" "runtime_decisions: replay_or_native" "kernel status"
+status_out=$("$squire_bin" runtime status --short)
+require_contains "$status_out" "repo_oracle: available" "runtime status"
+require_contains "$status_out" "native_fallback: available" "runtime status"
+require_contains "$status_out" "runtime_decisions: replay_or_native" "runtime status"
 
 native_head=$(git rev-parse HEAD)
 expected_head_b64=$(printf "%s\n" "$native_head" | base64 | tr -d '\n')
-adapter_out=$(printf '%s\n' '{"id":"head","argv":["git","rev-parse","HEAD"],"session_id":"release-smoke"}' | "$squire_bin" kernel adapter --stdio)
+adapter_out=$(printf '%s\n' '{"id":"head","argv":["git","rev-parse","HEAD"],"session_id":"release-smoke"}' | "$squire_bin" runtime adapter --stdio)
 require_contains "$adapter_out" '"id":"head"' "adapter"
 require_contains "$adapter_out" '"ok":true' "adapter"
 require_contains "$adapter_out" '"exit_code":0' "adapter"
 require_contains "$adapter_out" '"mode":"replay"' "adapter"
 require_contains "$adapter_out" "\"stdout_b64\":\"$expected_head_b64\"" "adapter"
 
-squire_head=$("$squire_bin" kernel run -- git rev-parse HEAD)
+squire_head=$("$squire_bin" runtime run -- git rev-parse HEAD)
 if [ "$squire_head" != "$native_head" ]; then
   echo "release smoke failed: git rev-parse HEAD mismatch" >&2
   echo "native: $native_head" >&2
@@ -105,7 +105,7 @@ if [ "$squire_head" != "$native_head" ]; then
 fi
 
 native_status=$(git status --short)
-squire_status=$("$squire_bin" kernel run -- git status --short)
+squire_status=$("$squire_bin" runtime run -- git status --short)
 if [ "$squire_status" != "$native_status" ]; then
   echo "release smoke failed: git status --short mismatch" >&2
   echo "native: $native_status" >&2
@@ -119,7 +119,7 @@ require_contains "$boost_out" "runtime_decisions: replay_or_native" "boost statu
 require_contains "$boost_out" "replays: 3" "boost status"
 require_contains "$boost_out" "hot_client_replays: 3" "boost status"
 
-stop_out=$("$squire_bin" kernel maintain --stop --short)
+stop_out=$("$squire_bin" runtime maintain --stop --short)
 stopped=1
 require_contains "$stop_out" "status: stopped" "maintainer stop"
 require_contains "$stop_out" "running: false" "maintainer stop"

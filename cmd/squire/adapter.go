@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 var adapterWriteBufferPool = sync.Pool{
@@ -38,7 +38,7 @@ type adapterServer struct {
 	defaultCWD       string
 	defaultSessionID string
 	ensureMaintainer bool
-	kernels          map[string]*kernel.Kernel
+	engines          map[string]*proofcache.Engine
 	states           map[string]adapterCWDState
 	plans            map[string]adapterCommandPlan
 	lastPlanCWD      string
@@ -50,18 +50,18 @@ type adapterServer struct {
 
 type adapterCWDState struct {
 	storeRoot string
-	kernel    *kernel.Kernel
+	engine    *proofcache.Engine
 }
 
 type adapterCommandPlan struct {
 	key           string
-	inv           kernel.CommandInvocation
-	family        kernel.OperatorFamily
+	inv           proofcache.CommandInvocation
+	family        proofcache.OperatorFamily
 	replayAllowed bool
 }
 
 type adapterMaintainerMemo struct {
-	status    kernel.BackgroundMaintainerStatus
+	status    proofcache.BackgroundMaintainerStatus
 	checkedAt time.Time
 }
 
@@ -79,35 +79,35 @@ type adapterRequest struct {
 }
 
 type adapterResponse struct {
-	ID                string                `json:"id,omitempty"`
-	OK                bool                  `json:"ok"`
-	ReplayHit         bool                  `json:"replay_hit,omitempty"`
-	ReplayMiss        bool                  `json:"replay_miss,omitempty"`
-	MissReason        string                `json:"miss_reason,omitempty"`
-	StdoutB64         string                `json:"stdout_b64,omitempty"`
-	StderrB64         string                `json:"stderr_b64,omitempty"`
-	ExitCode          int                   `json:"exit_code"`
-	Mode              kernel.Mode           `json:"mode,omitempty"`
-	Family            kernel.OperatorFamily `json:"family,omitempty"`
-	Proof             string                `json:"proof,omitempty"`
-	NativeWallMS      int64                 `json:"native_wall_ms,omitempty"`
-	Phases            *kernel.PhaseTimings  `json:"phases,omitempty"`
-	Diagnostics       []string              `json:"diagnostics,omitempty"`
-	MaintainerRunning bool                  `json:"maintainer_running,omitempty"`
-	MaintainerStarted bool                  `json:"maintainer_started,omitempty"`
-	MaintainerAlready bool                  `json:"maintainer_already_running,omitempty"`
-	Error             string                `json:"error,omitempty"`
+	ID                string                    `json:"id,omitempty"`
+	OK                bool                      `json:"ok"`
+	ReplayHit         bool                      `json:"replay_hit,omitempty"`
+	ReplayMiss        bool                      `json:"replay_miss,omitempty"`
+	MissReason        string                    `json:"miss_reason,omitempty"`
+	StdoutB64         string                    `json:"stdout_b64,omitempty"`
+	StderrB64         string                    `json:"stderr_b64,omitempty"`
+	ExitCode          int                       `json:"exit_code"`
+	Mode              proofcache.Mode           `json:"mode,omitempty"`
+	Family            proofcache.OperatorFamily `json:"family,omitempty"`
+	Proof             string                    `json:"proof,omitempty"`
+	NativeWallMS      int64                     `json:"native_wall_ms,omitempty"`
+	Phases            *proofcache.PhaseTimings  `json:"phases,omitempty"`
+	Diagnostics       []string                  `json:"diagnostics,omitempty"`
+	MaintainerRunning bool                      `json:"maintainer_running,omitempty"`
+	MaintainerStarted bool                      `json:"maintainer_started,omitempty"`
+	MaintainerAlready bool                      `json:"maintainer_already_running,omitempty"`
+	Error             string                    `json:"error,omitempty"`
 }
 
-func runKernelAdapter(ctx context.Context, defaultCWD string, args []string) error {
+func runRuntimeAdapter(ctx context.Context, defaultCWD string, args []string) error {
 	opts, err := parseAdapterOptions(args)
 	if err != nil {
 		return err
 	}
 	if !opts.Stdio {
-		return fmt.Errorf("squire kernel adapter requires --stdio")
+		return fmt.Errorf("squire runtime adapter requires --stdio")
 	}
-	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
+	sessionID := preferredEnv("SQUIRE_SESSION_ID", "SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "adapter"
 	}
@@ -115,7 +115,7 @@ func runKernelAdapter(ctx context.Context, defaultCWD string, args []string) err
 		defaultCWD:       defaultCWD,
 		defaultSessionID: sessionID,
 		ensureMaintainer: opts.EnsureMaintainer,
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -140,7 +140,7 @@ func parseAdapterOptions(args []string) (adapterOptions, error) {
 		case "--no-maintainer":
 			opts.EnsureMaintainer = false
 		default:
-			return opts, fmt.Errorf("unknown kernel adapter option %q", arg)
+			return opts, fmt.Errorf("unknown runtime adapter option %q", arg)
 		}
 	}
 	return opts, nil
@@ -322,13 +322,13 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 				resp.Diagnostics = append(resp.Diagnostics, diagnostics...)
 			}
 			serveStart := time.Now()
-			if res, ok := state.kernel.ReplayComposedShell(ctx, sessionID, cwd, req.Script); ok {
-				kernel.RecordHotClientResult(storeRoot, res, time.Since(serveStart))
+			if res, ok := state.engine.ReplayComposedShell(ctx, sessionID, cwd, req.Script); ok {
+				proofcache.RecordHotClientResult(storeRoot, res, time.Since(serveStart))
 				s.populateRunResponse(&resp, res, req.Debug)
 				resp.ReplayHit = true
 				return resp
 			}
-			resp.Family = kernel.FamilyShellUnknown
+			resp.Family = proofcache.FamilyShellUnknown
 			resp.ReplayMiss = true
 			resp.MissReason = "composed shell replay miss"
 			return resp
@@ -341,7 +341,7 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 				resp.MissReason = "operator is not replay-allowed"
 				return resp
 			}
-			res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
+			res := proofcache.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 			s.populateRunResponse(&resp, res, req.Debug)
 			return resp
 		}
@@ -355,7 +355,7 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 				resp.MissReason = "recent hot snapshot miss"
 				return resp
 			}
-			res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
+			res := proofcache.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 			s.populateRunResponse(&resp, res, req.Debug)
 			return resp
 		}
@@ -372,9 +372,9 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 		}
 
 		serveStart := time.Now()
-		if res, ok := state.kernel.FastReplayInvocation(ctx, sessionID, plan.inv); ok {
+		if res, ok := state.engine.FastReplayInvocation(ctx, sessionID, plan.inv); ok {
 			delete(s.hotMisses, missKey)
-			kernel.RecordHotClientResult(storeRoot, *res, time.Since(serveStart))
+			proofcache.RecordHotClientResult(storeRoot, *res, time.Since(serveStart))
 			s.populateRunResponse(&resp, *res, req.Debug)
 			resp.ReplayHit = true
 			return resp
@@ -389,20 +389,20 @@ func (s *adapterServer) handleRequest(ctx context.Context, req adapterRequest) a
 			resp.MissReason = "hot snapshot miss"
 			return resp
 		}
-		res := kernel.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
+		res := proofcache.RunNativeDirectInvocation(ctx, plan.inv, plan.family)
 		s.populateRunResponse(&resp, res, req.Debug)
 		return resp
 	})
 }
 
 func (s *adapterServer) primeDefaultRepo(ctx context.Context) {
-	inv := kernel.NormalizeInvocation(s.defaultCWD, []string{"git", "rev-parse", "HEAD"})
+	inv := proofcache.NormalizeInvocation(s.defaultCWD, []string{"git", "rev-parse", "HEAD"})
 	state := s.stateFor(inv.PolicyCWD)
 	_, _ = s.ensureBackgroundMaintainer(ctx, inv.PolicyCWD, state.storeRoot)
-	_ = state.kernel.PreloadHotSnapshot()
+	_ = state.engine.PreloadHotSnapshot()
 }
 
-func (s *adapterServer) ensureBackgroundMaintainer(ctx context.Context, cwd, storeRoot string) (kernel.BackgroundMaintainerStatus, []string) {
+func (s *adapterServer) ensureBackgroundMaintainer(ctx context.Context, cwd, storeRoot string) (proofcache.BackgroundMaintainerStatus, []string) {
 	if storeRoot != "" {
 		if memo, ok := s.maintainers[storeRoot]; ok && memo.status.Running && time.Since(memo.checkedAt) < adapterMaintainerMemoTTL {
 			status := memo.status
@@ -411,14 +411,14 @@ func (s *adapterServer) ensureBackgroundMaintainer(ctx context.Context, cwd, sto
 			status.CheckedAt = time.Now()
 			return status, nil
 		}
-		status, err := kernel.LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
+		status, err := proofcache.LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 		if err == nil && status.Running {
 			s.maintainers[storeRoot] = adapterMaintainerMemo{status: status, checkedAt: time.Now()}
 			status.AlreadyRunning = true
 			return status, nil
 		}
 	}
-	status, err := kernel.StartBackgroundMaintainer(ctx, cwd, storeRoot, kernel.DefaultBackgroundMaintainerOptions())
+	status, err := proofcache.StartBackgroundMaintainer(ctx, cwd, storeRoot, proofcache.DefaultBackgroundMaintainerOptions())
 	if err != nil {
 		return status, []string{"background maintainer unavailable: " + err.Error()}
 	}
@@ -428,12 +428,12 @@ func (s *adapterServer) ensureBackgroundMaintainer(ctx context.Context, cwd, sto
 	return status, status.Diagnostics
 }
 
-func (s *adapterServer) kernelFor(storeRoot string) *kernel.Kernel {
-	if k := s.kernels[storeRoot]; k != nil {
+func (s *adapterServer) engineFor(storeRoot string) *proofcache.Engine {
+	if k := s.engines[storeRoot]; k != nil {
 		return k
 	}
-	k := kernel.New(storeRoot)
-	s.kernels[storeRoot] = k
+	k := proofcache.New(storeRoot)
+	s.engines[storeRoot] = k
 	return k
 }
 
@@ -448,7 +448,7 @@ func (s *adapterServer) stateFor(cwd string) adapterCWDState {
 	storeRoot := storeRootFor(cwd)
 	state := adapterCWDState{
 		storeRoot: storeRoot,
-		kernel:    s.kernelFor(storeRoot),
+		engine:    s.engineFor(storeRoot),
 	}
 	s.states[key] = state
 	return state
@@ -468,13 +468,13 @@ func (s *adapterServer) planFor(cwd string, argv []string) adapterCommandPlan {
 		s.lastPlan = plan
 		return plan
 	}
-	inv := kernel.NormalizeInvocation(cwd, argv)
-	family := kernel.Classify(inv.PolicyArgv)
+	inv := proofcache.NormalizeInvocation(cwd, argv)
+	family := proofcache.Classify(inv.PolicyArgv)
 	plan := adapterCommandPlan{
 		key:           key,
 		inv:           inv,
 		family:        family,
-		replayAllowed: kernel.IsReplayAllowed(inv.PolicyArgv),
+		replayAllowed: proofcache.IsReplayAllowed(inv.PolicyArgv),
 	}
 	s.plans[key] = plan
 	s.lastPlanCWD = cwd
@@ -514,7 +514,7 @@ func adapterStateKey(cwd string) string {
 	if abs, err := filepath.Abs(cwd); err == nil {
 		cwd = abs
 	}
-	return cwd + "\x00" + os.Getenv("SQUIRE_KERNEL_STORE_ROOT")
+	return cwd + "\x00" + preferredEnv("SQUIRE_STORE_ROOT", "SQUIRE_KERNEL_STORE_ROOT")
 }
 
 func adapterPlanKey(cwd string, argv []string) string {
@@ -531,7 +531,7 @@ func adapterHotMissKey(storeRoot, planKey string) string {
 	return storeRoot + "\x00" + planKey
 }
 
-func (s *adapterServer) populateRunResponse(resp *adapterResponse, res kernel.RunResult, includePhases bool) {
+func (s *adapterServer) populateRunResponse(resp *adapterResponse, res proofcache.RunResult, includePhases bool) {
 	resp.StdoutB64 = base64.StdEncoding.EncodeToString(res.Stdout)
 	resp.StderrB64 = base64.StdEncoding.EncodeToString(res.Stderr)
 	resp.ExitCode = res.ExitCode

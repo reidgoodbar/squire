@@ -38,7 +38,7 @@ Normal release checks:
 
 ```sh
 go test ./...
-go test ./internal/kernel -run 'TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges' -count=1
+go test ./internal/proofcache -run 'TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges' -count=1
 go run ./cmd/squire boost bench repo-metadata
 go run ./cmd/squire boost bench deep-local
 go run ./cmd/squire vm status --short
@@ -481,7 +481,7 @@ Expected behavior:
 - Scoped sessions pass replay accounting and the hot snapshot through inherited
   FDs when available, avoiding per-command store writes and snapshot path opens
   on replay hits.
-- The normal adapter command is `squire kernel adapter --stdio`; it starts or
+- The normal adapter command is `squire runtime adapter --stdio`; it starts or
   reuses the resident background maintainer by default.
 - Replay hits return from the mmap hot snapshot under the 1ms p95 budget.
 - Replayable invalid/missing-cache commands fall back native with small p95
@@ -511,21 +511,21 @@ git add README.md
 git commit -m init
 
 /path/to/squire setup
-/path/to/squire kernel maintain --background --short
-/path/to/squire kernel warm --short
-/path/to/squire kernel status --short
-/path/to/squire kernel run -- git rev-parse HEAD
-/path/to/squire kernel run -- git status --short
+/path/to/squire runtime maintain --background --short
+/path/to/squire runtime warm --short
+/path/to/squire runtime status --short
+/path/to/squire runtime run -- git rev-parse HEAD
+/path/to/squire runtime run -- git status --short
 /path/to/squire boost status --short
-/path/to/squire kernel maintain --stop --short
+/path/to/squire runtime maintain --stop --short
 ```
 
 Expected behavior:
 
 - Native fallback is reported as available.
 - The maintainer starts once and stops cleanly.
-- `kernel status --short` reports a repo oracle and readiness state.
-- `kernel run` preserves exact stdout, stderr, and exit code.
+- `runtime status --short` reports a repository oracle and readiness state.
+- `runtime run` preserves exact stdout, stderr, and exit code.
 - Mutating and validation commands remain native-only.
 
 ## Privacy And Boundary Review

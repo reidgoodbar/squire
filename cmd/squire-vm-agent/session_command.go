@@ -29,7 +29,6 @@ func guestSquireSessionCommand(squire string, argv []string) []string {
 
 func guestCommandEnv(req guestRequest) []string {
 	overrides := map[string]string{
-		"SQUIRE_KERNEL_STORE_ROOT":          req.StoreRoot,
 		"SQUIRE_STORE_ROOT":                 req.StoreRoot,
 		"SQUIRE_SESSION_LOCAL_HOT_SNAPSHOT": "1",
 	}

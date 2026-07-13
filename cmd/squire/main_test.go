@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 func TestUsageTextDocumentsProductContract(t *testing.T) {
@@ -52,9 +52,10 @@ func TestHelpTextForArgs(t *testing.T) {
 		{name: "vm topic", args: []string{"help", "vm"}, want: "isolated Linux execution mode"},
 		{name: "vm session topic", args: []string{"vm", "session", "--help"}, want: "guest lifecycle runner"},
 		{name: "version topic", args: []string{"help", "version"}, want: "build identity"},
-		{name: "kernel run topic", args: []string{"kernel", "run", "--help"}, want: "The \"--\" delimiter is"},
-		{name: "kernel maintain topic", args: []string{"help", "kernel", "maintain"}, want: "resident maintainer"},
-		{name: "kernel adapter topic", args: []string{"help", "kernel", "adapter"}, want: "model still"},
+		{name: "runtime run topic", args: []string{"runtime", "run", "--help"}, want: "The \"--\" delimiter is"},
+		{name: "runtime maintain topic", args: []string{"help", "runtime", "maintain"}, want: "resident maintainer"},
+		{name: "runtime adapter topic", args: []string{"help", "runtime", "adapter"}, want: "model still"},
+		{name: "legacy runtime alias", args: []string{"help", "kernel", "status"}, want: "runtime readiness"},
 		{name: "boost topic", args: []string{"boost", "-h"}, want: "no broad Codex speedup claim"},
 	}
 
@@ -417,7 +418,7 @@ func TestVersionOutput(t *testing.T) {
 }
 
 func TestHelpTextDoesNotInterceptCommandHelpAfterDelimiter(t *testing.T) {
-	if text, ok := helpTextForArgs([]string{"kernel", "run", "--", "git", "--help"}); ok {
+	if text, ok := helpTextForArgs([]string{"runtime", "run", "--", "git", "--help"}); ok {
 		t.Fatalf("help intercepted command argv after --:\n%s", text)
 	}
 }
@@ -458,38 +459,38 @@ func TestParseAdapterOptionsAcceptsLegacyEnsureMaintainer(t *testing.T) {
 	}
 }
 
-func TestKernelUsageError(t *testing.T) {
+func TestRuntimeUsageError(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{name: "missing subcommand", args: nil, want: "missing kernel subcommand"},
-		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown kernel subcommand "stats"`},
-		{name: "bad status option", args: []string{"status", "--json"}, want: `unknown kernel status option "--json"`},
+		{name: "missing subcommand", args: nil, want: "missing runtime subcommand"},
+		{name: "unknown subcommand", args: []string{"stats"}, want: `unknown runtime subcommand "stats"`},
+		{name: "bad status option", args: []string{"status", "--json"}, want: `unknown runtime status option "--json"`},
 		{name: "missing run delimiter", args: []string{"run"}, want: "requires -- before the command"},
-		{name: "bad adapter usage", args: []string{"adapter"}, want: "invalid kernel adapter usage"},
+		{name: "bad adapter usage", args: []string{"adapter"}, want: "invalid runtime adapter usage"},
 		{name: "bad warm option", args: []string{"warm", "--short"}, want: `does not accept option "--short"`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := kernelUsageError(tt.args)
+			got := runtimeUsageError(tt.args)
 			if !strings.Contains(got, tt.want) {
-				t.Fatalf("kernelUsageError(%v) = %q, want %q", tt.args, got, tt.want)
+				t.Fatalf("runtimeUsageError(%v) = %q, want %q", tt.args, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestKernelAdapterServesMultipleRequestsOverOneProcess(t *testing.T) {
+func TestRuntimeAdapterServesMultipleRequestsOverOneProcess(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
@@ -524,8 +525,8 @@ func TestKernelAdapterServesMultipleRequestsOverOneProcess(t *testing.T) {
 	}
 	assertAdapterStdout(t, got["head"], runGit(t, repo, "rev-parse", "HEAD"))
 	assertAdapterStdout(t, got["branch"], runGit(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
-	if len(server.kernels) != 1 {
-		t.Fatalf("adapter constructed %d kernel instances, want one reused instance", len(server.kernels))
+	if len(server.engines) != 1 {
+		t.Fatalf("adapter constructed %d engine instances, want one reused instance", len(server.engines))
 	}
 }
 
@@ -555,8 +556,8 @@ func TestAdapterFastResponseWriterMatchesJSONSemantics(t *testing.T) {
 		StdoutB64:         base64.StdEncoding.EncodeToString([]byte("hello\n")),
 		StderrB64:         base64.StdEncoding.EncodeToString([]byte("warn\n")),
 		ExitCode:          7,
-		Mode:              kernel.ModeReplay,
-		Family:            kernel.FamilyRepoState,
+		Mode:              proofcache.ModeReplay,
+		Family:            proofcache.FamilyRepoState,
 		Proof:             "mmap-hot-snapshot",
 		NativeWallMS:      11,
 		Diagnostics:       []string{"line\nbreak", "quote\""},
@@ -594,9 +595,9 @@ func TestAdapterResponseWriterKeepsDebugPhases(t *testing.T) {
 		ID:       "debug",
 		OK:       true,
 		ExitCode: 0,
-		Mode:     kernel.ModeReplay,
-		Family:   kernel.FamilyLocalRepoMetadata,
-		Phases:   &kernel.PhaseTimings{ClassifyMS: 1.25},
+		Mode:     proofcache.ModeReplay,
+		Family:   proofcache.FamilyLocalRepoMetadata,
+		Phases:   &proofcache.PhaseTimings{ClassifyMS: 1.25},
 	}
 	var out bytes.Buffer
 	if err := writeAdapterResponse(&out, resp); err != nil {
@@ -637,15 +638,15 @@ func TestAdapterPlanCacheCopiesArgv(t *testing.T) {
 	}
 }
 
-func TestKernelAdapterNativeDirectSkipsMaintainerAndKernel(t *testing.T) {
+func TestRuntimeAdapterNativeDirectSkipsMaintainerAndEngine(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
 		ensureMaintainer: true,
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
@@ -658,14 +659,14 @@ func TestKernelAdapterNativeDirectSkipsMaintainerAndKernel(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("adapter response failed: %+v", resp)
 	}
-	if resp.Mode != kernel.ModeNever {
+	if resp.Mode != proofcache.ModeNever {
 		t.Fatalf("mode = %s, want never", resp.Mode)
 	}
-	if resp.Family != kernel.FamilyValidation {
+	if resp.Family != proofcache.FamilyValidation {
 		t.Fatalf("family = %s, want validation", resp.Family)
 	}
-	if len(server.kernels) != 0 {
-		t.Fatalf("native-direct path constructed %d kernel instances", len(server.kernels))
+	if len(server.engines) != 0 {
+		t.Fatalf("native-direct path constructed %d engine instances", len(server.engines))
 	}
 	if len(server.maintainers) != 0 {
 		t.Fatalf("native-direct path touched maintainer state: %+v", server.maintainers)
@@ -673,15 +674,30 @@ func TestKernelAdapterNativeDirectSkipsMaintainerAndKernel(t *testing.T) {
 	assertAdapterStdout(t, resp, runCommand(t, repo, "python3", "-m", "unittest", "-h"))
 }
 
-func TestKernelAdapterReplayOnlyNeverRunsNativeForDisallowedCommand(t *testing.T) {
+func TestStoreRootForPrefersCanonicalEnvironment(t *testing.T) {
+	canonical := filepath.Join(t.TempDir(), "canonical")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv("SQUIRE_STORE_ROOT", canonical)
+	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", legacy)
+	if got := storeRootFor(t.TempDir()); got != canonical {
+		t.Fatalf("storeRootFor canonical = %q, want %q", got, canonical)
+	}
+
+	t.Setenv("SQUIRE_STORE_ROOT", "")
+	if got := storeRootFor(t.TempDir()); got != legacy {
+		t.Fatalf("storeRootFor legacy fallback = %q, want %q", got, legacy)
+	}
+}
+
+func TestRuntimeAdapterReplayOnlyNeverRunsNativeForDisallowedCommand(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
 		ensureMaintainer: true,
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
@@ -704,22 +720,22 @@ func TestKernelAdapterReplayOnlyNeverRunsNativeForDisallowedCommand(t *testing.T
 	if resp.StdoutB64 != "" || resp.StderrB64 != "" || resp.Mode != "" {
 		t.Fatalf("replay-only miss returned command output or mode: %+v", resp)
 	}
-	if len(server.kernels) != 0 {
-		t.Fatalf("replay-only disallowed path constructed %d kernel instances", len(server.kernels))
+	if len(server.engines) != 0 {
+		t.Fatalf("replay-only disallowed path constructed %d engine instances", len(server.engines))
 	}
 	if len(server.maintainers) != 0 {
 		t.Fatalf("replay-only disallowed path touched maintainer state: %+v", server.maintainers)
 	}
 }
 
-func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
+func TestRuntimeAdapterCachesPlanAndHotMiss(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -734,7 +750,7 @@ func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
 	if !first.OK {
 		t.Fatalf("first response failed: %+v", first)
 	}
-	if first.Mode != kernel.ModeNative {
+	if first.Mode != proofcache.ModeNative {
 		t.Fatalf("first mode = %s, want native cold miss", first.Mode)
 	}
 	assertAdapterStdout(t, first, runGit(t, repo, "status", "--short"))
@@ -748,7 +764,7 @@ func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
 	if !second.OK {
 		t.Fatalf("second response failed: %+v", second)
 	}
-	if second.Mode != kernel.ModeNative {
+	if second.Mode != proofcache.ModeNative {
 		t.Fatalf("second mode = %s, want native hot miss memo", second.Mode)
 	}
 	assertAdapterStdout(t, second, runGit(t, repo, "status", "--short"))
@@ -760,14 +776,14 @@ func TestKernelAdapterCachesPlanAndHotMiss(t *testing.T) {
 	}
 }
 
-func TestKernelAdapterReplayOnlyColdMissDoesNotRunNative(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyColdMissDoesNotRunNative(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -796,21 +812,21 @@ func TestKernelAdapterReplayOnlyColdMissDoesNotRunNative(t *testing.T) {
 	}
 }
 
-func TestKernelAdapterReplayOnlyComposedPipeline(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedPipeline(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
 	state := server.stateFor(repo)
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "HEAD"})
 
 	ensure := false
 	req := adapterRequest{
@@ -833,22 +849,22 @@ func TestKernelAdapterReplayOnlyComposedPipeline(t *testing.T) {
 	}
 }
 
-func TestKernelAdapterReplayOnlyComposedSequenceAndRedirection(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedSequenceAndRedirection(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
 	state := server.stateFor(repo)
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"})
 
 	ensure := false
 	req := adapterRequest{
@@ -868,21 +884,21 @@ func TestKernelAdapterReplayOnlyComposedSequenceAndRedirection(t *testing.T) {
 	assertAdapterStdout(t, resp, runCommand(t, repo, "sh", "-c", req.Script))
 }
 
-func TestKernelAdapterReplayOnlyComposedTailGrepAndShortCircuit(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedTailGrepAndShortCircuit(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
 	state := server.stateFor(repo)
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "HEAD"})
 
 	head := strings.TrimSpace(string(runGit(t, repo, "rev-parse", "HEAD")))
 	ensure := false
@@ -920,14 +936,14 @@ func TestKernelAdapterReplayOnlyComposedTailGrepAndShortCircuit(t *testing.T) {
 	assertAdapterOutput(t, resp, stdout, stderr, code)
 }
 
-func TestKernelAdapterReplayOnlyComposedUnsupportedMisses(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedUnsupportedMisses(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -952,21 +968,21 @@ func TestKernelAdapterReplayOnlyComposedUnsupportedMisses(t *testing.T) {
 	}
 }
 
-func TestKernelAdapterReplayOnlyComposedForLoopAndPrintf(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedForLoopAndPrintf(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
 	state := server.stateFor(repo)
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "HEAD"})
 
 	ensure := false
 	script := "for i in 1 2; do git rev-parse HEAD; done; printf 'SQUIRE_CODEX_AB_OK\\n'"
@@ -987,21 +1003,21 @@ func TestKernelAdapterReplayOnlyComposedForLoopAndPrintf(t *testing.T) {
 	assertAdapterOutput(t, resp, stdout, stderr, code)
 }
 
-func TestKernelAdapterReplayOnlyComposedNewlineBlock(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedNewlineBlock(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
 		maintainers:      make(map[string]adapterMaintainerMemo),
 	}
 	state := server.stateFor(repo)
-	warmKernelReplay(t, ctx, state.kernel, repo, []string{"git", "rev-parse", "HEAD"})
+	warmRuntimeReplay(t, ctx, state.engine, repo, []string{"git", "rev-parse", "HEAD"})
 
 	ensure := false
 	script := "git rev-parse HEAD\ngit rev-parse HEAD\nprintf 'SQUIRE_CODEX_AB_OK\\n'"
@@ -1022,14 +1038,14 @@ func TestKernelAdapterReplayOnlyComposedNewlineBlock(t *testing.T) {
 	assertAdapterOutput(t, resp, stdout, stderr, code)
 }
 
-func TestKernelAdapterReplayOnlyComposedUnsafeForLoopMisses(t *testing.T) {
+func TestRuntimeAdapterReplayOnlyComposedUnsafeForLoopMisses(t *testing.T) {
 	ctx := context.Background()
 	repo := initAdapterGitRepo(t)
-	t.Setenv("SQUIRE_KERNEL_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
+	t.Setenv("SQUIRE_STORE_ROOT", filepath.Join(t.TempDir(), "store"))
 	server := &adapterServer{
 		defaultCWD:       repo,
 		defaultSessionID: "test-adapter",
-		kernels:          make(map[string]*kernel.Kernel),
+		engines:          make(map[string]*proofcache.Engine),
 		states:           make(map[string]adapterCWDState),
 		plans:            make(map[string]adapterCommandPlan),
 		hotMisses:        make(map[string]time.Time),
@@ -1075,7 +1091,7 @@ func TestBoostUsageError(t *testing.T) {
 }
 
 func TestCommandAfterDelimiter(t *testing.T) {
-	argv, err := commandAfterDelimiter("squire kernel run", []string{"--", "git", "status", "--short"})
+	argv, err := commandAfterDelimiter("squire runtime run", []string{"--", "git", "status", "--short"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1088,7 +1104,7 @@ func TestCommandAfterDelimiter(t *testing.T) {
 		{"git", "status"},
 		{"--"},
 	} {
-		if _, err := commandAfterDelimiter("squire kernel run", args); err == nil {
+		if _, err := commandAfterDelimiter("squire runtime run", args); err == nil {
 			t.Fatalf("commandAfterDelimiter(%v) returned nil error", args)
 		}
 	}
@@ -1144,7 +1160,7 @@ func TestOutputFormatFromTrailingArgs(t *testing.T) {
 }
 
 func TestBoostStatusOutputFormats(t *testing.T) {
-	report := kernel.BoostStatusReport{
+	report := proofcache.BoostStatusReport{
 		Claim:                        "scoped",
 		EnabledFastPaths:             []string{"git rev-parse HEAD"},
 		ProofGatedReplayCandidates:   []string{"cat <bounded workspace source/config file>"},
@@ -1216,7 +1232,7 @@ func TestHotEventPipeRecordsValidReplayEvents(t *testing.T) {
 	_, _ = pipe.writer.WriteString("not an event\n")
 	_ = pipe.writer.Close()
 	finishHotEventPipe(pipe)
-	stats := kernel.LoadHotClientStats(storeRoot)
+	stats := proofcache.LoadHotClientStats(storeRoot)
 	if stats.Replays != 2 {
 		t.Fatalf("replays = %d, want 2", stats.Replays)
 	}
@@ -1259,7 +1275,7 @@ func TestOpenHotSnapshotFile(t *testing.T) {
 }
 
 func TestRepoMetadataBenchShortOutput(t *testing.T) {
-	report := kernel.BenchReport{
+	report := proofcache.BenchReport{
 		Exactness:                    true,
 		Mismatches:                   0,
 		MutationBoundaryInvalidation: true,
@@ -1285,7 +1301,7 @@ func TestRepoMetadataBenchShortOutput(t *testing.T) {
 }
 
 func TestWarmReportShortOutput(t *testing.T) {
-	report := kernel.WarmReport{
+	report := proofcache.WarmReport{
 		RepoRoot:                "/repo",
 		OracleAvailable:         true,
 		FastPathPrepared:        5,
@@ -1297,7 +1313,7 @@ func TestWarmReportShortOutput(t *testing.T) {
 		EcosystemPrepared:       3,
 		DependencyPrepared:      4,
 		SourceSymbolPrepared:    6,
-		Prepared:                []kernel.WarmPreparedReport{{Kind: "fast_path_output"}},
+		Prepared:                []proofcache.WarmPreparedReport{{Kind: "fast_path_output"}},
 		PrivacyMode:             "standard",
 		ReplaySetUnchanged:      true,
 		AgentVisibleSuggestions: false,
@@ -1324,16 +1340,16 @@ func TestWarmReportShortOutput(t *testing.T) {
 }
 
 func TestDeepLocalBenchShortOutput(t *testing.T) {
-	report := kernel.DeepBenchReport{
+	report := proofcache.DeepBenchReport{
 		EnabledFastPathExactness:      true,
 		EnabledFastPathMismatches:     0,
 		NativeOnlyCandidateExactness:  true,
 		NativeOnlyCandidateMismatches: 0,
 		NoBroadCodexSpeedupClaim:      true,
-		SafetyGates:                   kernel.GateReport{Status: "pass", Passed: true, Required: true},
-		PerformanceGates:              kernel.GateReport{Status: "needs_optimization", Violations: []string{"native fallback overhead p95 over budget"}},
-		NeverReplayDiagnostics:        kernel.NeverReplayDiagnostics{ValidationReplays: 0},
-		Performance: kernel.PerformanceBudgetReport{
+		SafetyGates:                   proofcache.GateReport{Status: "pass", Passed: true, Required: true},
+		PerformanceGates:              proofcache.GateReport{Status: "needs_optimization", Violations: []string{"native fallback overhead p95 over budget"}},
+		NeverReplayDiagnostics:        proofcache.NeverReplayDiagnostics{ValidationReplays: 0},
+		Performance: proofcache.PerformanceBudgetReport{
 			MetadataFastPathP95US:       95,
 			ProofGatedReplayP95US:       120,
 			NativeFallbackOverheadP95US: 4000,
@@ -1358,7 +1374,7 @@ func TestDeepLocalBenchShortOutput(t *testing.T) {
 }
 
 func TestBackgroundStatusShortOutput(t *testing.T) {
-	status := kernel.BackgroundMaintainerStatus{
+	status := proofcache.BackgroundMaintainerStatus{
 		Mode:                    "background_process",
 		RepoRoot:                "/repo",
 		StoreRoot:               "/store",
@@ -1392,7 +1408,7 @@ func TestBackgroundStatusShortOutput(t *testing.T) {
 }
 
 func TestBackgroundStatusShortPrefersStopState(t *testing.T) {
-	status := kernel.BackgroundMaintainerStatus{
+	status := proofcache.BackgroundMaintainerStatus{
 		StoreRoot:               "/store",
 		StatusPath:              "/store/maintainer_status.json",
 		PID:                     123,
@@ -1415,7 +1431,7 @@ func TestBackgroundStatusShortPrefersStopState(t *testing.T) {
 }
 
 func TestMaintainerReportShortOutput(t *testing.T) {
-	report := kernel.MaintainerReport{
+	report := proofcache.MaintainerReport{
 		Mode:                    "resident_bounded",
 		RepoRoot:                "/repo",
 		OracleAvailable:         true,
@@ -1569,10 +1585,10 @@ func assertAdapterOutput(t *testing.T, resp adapterResponse, wantStdout, wantStd
 	}
 }
 
-func warmKernelReplay(t *testing.T, ctx context.Context, k *kernel.Kernel, repo string, argv []string) {
+func warmRuntimeReplay(t *testing.T, ctx context.Context, k *proofcache.Engine, repo string, argv []string) {
 	t.Helper()
 	if k == nil {
-		t.Fatal("missing kernel")
+		t.Fatal("missing engine")
 	}
 	if _, err := k.Warm(ctx, repo); err != nil {
 		t.Fatalf("warm %v failed: %v", argv, err)
@@ -1581,7 +1597,7 @@ func warmKernelReplay(t *testing.T, ctx context.Context, k *kernel.Kernel, repo 
 		t.Fatalf("warm %v did not preload hot snapshot", argv)
 	}
 	replay, ok := k.FastReplay(ctx, "test-adapter", repo, argv)
-	if !ok || replay.Mode != kernel.ModeReplay {
+	if !ok || replay.Mode != proofcache.ModeReplay {
 		t.Fatalf("warm %v replay = (%+v, %t), want replay", argv, replay, ok)
 	}
 }

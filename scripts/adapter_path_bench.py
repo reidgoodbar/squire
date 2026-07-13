@@ -5,7 +5,7 @@ Cases:
 - replay_hit: warmed replayable command returns from the mmap hot snapshot.
 - invalid_or_miss: first post-mutation request falls back native; later exact
   rewarm replays are allowed.
-- never_direct: never-replay command bypasses cache/maintainer/kernel work.
+- never_direct: never-replay command bypasses cache/maintainer/proof-cache work.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ class Adapter:
     def __init__(self, squire: Path, repo: Path):
         self.repo = repo
         self.proc = subprocess.Popen(
-            [str(squire), "kernel", "adapter", "--stdio"],
+            [str(squire), "runtime", "adapter", "--stdio"],
             cwd=str(repo),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -158,8 +158,8 @@ def main() -> int:
     repo = make_repo()
     try:
         run([str(squire), "setup"], repo)
-        run([str(squire), "kernel", "maintain", "--background", "--short"], repo)
-        run([str(squire), "kernel", "warm", "--short"], repo, timeout=60)
+        run([str(squire), "runtime", "maintain", "--background", "--short"], repo)
+        run([str(squire), "runtime", "warm", "--short"], repo, timeout=60)
 
         adapter = Adapter(squire, repo)
         try:
@@ -215,7 +215,7 @@ def main() -> int:
                     raise AssertionError(f"never_direct mode = {resp.get('mode')}, want never")
         finally:
             adapter.close()
-            run([str(squire), "kernel", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
+            run([str(squire), "runtime", "maintain", "--stop", "--short"], repo, check=False, timeout=10)
 
         report: dict[str, Any] = {
             "repo": str(repo),
@@ -223,7 +223,7 @@ def main() -> int:
             "ux": {
                 "mode": "invisible_terminal_adapter",
                 "agent_visible_squire_command": False,
-                "hidden_backend": "squire kernel adapter --stdio",
+                "hidden_backend": "squire runtime adapter --stdio",
                 "visible_commands": [" ".join(hit_cmd), " ".join(never_cmd)],
                 "measured_command_stream_contains_squire": False,
             },

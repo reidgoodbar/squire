@@ -500,15 +500,14 @@ def main() -> int:
     write_driver(driver, cases)
     shell = select_shell()
 
-    kernel_env = os.environ.copy()
-    kernel_env["SQUIRE_KERNEL_STORE_ROOT"] = str(store_root)
-    kernel_env["SQUIRE_STORE_ROOT"] = str(store_root)
-    kernel_env["GIT_OPTIONAL_LOCKS"] = "0"
-    run([str(squire), "setup"], repo, env=kernel_env)
-    run([str(squire), "kernel", "warm", "--short"], repo, env=kernel_env, timeout=120)
+    squire_env = os.environ.copy()
+    squire_env["SQUIRE_STORE_ROOT"] = str(store_root)
+    squire_env["GIT_OPTIONAL_LOCKS"] = "0"
+    run([str(squire), "setup"], repo, env=squire_env)
+    run([str(squire), "runtime", "warm", "--short"], repo, env=squire_env, timeout=120)
     # Run both sides after setup/warm so Squire's local store and Git optional
     # lock behavior are part of the same stable workspace state.
-    native_records = parse_records(run([str(shell), str(driver)], repo, env=kernel_env, timeout=600).stdout, cases)
+    native_records = parse_records(run([str(shell), str(driver)], repo, env=squire_env, timeout=600).stdout, cases)
     before_counts, before_us = hot_events(store_root)
     session_args = [
         str(squire),
@@ -524,7 +523,7 @@ def main() -> int:
         str(shell),
         str(driver),
     ]
-    squire_records = parse_records(run(session_args, repo, env=kernel_env, timeout=600).stdout, cases)
+    squire_records = parse_records(run(session_args, repo, env=squire_env, timeout=600).stdout, cases)
     after_counts, after_us = hot_events(store_root)
 
     mismatches = compare(native_records, squire_records)

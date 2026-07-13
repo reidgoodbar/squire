@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"squire.run/internal/kernel"
+	"squire.run/internal/proofcache"
 )
 
 var (
@@ -50,7 +50,7 @@ func main() {
 	switch {
 	case len(args) == 1 && args[0] == "setup":
 		enableSquireOwnedGitReads()
-		out, err = kernel.Setup(ctx, cwd, storeRoot)
+		out, err = proofcache.Setup(ctx, cwd, storeRoot)
 	case len(args) >= 1 && args[0] == "codex":
 		enableSquireOwnedGitReads()
 		code, runErr := runProductCodex(ctx, cwd, storeRoot, args[1:])
@@ -102,7 +102,7 @@ func main() {
 			break
 		}
 		out = versionOut(format)
-	case len(args) >= 3 && args[0] == "kernel" && args[1] == "prewarm-adjacent":
+	case len(args) >= 3 && isRuntimeNamespace(args[0]) && args[1] == "prewarm-adjacent":
 		enableSquireOwnedGitReads()
 		err = runAdjacentPrewarm(ctx, cwd, storeRoot, args[2:])
 		if err != nil {
@@ -110,30 +110,30 @@ func main() {
 			os.Exit(1)
 		}
 		return
-	case len(args) >= 3 && args[0] == "kernel" && args[1] == "adapter":
-		err = runKernelAdapter(ctx, cwd, args[2:])
+	case len(args) >= 3 && isRuntimeNamespace(args[0]) && args[1] == "adapter":
+		err = runRuntimeAdapter(ctx, cwd, args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
-	case len(args) >= 3 && args[0] == "kernel" && args[1] == "shim-helper":
-		err = runKernelShimHelper(ctx, cwd, args[2:])
+	case len(args) >= 3 && isRuntimeNamespace(args[0]) && args[1] == "shim-helper":
+		err = runRuntimeShimHelper(ctx, cwd, args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
-	case len(args) >= 3 && args[0] == "kernel" && args[1] == "run":
-		runKernelCommand(ctx, cwd, storeRoot, args[2:])
+	case len(args) >= 3 && isRuntimeNamespace(args[0]) && args[1] == "run":
+		runRuntimeCommand(ctx, cwd, storeRoot, args[2:])
 		return
-	case len(args) == 2 && args[0] == "kernel" && args[1] == "status":
+	case len(args) == 2 && isRuntimeNamespace(args[0]) && args[1] == "status":
 		enableSquireOwnedGitReads()
-		out, err = kernel.KernelStatus(ctx, cwd, storeRoot)
-	case len(args) == 3 && args[0] == "kernel" && args[1] == "status" && args[2] == "--short":
+		out, err = proofcache.RuntimeStatus(ctx, cwd, storeRoot)
+	case len(args) == 3 && isRuntimeNamespace(args[0]) && args[1] == "status" && args[2] == "--short":
 		enableSquireOwnedGitReads()
-		out, err = kernel.KernelStatusSummary(ctx, cwd, storeRoot)
-	case len(args) >= 2 && args[0] == "kernel" && args[1] == "warm":
+		out, err = proofcache.RuntimeStatusSummary(ctx, cwd, storeRoot)
+	case len(args) >= 2 && isRuntimeNamespace(args[0]) && args[1] == "warm":
 		enableSquireOwnedGitReads()
 		var format outputFormat
 		var metadataOnly bool
@@ -141,16 +141,16 @@ func main() {
 		if err != nil {
 			break
 		}
-		var report kernel.WarmReport
+		var report proofcache.WarmReport
 		if metadataOnly {
-			report, err = kernel.WarmMetadata(ctx, cwd, storeRoot)
+			report, err = proofcache.WarmMetadata(ctx, cwd, storeRoot)
 		} else {
-			report, err = kernel.Warm(ctx, cwd, storeRoot)
+			report, err = proofcache.Warm(ctx, cwd, storeRoot)
 		}
 		if err == nil {
 			out = warmReportOut(report, format)
 		}
-	case len(args) >= 2 && args[0] == "kernel" && args[1] == "maintain":
+	case len(args) >= 2 && isRuntimeNamespace(args[0]) && args[1] == "maintain":
 		enableSquireOwnedGitReads()
 		out, err = runMaintain(ctx, cwd, storeRoot, args[2:])
 	case len(args) >= 2 && args[0] == "boost" && args[1] == "status":
@@ -159,8 +159,8 @@ func main() {
 		if err != nil {
 			break
 		}
-		var report kernel.BoostStatusReport
-		report, err = kernel.BoostStatusReportForStore(ctx, cwd, storeRoot)
+		var report proofcache.BoostStatusReport
+		report, err = proofcache.BoostStatusReportForStore(ctx, cwd, storeRoot)
 		if err == nil {
 			out = boostStatusOut(report, format)
 		}
@@ -171,10 +171,10 @@ func main() {
 		if err != nil {
 			break
 		}
-		var report kernel.BenchReport
-		report, err = kernel.BenchRepoMetadata(ctx)
+		var report proofcache.BenchReport
+		report, err = proofcache.BenchRepoMetadata(ctx)
 		if err == nil {
-			err = kernel.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(kernel.LatestBenchmarkFromRepoMetadata(report))
+			err = proofcache.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(proofcache.LatestBenchmarkFromRepoMetadata(report))
 		}
 		if err == nil {
 			out = repoMetadataBenchOut(report, format)
@@ -186,16 +186,16 @@ func main() {
 		if err != nil {
 			break
 		}
-		var report kernel.DeepBenchReport
-		report, err = kernel.BenchDeepLocal(ctx)
+		var report proofcache.DeepBenchReport
+		report, err = proofcache.BenchDeepLocal(ctx)
 		if err == nil {
-			err = kernel.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(kernel.LatestBenchmarkFromDeepLocal(report))
+			err = proofcache.NewLedgerStore(storeRoot).SaveLatestBenchmarkStatus(proofcache.LatestBenchmarkFromDeepLocal(report))
 		}
 		if err == nil {
 			out = deepLocalBenchOut(report, format)
 		}
-	case args[0] == "kernel":
-		fatalUsage(kernelUsageError(args[1:]))
+	case isRuntimeNamespace(args[0]):
+		fatalUsage(runtimeUsageError(args[1:]))
 		os.Exit(2)
 	case args[0] == "boost":
 		fatalUsage(boostUsageError(args[1:]))
@@ -220,6 +220,18 @@ func usage() {
 
 func enableSquireOwnedGitReads() {
 	_ = os.Setenv("GIT_OPTIONAL_LOCKS", "0")
+}
+
+func isRuntimeNamespace(arg string) bool {
+	// "kernel" is accepted for pre-1.0 automation but is intentionally hidden.
+	return arg == "runtime" || arg == "kernel"
+}
+
+func preferredEnv(primary, legacy string) string {
+	if value := os.Getenv(primary); value != "" {
+		return value
+	}
+	return os.Getenv(legacy)
 }
 
 func fatalUsage(message string) {
@@ -285,33 +297,33 @@ func squireHotLibraryNextTo(exe string) string {
 	return ""
 }
 
-func kernelUsageError(args []string) string {
+func runtimeUsageError(args []string) string {
 	if len(args) == 0 {
-		return `missing kernel subcommand (try "squire help kernel")`
+		return `missing runtime subcommand (try "squire help runtime")`
 	}
 	switch args[0] {
 	case "status":
 		if len(args) > 1 {
-			return fmt.Sprintf("unknown kernel status option %q (valid: --short)", args[1])
+			return fmt.Sprintf("unknown runtime status option %q (valid: --short)", args[1])
 		}
 	case "run":
-		return "squire kernel run requires -- before the command"
+		return "squire runtime run requires -- before the command"
 	case "warm":
 		if len(args) > 1 {
-			return fmt.Sprintf("squire kernel warm does not accept option %q", args[1])
+			return fmt.Sprintf("squire runtime warm does not accept option %q", args[1])
 		}
 	case "maintain":
-		return `invalid kernel maintain usage (try "squire help kernel maintain")`
+		return `invalid runtime maintain usage (try "squire help runtime maintain")`
 	case "prewarm-adjacent":
-		return "squire kernel prewarm-adjacent requires -- before the command"
+		return "squire runtime prewarm-adjacent requires -- before the command"
 	case "adapter":
-		return `invalid kernel adapter usage (try "squire help kernel adapter")`
+		return `invalid runtime adapter usage (try "squire help runtime adapter")`
 	case "shim-helper":
-		return `invalid kernel shim-helper usage (try "squire help kernel shim-helper")`
+		return `invalid runtime shim-helper usage (try "squire help runtime shim-helper")`
 	default:
-		return fmt.Sprintf(`unknown kernel subcommand %q (try "squire help kernel")`, args[0])
+		return fmt.Sprintf(`unknown runtime subcommand %q (try "squire help runtime")`, args[0])
 	}
-	return `invalid kernel command (try "squire help kernel")`
+	return `invalid runtime command (try "squire help runtime")`
 }
 
 func boostUsageError(args []string) string {
@@ -434,11 +446,11 @@ command is never executed natively by explain.
   squire session -- <command> [args...]
   squire vm status [--short|--json]
   squire vm session -- <command> [args...]
-  squire kernel status [--short]
-  squire kernel run -- <command> [args...]
-  squire kernel warm [--metadata-only] [--short|--json]
-  squire kernel maintain --background [--short|--json]
-  squire kernel adapter --stdio [--no-maintainer]
+  squire runtime status [--short]
+  squire runtime run -- <command> [args...]
+  squire runtime warm [--metadata-only] [--short|--json]
+  squire runtime maintain --background [--short|--json]
+  squire runtime adapter --stdio [--no-maintainer]
   squire boost status [--short|--json]
   squire boost bench repo-metadata [--short|--json]
   squire boost bench deep-local [--short|--json]
@@ -507,27 +519,27 @@ Prints Squire build identity. Release builds can set version, commit,
 and date with Go linker flags. Human-readable output is the default; use
 --json for automation.
 `
-	case "kernel", "kernel status":
+	case "runtime", "runtime status", "kernel", "kernel status":
 		return `usage:
-  squire kernel status [--short]
+  squire runtime status [--short]
 
-Shows kernel readiness. The default output includes repo oracle state,
+Shows runtime readiness. The default output includes repository state,
 invalidation epochs, enabled fast paths, proof-gated replay candidates,
 native-only discovery boundaries, prepared world counts, background maintainer
 status, and latest benchmark status. Use --short for a compact readiness view.
 `
-	case "kernel run":
+	case "runtime run", "kernel run":
 		return `usage:
-  squire kernel run -- <command> [args...]
+  squire runtime run -- <command> [args...]
 
 Runs an agent-chosen command through Squire. The "--" delimiter is
 required so Squire options cannot be confused with the command being served.
 On a valid proof, Squire returns exact stdout, stderr, and exit code. Otherwise
 it runs the original command natively.
 `
-	case "kernel adapter":
+	case "runtime adapter", "kernel adapter":
 		return `usage:
-  squire kernel adapter --stdio [--no-maintainer]
+  squire runtime adapter --stdio [--no-maintainer]
 
 Starts a long-lived terminal adapter process for host runtimes. The model still
 emits ordinary commands; the terminal layer sends those already-chosen commands
@@ -540,9 +552,9 @@ This is a compatibility path for host runtimes that integrate over stdio. The
 primary product path is runtime ABI 1 inside Squire Codex; preload sessions are
 advanced diagnostics only.
 `
-	case "kernel shim-helper":
+	case "runtime shim-helper", "kernel shim-helper":
 		return `usage:
-  squire kernel shim-helper --socket <path>
+  squire runtime shim-helper --socket <path>
 
 Experimental scoped-shim helper. It listens on a local Unix socket, accepts
 already-chosen argv/cwd requests from temporary per-session shims, serves them
@@ -550,9 +562,9 @@ through the same adapter decision path, and returns exact stdout/stderr bytes
 plus exit code. It is not a global shim installer and should be launched only
 inside an explicit Squire-owned session.
 `
-	case "kernel warm":
+	case "runtime warm", "kernel warm":
 		return `usage:
-  squire kernel warm [--metadata-only] [--short|--json]
+  squire runtime warm [--metadata-only] [--short|--json]
 
 Prepares local read-only proofs and hot outputs for later agent-chosen
 commands. It does not suggest commands, change prompts, mutate files, or skip
@@ -560,13 +572,13 @@ native fallback. JSON is the default output for automation; use --short for a
 compact human-readable summary. Use --metadata-only to prepare only enabled
 local metadata fast paths and their hot snapshot.
 `
-	case "kernel maintain":
+	case "runtime maintain", "kernel maintain":
 		return `usage:
-  squire kernel maintain --once [--short|--json]
-  squire kernel maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
-  squire kernel maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
-  squire kernel maintain --background-status [--short|--json]
-  squire kernel maintain --stop [--short|--json]
+  squire runtime maintain --once [--short|--json]
+  squire runtime maintain --duration <duration> [--poll-interval <duration>] [--short|--json]
+  squire runtime maintain --background [--duration <duration>] [--poll-interval <duration>] [--short|--json]
+  squire runtime maintain --background-status [--short|--json]
+  squire runtime maintain --stop [--short|--json]
 
 Runs or manages the resident maintainer. The background mode keeps warm state
 fresh outside the foreground command-serving path. It is local, bounded, and
@@ -605,40 +617,40 @@ func hasDelimiter(args []string) bool {
 	return false
 }
 
-func runKernelCommand(ctx context.Context, cwd, storeRoot string, args []string) {
-	argv, err := commandAfterDelimiter("squire kernel run", args)
+func runRuntimeCommand(ctx context.Context, cwd, storeRoot string, args []string) {
+	argv, err := commandAfterDelimiter("squire runtime run", args)
 	if err != nil {
 		fatalUsage(err.Error())
 		os.Exit(2)
 	}
-	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
+	sessionID := preferredEnv("SQUIRE_SESSION_ID", "SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "cli"
 	}
 	serveStart := time.Now()
-	if res, ok := kernel.FastHotClientReplay(ctx, sessionID, cwd, storeRoot, argv); ok {
-		finishKernelCommand(cwd, storeRoot, sessionID, argv, *res, serveStart)
+	if res, ok := proofcache.FastHotClientReplay(ctx, sessionID, cwd, storeRoot, argv); ok {
+		finishRuntimeCommand(cwd, storeRoot, sessionID, argv, *res, serveStart)
 	}
-	k := kernel.New(storeRoot)
+	k := proofcache.New(storeRoot)
 	res := k.Run(ctx, sessionID, cwd, argv)
-	finishKernelCommand(cwd, storeRoot, sessionID, argv, res, time.Time{})
+	finishRuntimeCommand(cwd, storeRoot, sessionID, argv, res, time.Time{})
 }
 
-func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res kernel.RunResult, replayStart time.Time) {
+func finishRuntimeCommand(cwd, storeRoot, sessionID string, argv []string, res proofcache.RunResult, replayStart time.Time) {
 	_, _ = os.Stdout.Write(res.Stdout)
 	_, _ = os.Stderr.Write(res.Stderr)
 	var replayWall time.Duration
 	if !replayStart.IsZero() {
 		replayWall = time.Since(replayStart)
 	}
-	kernel.RecordHotClientResult(storeRoot, res, replayWall)
-	if os.Getenv("SQUIRE_KERNEL_DEBUG_RESULT") == "1" {
+	proofcache.RecordHotClientResult(storeRoot, res, replayWall)
+	if preferredEnv("SQUIRE_DEBUG_RESULT", "SQUIRE_KERNEL_DEBUG_RESULT") == "1" {
 		debug := struct {
-			Mode         kernel.Mode           `json:"mode"`
-			Family       kernel.OperatorFamily `json:"family"`
-			Proof        string                `json:"proof,omitempty"`
-			NativeWallMS int64                 `json:"native_wall_ms,omitempty"`
-			Phases       kernel.PhaseTimings   `json:"phases"`
+			Mode         proofcache.Mode           `json:"mode"`
+			Family       proofcache.OperatorFamily `json:"family"`
+			Proof        string                    `json:"proof,omitempty"`
+			NativeWallMS int64                     `json:"native_wall_ms,omitempty"`
+			Phases       proofcache.PhaseTimings   `json:"phases"`
 		}{
 			Mode:         res.Mode,
 			Family:       res.Family,
@@ -649,7 +661,7 @@ func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res ke
 			debug.Proof = res.Proof.OperationKey
 		}
 		if b, err := json.Marshal(debug); err == nil {
-			fmt.Fprintln(os.Stderr, "SQUIRE_KERNEL_RESULT "+string(b))
+			fmt.Fprintln(os.Stderr, "SQUIRE_RESULT "+string(b))
 		}
 	}
 	startAdjacentPrewarmProcess(cwd, storeRoot, sessionID, argv)
@@ -657,17 +669,17 @@ func finishKernelCommand(cwd, storeRoot, sessionID string, argv []string, res ke
 }
 
 func runAdjacentPrewarm(ctx context.Context, cwd, storeRoot string, args []string) error {
-	argv, err := commandAfterDelimiter("squire kernel prewarm-adjacent", args)
+	argv, err := commandAfterDelimiter("squire runtime prewarm-adjacent", args)
 	if err != nil {
 		return err
 	}
-	sessionID := os.Getenv("SQUIRE_KERNEL_SESSION_ID")
+	sessionID := preferredEnv("SQUIRE_SESSION_ID", "SQUIRE_KERNEL_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "cli"
 	}
 	prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_, err = kernel.New(storeRoot).PrewarmAdjacent(prewarmCtx, cwd, sessionID, argv)
+	_, err = proofcache.New(storeRoot).PrewarmAdjacent(prewarmCtx, cwd, sessionID, argv)
 	return err
 }
 
@@ -682,17 +694,17 @@ func commandAfterDelimiter(command string, args []string) ([]string, error) {
 }
 
 func startAdjacentPrewarmProcess(cwd, storeRoot, sessionID string, argv []string) {
-	if !kernel.HasAdaptivePrewarmCandidates(argv) {
+	if !proofcache.HasAdaptivePrewarmCandidates(argv) {
 		return
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
-	args := append([]string{"kernel", "prewarm-adjacent", "--"}, argv...)
+	args := append([]string{"runtime", "prewarm-adjacent", "--"}, argv...)
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "SQUIRE_KERNEL_STORE_ROOT="+storeRoot, "SQUIRE_KERNEL_SESSION_ID="+sessionID, "GIT_OPTIONAL_LOCKS=0")
+	cmd.Env = append(os.Environ(), "SQUIRE_STORE_ROOT="+storeRoot, "SQUIRE_SESSION_ID="+sessionID, "GIT_OPTIONAL_LOCKS=0")
 	if err := cmd.Start(); err != nil {
 		return
 	}
@@ -700,13 +712,13 @@ func startAdjacentPrewarmProcess(cwd, storeRoot, sessionID string, argv []string
 }
 
 func storeRootFor(cwd string) string {
-	if root := os.Getenv("SQUIRE_KERNEL_STORE_ROOT"); root != "" {
+	if root := preferredEnv("SQUIRE_STORE_ROOT", "SQUIRE_KERNEL_STORE_ROOT"); root != "" {
 		return root
 	}
-	if root, ok := kernel.FastStoreRoot(cwd); ok {
+	if root, ok := proofcache.FastStoreRoot(cwd); ok {
 		return root
 	}
-	return kernel.DefaultStoreRoot(cwd)
+	return proofcache.DefaultStoreRoot(cwd)
 }
 
 func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (string, error) {
@@ -720,19 +732,19 @@ func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (str
 		if err != nil {
 			return "", err
 		}
-		status, err := kernel.StartBackgroundMaintainer(ctx, cwd, storeRoot, opts)
+		status, err := proofcache.StartBackgroundMaintainer(ctx, cwd, storeRoot, opts)
 		if err != nil {
 			return "", err
 		}
 		return backgroundStatusOut(status, format), nil
 	case len(args) == 1 && args[0] == "--background-status":
-		status, err := kernel.LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
+		status, err := proofcache.LoadBackgroundMaintainerStatus(ctx, cwd, storeRoot)
 		if err != nil {
 			return "", err
 		}
 		return backgroundStatusOut(status, format), nil
 	case len(args) == 1 && args[0] == "--stop":
-		status, err := kernel.StopBackgroundMaintainer(ctx, cwd, storeRoot)
+		status, err := proofcache.StopBackgroundMaintainer(ctx, cwd, storeRoot)
 		if err != nil {
 			return "", err
 		}
@@ -742,7 +754,7 @@ func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (str
 		if err != nil {
 			return "", err
 		}
-		report, err := kernel.Maintain(ctx, cwd, storeRoot, opts)
+		report, err := proofcache.Maintain(ctx, cwd, storeRoot, opts)
 		if err != nil {
 			return "", err
 		}
@@ -809,7 +821,7 @@ func parseWarmArgs(args []string) (outputFormat, bool, error) {
 		switch arg {
 		case "--metadata-only":
 			if metadataOnly {
-				return outputJSON, false, fmt.Errorf("squire kernel warm option %q specified more than once", arg)
+				return outputJSON, false, fmt.Errorf("squire runtime warm option %q specified more than once", arg)
 			}
 			metadataOnly = true
 		default:
@@ -819,10 +831,10 @@ func parseWarmArgs(args []string) (outputFormat, bool, error) {
 	return format, metadataOnly, nil
 }
 
-func parseForegroundOptions(args []string) (kernel.MaintainerOptions, error) {
-	opts := kernel.DefaultMaintainerOptions()
+func parseForegroundOptions(args []string) (proofcache.MaintainerOptions, error) {
+	opts := proofcache.DefaultMaintainerOptions()
 	if len(args) == 0 {
-		return opts, fmt.Errorf("usage: squire kernel maintain --once | --duration <duration> [--poll-interval <duration>]")
+		return opts, fmt.Errorf("usage: squire runtime maintain --once | --duration <duration> [--poll-interval <duration>]")
 	}
 	seenMode := false
 	for i := 0; i < len(args); i++ {
@@ -862,13 +874,13 @@ func parseForegroundOptions(args []string) (kernel.MaintainerOptions, error) {
 		}
 	}
 	if !seenMode {
-		return opts, fmt.Errorf("usage: squire kernel maintain --once | --duration <duration> [--poll-interval <duration>]")
+		return opts, fmt.Errorf("usage: squire runtime maintain --once | --duration <duration> [--poll-interval <duration>]")
 	}
 	return opts, nil
 }
 
-func parseBackgroundOptions(args []string) (kernel.BackgroundMaintainerOptions, error) {
-	opts := kernel.DefaultBackgroundMaintainerOptions()
+func parseBackgroundOptions(args []string) (proofcache.BackgroundMaintainerOptions, error) {
+	opts := proofcache.DefaultBackgroundMaintainerOptions()
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--duration":
@@ -926,7 +938,7 @@ func versionOut(format outputFormat) string {
 	return b.String()
 }
 
-func warmReportOut(report kernel.WarmReport, format outputFormat) string {
+func warmReportOut(report proofcache.WarmReport, format outputFormat) string {
 	if format != outputShort {
 		return jsonOut(report)
 	}
@@ -955,14 +967,14 @@ func warmReportOut(report kernel.WarmReport, format outputFormat) string {
 	return b.String()
 }
 
-func boostStatusOut(report kernel.BoostStatusReport, format outputFormat) string {
+func boostStatusOut(report proofcache.BoostStatusReport, format outputFormat) string {
 	if format == outputJSON {
 		return jsonOut(report)
 	}
-	return kernel.FormatBoostStatusReport(report)
+	return proofcache.FormatBoostStatusReport(report)
 }
 
-func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string {
+func repoMetadataBenchOut(report proofcache.BenchReport, format outputFormat) string {
 	if format != outputShort {
 		return jsonOut(report)
 	}
@@ -982,7 +994,7 @@ func repoMetadataBenchOut(report kernel.BenchReport, format outputFormat) string
 	return b.String()
 }
 
-func deepLocalBenchOut(report kernel.DeepBenchReport, format outputFormat) string {
+func deepLocalBenchOut(report proofcache.DeepBenchReport, format outputFormat) string {
 	if format != outputShort {
 		return jsonOut(report)
 	}
@@ -1010,7 +1022,7 @@ func deepLocalBenchOut(report kernel.DeepBenchReport, format outputFormat) strin
 	return b.String()
 }
 
-func gateStatusForCLI(gate kernel.GateReport) string {
+func gateStatusForCLI(gate proofcache.GateReport) string {
 	if gate.Status != "" {
 		return gate.Status
 	}
@@ -1023,21 +1035,21 @@ func gateStatusForCLI(gate kernel.GateReport) string {
 	return "n/a"
 }
 
-func backgroundStatusOut(status kernel.BackgroundMaintainerStatus, format outputFormat) string {
+func backgroundStatusOut(status proofcache.BackgroundMaintainerStatus, format outputFormat) string {
 	if format == outputShort {
 		return formatBackgroundStatusShort(status)
 	}
 	return jsonOut(status)
 }
 
-func maintainerReportOut(report kernel.MaintainerReport, format outputFormat) string {
+func maintainerReportOut(report proofcache.MaintainerReport, format outputFormat) string {
 	if format == outputShort {
 		return formatMaintainerReportShort(report)
 	}
 	return jsonOut(report)
 }
 
-func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) string {
+func formatBackgroundStatusShort(status proofcache.BackgroundMaintainerStatus) string {
 	state := "stopped"
 	switch {
 	case status.AlreadyRunning:
@@ -1083,7 +1095,7 @@ func formatBackgroundStatusShort(status kernel.BackgroundMaintainerStatus) strin
 	return b.String()
 }
 
-func formatMaintainerReportShort(report kernel.MaintainerReport) string {
+func formatMaintainerReportShort(report proofcache.MaintainerReport) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "Squire maintainer")
 	fmt.Fprintf(&b, "mode: %s\n", report.Mode)
