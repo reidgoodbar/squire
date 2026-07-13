@@ -39,7 +39,7 @@ jobs:
       - name: Cache validity regressions
         run: |
           tests='TestHotSnapshotDoesNotReplayRepoSummaryAcrossCWD|TestProofGatedStatusDoesNotReplayWhenDefaultGlobalGitIgnoreChanges|TestProofGatedStatusDoesNotReplayWhenIncludedGitConfigChanges|TestProofGatedDiffDoesNotReplayWhenDefaultGlobalGitAttributesChange|TestProofGatedStatusDoesNotReplayWhenConfiguredGitExcludesFileChanges|TestProofGatedDiffDoesNotReplayWhenConfiguredGitAttributesFileChanges'
-          go test ./internal/kernel -run "$tests" -count=1
+          go test ./internal/proofcache -run "$tests" -count=1
 
       - name: VM status
         run: go run ./cmd/squire vm status --short
