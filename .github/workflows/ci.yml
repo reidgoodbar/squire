@@ -20,13 +20,21 @@ jobs:
           cache: true
 
       - name: Prepare writable Go cache
-        run: mkdir -p "$GOCACHE"
+        run: mkdir -p "$GOCACHE" .tmp
 
       - name: Installer syntax
         run: sh -n install.sh
 
       - name: Unit tests
         run: go test ./...
+
+      - name: Native runtime warnings
+        run: |
+          cc -O3 -DNDEBUG -Wall -Wextra -Werror -Wno-unused-function \
+            -shared -fPIC \
+            -o .tmp/libsquire_runtime.so \
+            shims/squire_hot_api.c \
+            -ldl -lcrypto
 
       - name: Cache validity regressions
         run: |
@@ -41,7 +49,6 @@ jobs:
 
       - name: Release smoke
         run: |
-          mkdir -p .tmp
           go build -o .tmp/squire ./cmd/squire
           scripts/release_smoke.sh .tmp/squire
 

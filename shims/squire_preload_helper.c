@@ -273,7 +273,8 @@ static int helper_parse_primary(helper_parser *p, int *node_out) {
 			if (p->plan.nodes[node].argc >= HELPER_SHELL_MAX_ARGS - 1) {
 				return 0;
 			}
-			snprintf(p->plan.nodes[node].argv[p->plan.nodes[node].argc], HELPER_SHELL_WORD_BUF, "%s", tok->text);
+			size_t word_len = strnlen(tok->text, HELPER_SHELL_WORD_BUF - 1);
+			memmove(p->plan.nodes[node].argv[p->plan.nodes[node].argc], tok->text, word_len + 1);
 			p->plan.nodes[node].argc++;
 			p->pos++;
 		}
@@ -572,22 +573,22 @@ static int helper_append_fixed_rg(byte_buf *out, const unsigned char *content, u
 	return 1;
 }
 
-static int helper_parse_line_count_arg(int argc, char argv[HELPER_SHELL_MAX_ARGS][HELPER_SHELL_WORD_BUF], int *count) {
-	if (argc == 3 && strcmp(argv[1], "-n") == 0) {
+static int helper_parse_line_count_arg(const helper_node *node, int *count) {
+	if (node->argc == 3 && strcmp(node->argv[1], "-n") == 0) {
 		char *end = NULL;
 		errno = 0;
-		long parsed = strtol(argv[2], &end, 10);
-		if (errno != 0 || end == argv[2] || *end != '\0' || parsed < 0 || parsed > 100000) {
+		long parsed = strtol(node->argv[2], &end, 10);
+		if (errno != 0 || end == node->argv[2] || *end != '\0' || parsed < 0 || parsed > 100000) {
 			return 0;
 		}
 		*count = (int)parsed;
 		return 1;
 	}
-	if (argc == 2 && strncmp(argv[1], "-n", 2) == 0 && argv[1][2] != '\0') {
+	if (node->argc == 2 && strncmp(node->argv[1], "-n", 2) == 0 && node->argv[1][2] != '\0') {
 		char *end = NULL;
 		errno = 0;
-		long parsed = strtol(argv[1] + 2, &end, 10);
-		if (errno != 0 || end == argv[1] + 2 || *end != '\0' || parsed < 0 || parsed > 100000) {
+		long parsed = strtol(node->argv[1] + 2, &end, 10);
+		if (errno != 0 || end == node->argv[1] + 2 || *end != '\0' || parsed < 0 || parsed > 100000) {
 			return 0;
 		}
 		*count = (int)parsed;
@@ -627,11 +628,11 @@ static int helper_eval_filter(helper_node *node, const byte_buf *input, helper_r
 		return helper_append_result(&out->stdout_buf, input);
 	}
 	int count = 0;
-	if (strcmp(name, "head") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) {
+	if (strcmp(name, "head") == 0 && helper_parse_line_count_arg(node, &count)) {
 		out->exit_code = 0;
 		return helper_append_sed_range(&out->stdout_buf, input->data, (uint32_t)input->len, 1, count);
 	}
-	if (strcmp(name, "tail") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) {
+	if (strcmp(name, "tail") == 0 && helper_parse_line_count_arg(node, &count)) {
 		out->exit_code = 0;
 		return helper_append_tail_lines(&out->stdout_buf, input->data, (uint32_t)input->len, count);
 	}

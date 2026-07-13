@@ -450,8 +450,8 @@ static int squire_runtime_filter_candidate(helper_node *node) {
 	const char *pattern = NULL;
 	int quiet = 0;
 	return (strcmp(name, "cat") == 0 && node->argc == 1) ||
-	       (strcmp(name, "head") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) ||
-	       (strcmp(name, "tail") == 0 && helper_parse_line_count_arg(node->argc, node->argv, &count)) ||
+	       (strcmp(name, "head") == 0 && helper_parse_line_count_arg(node, &count)) ||
+	       (strcmp(name, "tail") == 0 && helper_parse_line_count_arg(node, &count)) ||
 	       (strcmp(name, "grep") == 0 && helper_parse_stdin_grep(node->argc, node->argv, &pattern, &quiet)) ||
 	       (strcmp(name, "wc") == 0 && node->argc == 2 && strcmp(node->argv[1], "-l") == 0) ||
 	       (strcmp(name, "sort") == 0 && node->argc == 1);

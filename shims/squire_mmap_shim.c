@@ -36,16 +36,52 @@
 
 #if defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
-#define SQUIRE_SHA256_CTX CC_SHA256_CTX
-#define SQUIRE_SHA256_Init CC_SHA256_Init
-#define SQUIRE_SHA256_Update CC_SHA256_Update
-#define SQUIRE_SHA256_Final CC_SHA256_Final
+typedef struct {
+	CC_SHA256_CTX inner;
+	int failed;
+} SQUIRE_SHA256_CTX;
+
+static void SQUIRE_SHA256_Init(SQUIRE_SHA256_CTX *ctx) {
+	ctx->failed = CC_SHA256_Init(&ctx->inner) != 1;
+}
+
+static void SQUIRE_SHA256_Update(SQUIRE_SHA256_CTX *ctx, const void *data, size_t len) {
+	if (!ctx->failed && len > 0 && CC_SHA256_Update(&ctx->inner, data, (CC_LONG)len) != 1) {
+		ctx->failed = 1;
+	}
+}
+
+static void SQUIRE_SHA256_Final(unsigned char digest[32], SQUIRE_SHA256_CTX *ctx) {
+	if (ctx->failed || CC_SHA256_Final(digest, &ctx->inner) != 1) {
+		memset(digest, 0, 32);
+	}
+}
 #else
-#include <openssl/sha.h>
-#define SQUIRE_SHA256_CTX SHA256_CTX
-#define SQUIRE_SHA256_Init SHA256_Init
-#define SQUIRE_SHA256_Update SHA256_Update
-#define SQUIRE_SHA256_Final SHA256_Final
+#include <openssl/evp.h>
+typedef struct {
+	EVP_MD_CTX *inner;
+	int failed;
+} SQUIRE_SHA256_CTX;
+
+static void SQUIRE_SHA256_Init(SQUIRE_SHA256_CTX *ctx) {
+	ctx->inner = EVP_MD_CTX_new();
+	ctx->failed = ctx->inner == NULL || EVP_DigestInit_ex(ctx->inner, EVP_sha256(), NULL) != 1;
+}
+
+static void SQUIRE_SHA256_Update(SQUIRE_SHA256_CTX *ctx, const void *data, size_t len) {
+	if (!ctx->failed && len > 0 && EVP_DigestUpdate(ctx->inner, data, len) != 1) {
+		ctx->failed = 1;
+	}
+}
+
+static void SQUIRE_SHA256_Final(unsigned char digest[32], SQUIRE_SHA256_CTX *ctx) {
+	unsigned int digest_len = 0;
+	if (ctx->failed || EVP_DigestFinal_ex(ctx->inner, digest, &digest_len) != 1 || digest_len != 32) {
+		memset(digest, 0, 32);
+	}
+	EVP_MD_CTX_free(ctx->inner);
+	ctx->inner = NULL;
+}
 #endif
 
 #define HOT_MAGIC UINT64_C(0x3150535148535153)
@@ -412,6 +448,26 @@ static void sha256_hex_bytes(const unsigned char *data, size_t len, char out[HAS
 	SQUIRE_SHA256_CTX ctx;
 	SQUIRE_SHA256_Init(&ctx);
 	SQUIRE_SHA256_Update(&ctx, data, len);
+	SQUIRE_SHA256_Final(digest, &ctx);
+	for (int i = 0; i < 32; i++) {
+		out[i * 2] = hex[digest[i] >> 4];
+		out[i * 2 + 1] = hex[digest[i] & 0x0f];
+	}
+	out[64] = '\0';
+}
+
+static void sha256_hex_join(const char *const *parts, size_t count, char out[HASH_HEX]) {
+	unsigned char digest[32];
+	static const char hex[] = "0123456789abcdef";
+	static const unsigned char separator = '|';
+	SQUIRE_SHA256_CTX ctx;
+	SQUIRE_SHA256_Init(&ctx);
+	for (size_t i = 0; i < count; i++) {
+		if (i > 0) {
+			SQUIRE_SHA256_Update(&ctx, &separator, 1);
+		}
+		SQUIRE_SHA256_Update(&ctx, parts[i], strlen(parts[i]));
+	}
 	SQUIRE_SHA256_Final(digest, &ctx);
 	for (int i = 0; i < 32; i++) {
 		out[i * 2] = hex[digest[i] >> 4];
@@ -2258,41 +2314,40 @@ static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
 	if (!discover_git_dir(inv->cwd, repo_root, git_dir) || !current_head_and_branch(git_dir, head, branch) || !rel_git_dir(inv->cwd, git_dir, git_rel)) {
 		return 0;
 	}
-	char buf[PATH_BUF * 2];
 	char h[HASH_HEX];
 	if (inv->argc == 3 && strcmp(inv->argv[2], "HEAD") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s", repo_root, head);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, head};
+		sha256_hex_join(parts, 2, h);
 		snprintf(epoch, 256, "hot-head:%s", h);
 		return 1;
 	}
 	if (inv->argc == 4 && strcmp(inv->argv[2], "--abbrev-ref") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s|%s", repo_root, branch, head);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, branch, head};
+		sha256_hex_join(parts, 3, h);
 		snprintf(epoch, 256, "hot-branch:%s", h);
 		return 1;
 	}
 	if (inv->argc == 3 && strcmp(inv->argv[1], "branch") == 0 && strcmp(inv->argv[2], "--show-current") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s|%s", repo_root, branch, head);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, branch, head};
+		sha256_hex_join(parts, 3, h);
 		snprintf(epoch, 256, "hot-branch:%s", h);
 		return 1;
 	}
 	if (strcmp(inv->argv[2], "--git-dir") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s|%s", repo_root, git_rel, git_dir);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, git_rel, git_dir};
+		sha256_hex_join(parts, 3, h);
 		snprintf(epoch, 256, "hot-gitdir:%s", h);
 		return 1;
 	}
 	if (strcmp(inv->argv[2], "--show-toplevel") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s", repo_root, git_dir);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, git_dir};
+		sha256_hex_join(parts, 2, h);
 		snprintf(epoch, 256, "hot-repo-root:%s", h);
 		return 1;
 	}
 	if (strcmp(inv->argv[2], "--is-inside-work-tree") == 0) {
-		snprintf(buf, sizeof(buf), "%s|%s", repo_root, git_dir);
-		sha256_hex_str(buf, h);
+		const char *parts[] = {repo_root, git_dir};
+		sha256_hex_join(parts, 2, h);
 		snprintf(epoch, 256, "hot-worktree:%s", h);
 		return 1;
 	}
@@ -3350,7 +3405,7 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 	if (!read_file_hash(path, content_hash, NULL, NULL)) {
 		return 0;
 	}
-	char mode[16];
+	char mode[32];
 	if (!mode_string(st.st_mode, mode)) {
 		return 0;
 	}
