@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -299,6 +300,9 @@ func numberedLineSelectionBytes(content []byte, selection lineSelection, maxOutp
 			out.WriteString(digits)
 			out.WriteByte('\t')
 			out.Write(line)
+			if runtime.GOOS == "linux" && (len(line) == 0 || line[len(line)-1] != '\n') {
+				out.WriteByte('\n')
+			}
 			if maxOutput > 0 && out.Len() > maxOutput {
 				return nil, false
 			}

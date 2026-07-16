@@ -608,8 +608,16 @@ static int helper_append_nl_selection(byte_buf *out, const unsigned char *conten
 			int prefix_len = snprintf(prefix, sizeof(prefix), "%6d\t", line);
 			if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix) ||
 			    !bytes_append(out, (const unsigned char *)prefix, (size_t)prefix_len) ||
-			    !helper_copy_bytes(out, content + offset, write_end - offset) ||
-			    out->len > max_output) {
+			    !helper_copy_bytes(out, content + offset, write_end - offset)) {
+				return 0;
+			}
+#if defined(__linux__) || defined(SQUIRE_GNU_NL_TERMINATOR)
+			if (write_end == len && (write_end == offset || content[write_end - 1] != '\n') &&
+			    !bytes_append_byte(out, '\n')) {
+				return 0;
+			}
+#endif
+			if (out->len > max_output) {
 				return 0;
 			}
 		}

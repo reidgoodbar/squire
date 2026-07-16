@@ -1418,6 +1418,7 @@ def run_current_file_execution_probes(api: HotAPI, repo: Path, env: dict[str, st
         ("tail", "-n", "13", "docs/current-file.md"),
         ("grep", "-F", "marker_04", "docs/current-file.md"),
         ("grep", "-q", "-F", "marker_05", "docs/current-file.md"),
+        ("nl", "-ba", "docs/current-file.md"),
         ("sh", "-c", "cat docs/current-file.md | head -n 9"),
         ("sh", "-c", "sed -n 10,40p docs/current-file.md | tail -n 7"),
         ("sh", "-c", "sed -n '1,12p;20,30p' docs/current-file.md | tail -n 9"),
@@ -1434,6 +1435,8 @@ def run_current_file_execution_probes(api: HotAPI, repo: Path, env: dict[str, st
     for index, argv in enumerate(commands):
         marker = f"marker_{index:02d}"
         payload = "\n".join(f"current file line {line:03d} {marker}" for line in range(1, 100)) + "\n"
+        if argv[:2] == ("nl", "-ba"):
+            payload = payload.removesuffix("\n")
         target.write_text(payload, encoding="utf-8")
         os.utime(target, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         result = run_case(api, repo, Case(f"current_file_{index}", "current_file", argv), env)

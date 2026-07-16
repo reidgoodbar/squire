@@ -2,6 +2,7 @@ package proofcache
 
 import (
 	"bytes"
+	"runtime"
 	"testing"
 )
 
@@ -63,5 +64,19 @@ func TestSedPrintSelectionHonorsOutputBound(t *testing.T) {
 	}
 	if _, ok := sedPrintSelectionBytesIndexed([]byte("12345\n"), nil, selection, 10); ok {
 		t.Fatal("selection exceeded output bound")
+	}
+}
+
+func TestNumberedAllLinesUsesPlatformTerminatorSemantics(t *testing.T) {
+	got, ok := numberedAllLinesBytes([]byte("alpha\n\ngamma"), maxFileInspectionOutputBytes)
+	if !ok {
+		t.Fatal("numbered output evaluation failed")
+	}
+	want := []byte("     1\talpha\n     2\t\n     3\tgamma")
+	if runtime.GOOS == "linux" {
+		want = append(want, '\n')
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("numbered output = %q, want %q", got, want)
 	}
 }
