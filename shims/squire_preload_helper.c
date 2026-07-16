@@ -1238,8 +1238,7 @@ static int helper_repo_rg_parse(int argc, char **argv, helper_repo_rg_query *que
 		return 0;
 	}
 	if (query->path_count == 0) {
-		query->implicit_path = 1;
-		query->paths[query->path_count++] = ".";
+		return 0;
 	}
 	if (query->hidden) {
 		int excludes_git = 0;

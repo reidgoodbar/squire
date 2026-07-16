@@ -486,10 +486,7 @@ func parseBoundedRgRepoArgs(argv []string) (pattern string, paths []string, ok b
 	if !seenPattern {
 		return "", nil, false
 	}
-	if len(paths) == 0 {
-		paths = []string{"."}
-	}
-	return pattern, paths, true
+	return pattern, paths, len(paths) > 0
 }
 
 func validBoundedRgText(value string, max int) bool {
@@ -537,10 +534,7 @@ func parseFixedRgRepoArgs(argv []string) (pattern string, paths []string, ok boo
 	if !fixed || pattern == "" || strings.HasPrefix(pattern, "-") || strings.ContainsAny(pattern, "\x00\n\r") {
 		return "", nil, false
 	}
-	if len(paths) == 0 {
-		paths = []string{"."}
-	}
-	return pattern, paths, true
+	return pattern, paths, len(paths) > 0
 }
 
 func parseFixedGrepArgs(argv []string) (pattern, path string, quiet bool, ok bool) {

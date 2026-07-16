@@ -861,6 +861,8 @@ def generate_repo_search_fuzz_cases(seed: int, count: int) -> list[Case]:
                 name=f"repo_search_fuzz_{index:04d}",
                 bucket="repo_search_fuzz",
                 argv=tuple(argv),
+                compare_native=bool(paths),
+                must_miss=not paths,
             )
         )
 
@@ -895,8 +897,10 @@ def run_repo_search_differential_fuzz(
     )
     mismatches = [item for item in results if item["mismatch"] is not None]
     misses = [item for item in results if not item["hot"]["hit"]]
+    expected_hits = [item for item in results if not item["case"].must_miss]
+    unexpected_misses = [item for item in expected_hits if not item["hot"]["hit"]]
     safe = not mismatches and (
-        (rg_available and not misses)
+        (rg_available and not unexpected_misses)
         or (not rg_available and len(misses) == len(results))
     )
     return {
@@ -905,6 +909,9 @@ def run_repo_search_differential_fuzz(
         "expected_decision": "hit" if rg_available else "safe_miss",
         "cases": len(results),
         "hits": len(results) - len(misses),
+        "expected_hits": len(expected_hits) if rg_available else 0,
+        "required_safe_misses": len(results) - len(expected_hits),
+        "unexpected_misses": len(unexpected_misses) if rg_available else 0,
         "byte_exact": byte_exact,
         "semantic_mismatches": len(mismatches),
         "misses": len(misses),

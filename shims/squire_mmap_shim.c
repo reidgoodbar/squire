@@ -3586,7 +3586,10 @@ static int is_fixed_rg_repo_search(policy_invocation *inv) {
 	if (!fixed || !seen_pattern) {
 		return 0;
 	}
-	if (path_count == 0 || path_count > 1 || strcmp(only_path, ".") == 0) {
+	if (path_count == 0) {
+		return 0;
+	}
+	if (path_count > 1 || strcmp(only_path, ".") == 0) {
 		return 1;
 	}
 	return !is_replayable_name(base_name(only_path));
@@ -3620,6 +3623,7 @@ static int is_bounded_rg_repo_search(policy_invocation *inv) {
 		return 0;
 	}
 	int seen_pattern = 0;
+	int path_count = 0;
 	for (int i = 1; i < inv->argc; i++) {
 		const char *arg = inv->argv[i];
 		if (strcmp(arg, "-n") == 0 || strcmp(arg, "--line-number") == 0 ||
@@ -3694,8 +3698,9 @@ static int is_bounded_rg_repo_search(policy_invocation *inv) {
 		if (strcmp(arg, ".") != 0 && !safe_relative_inspection_path_arg(arg)) {
 			return 0;
 		}
+		path_count++;
 	}
-	return seen_pattern;
+	return seen_pattern && path_count > 0;
 }
 
 static int append_normalized_epoch_input(byte_buf *b, policy_invocation *inv) {
