@@ -164,9 +164,9 @@ func (k *Engine) residentPreparedReplayCandidates(command string, phases *PhaseT
 }
 
 func (k *Engine) hydratePreparedReplayCache(ledger *ValidityLedger, signal string, phases *PhaseTimings) {
-	replays, warmFiles, available, diagnostics := k.buildPreparedReplayCache(ledger, phases)
+	replays, warmFiles, corpora, available, diagnostics := k.buildPreparedReplayCache(ledger, phases)
 	if available {
-		k.publishHotSnapshot(replays, warmFiles)
+		k.publishHotSnapshot(replays, warmFiles, corpora)
 	}
 	k.mu.Lock()
 	k.preparedLoaded = true
@@ -178,14 +178,15 @@ func (k *Engine) hydratePreparedReplayCache(ledger *ValidityLedger, signal strin
 	k.mu.Unlock()
 }
 
-func (k *Engine) buildPreparedReplayCache(ledger *ValidityLedger, phases *PhaseTimings) (map[string][]preparedReplay, map[string][]preparedWarmFile, bool, []string) {
+func (k *Engine) buildPreparedReplayCache(ledger *ValidityLedger, phases *PhaseTimings) (map[string][]preparedReplay, map[string][]preparedWarmFile, []preparedRepoSearchCorpus, bool, []string) {
 	replays := map[string][]preparedReplay{}
 	warmFiles := map[string][]preparedWarmFile{}
+	var corpora []preparedRepoSearchCorpus
 	if k.Store == nil {
-		return replays, warmFiles, false, []string{"prepared replay cache unavailable"}
+		return replays, warmFiles, corpora, false, []string{"prepared replay cache unavailable"}
 	}
 	if ledger == nil {
-		return replays, warmFiles, false, nil
+		return replays, warmFiles, corpora, false, nil
 	}
 	for _, prepared := range ledger.Prepared {
 		if !prepared.ReplayEligible || prepared.OutputRef == "" || len(prepared.HotFingerprints) == 0 || prepared.HotInvalidationEpoch == "" {
@@ -209,6 +210,30 @@ func (k *Engine) buildPreparedReplayCache(ledger *ValidityLedger, phases *PhaseT
 				Entry:        prepared,
 				Content:      content,
 				LineStarts:   lineStartsForContent(content),
+				NativeWallMS: 1,
+			})
+			continue
+		}
+		if prepared.Kind == PreparedKindRepoSearchCorpus || prepared.Kind == PreparedKindGitHistoryCorpus {
+			fingerprintKey := "repo_search_corpus"
+			outputKey := "repo_search_corpus"
+			if prepared.Kind == PreparedKindGitHistoryCorpus {
+				fingerprintKey = "git_history_corpus"
+				outputKey = "git_history_corpus"
+			}
+			key := prepared.HotFingerprints[fingerprintKey]
+			if key == "" {
+				continue
+			}
+			outputStart := time.Now()
+			content, err := k.Store.LoadRepoSearchCorpus(prepared.OutputRef)
+			phases.OutputMaterializeMS += elapsedMS(outputStart)
+			if err != nil || hashBytes(content) != prepared.OutputFingerprints[outputKey] {
+				continue
+			}
+			corpora = append(corpora, preparedRepoSearchCorpus{
+				Entry:        prepared,
+				Content:      content,
 				NativeWallMS: 1,
 			})
 			continue
@@ -242,7 +267,7 @@ func (k *Engine) buildPreparedReplayCache(ledger *ValidityLedger, phases *PhaseT
 			HotCacheFrame: encodeHotCacheHitFrame(stdout, stderr, obs.ExitCode),
 		})
 	}
-	return replays, warmFiles, true, nil
+	return replays, warmFiles, corpora, true, nil
 }
 
 func observationForPrepared(ledger *ValidityLedger, prepared PreparedEntry) (Observation, bool) {
@@ -452,7 +477,7 @@ func fileInspectionHotProof(cwd string, argv []string) (map[string]string, strin
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Size() > maxReplayableInspectionFileBytes {
 		return nil, "", false
 	}
-	if isReplayableCatFileRead(argv) && info.Size() > maxFastPathOutputBytes {
+	if isReplayableCatFileRead(argv) && info.Size() > maxFileInspectionOutputBytes {
 		return nil, "", false
 	}
 	contentHash, ok := hashFile(realPath)

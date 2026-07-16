@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -138,6 +139,9 @@ func Classify(argv []string) OperatorFamily {
 		if isGitHeadSubjectLog(argv) {
 			return FamilyLocalRepoMetadata
 		}
+		if isBoundedGitOnelineLog(argv) {
+			return FamilyLocalRepoMetadata
+		}
 		if isGitRemoteMetadata(argv) {
 			return FamilyLocalRepoMetadata
 		}
@@ -152,7 +156,7 @@ func Classify(argv []string) OperatorFamily {
 		}
 		return FamilyShellUnknown
 	}
-	if (name == "rg" && len(argv) == 2 && argv[1] == "--files") || isFixedRgFileSearch(argv) {
+	if (name == "rg" && len(argv) == 2 && argv[1] == "--files") || isFixedRgFileSearch(argv) || isFixedRgRepoSearch(argv) || isBoundedRgRepoSearch(argv) {
 		return FamilySearchList
 	}
 	if isDirectoryListing(argv) {
@@ -212,11 +216,14 @@ func IsProofGatedReplayCandidate(argv []string) bool {
 		isStaticEnvironmentProbe(argv) ||
 		isPrintenvProbe(argv) ||
 		isDirectoryListing(argv) ||
-		isFixedRgFileSearch(argv)
+		isFixedRgFileSearch(argv) ||
+		isFixedRgRepoSearch(argv) ||
+		isBoundedRgRepoSearch(argv)
 }
 
 func IsReplayAllowed(argv []string) bool {
-	return IsFastPathAllowed(argv) || IsProofGatedReplayCandidate(argv)
+	argv = normalizeArgvForPolicy(argv)
+	return IsFastPathAllowed(argv) || IsProofGatedReplayCandidate(argv) || isBoundedGitOnelineLog(argv)
 }
 
 func isGitRepoState(argv []string) bool {
@@ -257,6 +264,62 @@ func isGitHeadSubjectLog(argv []string) bool {
 		argv[3] == "--format=%H%n%s"
 }
 
+func isBoundedGitOnelineLog(argv []string) bool {
+	if len(argv) < 6 || filepath.Base(argv[0]) != "git" || argv[1] != "log" {
+		return false
+	}
+	limit := 0
+	oneline := false
+	separator := false
+	paths := 0
+	for i := 2; i < len(argv); i++ {
+		arg := argv[i]
+		if !separator && arg == "--oneline" {
+			oneline = true
+			continue
+		}
+		if !separator && (arg == "-n" || arg == "--max-count") {
+			i++
+			if i >= len(argv) || limit != 0 || !boundedGitLogLimit(argv[i]) {
+				return false
+			}
+			limit, _ = strconv.Atoi(argv[i])
+			continue
+		}
+		if !separator && strings.HasPrefix(arg, "--max-count=") {
+			value := strings.TrimPrefix(arg, "--max-count=")
+			if limit != 0 || !boundedGitLogLimit(value) {
+				return false
+			}
+			limit, _ = strconv.Atoi(value)
+			continue
+		}
+		if !separator && len(arg) > 1 && arg[0] == '-' && arg[1] >= '0' && arg[1] <= '9' {
+			if limit != 0 || !boundedGitLogLimit(arg[1:]) {
+				return false
+			}
+			limit, _ = strconv.Atoi(arg[1:])
+			continue
+		}
+		if !separator && arg == "--" {
+			separator = true
+			continue
+		}
+		clean := filepath.Clean(arg)
+		if !separator || paths >= 32 || strings.HasPrefix(arg, ":") || strings.ContainsAny(arg, "*?[") ||
+			(clean != "." && !safeRelativeInspectionPath(clean)) {
+			return false
+		}
+		paths++
+	}
+	return oneline && separator && limit > 0 && paths > 0
+}
+
+func boundedGitLogLimit(value string) bool {
+	limit, err := strconv.Atoi(value)
+	return err == nil && limit >= 1 && limit <= 20
+}
+
 func isGitReadOnlyDiff(argv []string) bool {
 	if len(argv) < 2 || filepath.Base(argv[0]) != "git" || argv[1] != "diff" {
 		return false
@@ -264,7 +327,7 @@ func isGitReadOnlyDiff(argv []string) bool {
 	if len(argv) == 2 {
 		return true
 	}
-	if len(argv) == 3 && argv[2] == "--stat" {
+	if len(argv) == 3 && (argv[2] == "--stat" || argv[2] == "--check") {
 		return true
 	}
 	if len(argv) >= 4 && argv[2] == "--" {
@@ -280,7 +343,7 @@ func isGitReadOnlyDiff(argv []string) bool {
 
 func isRepoSummaryReplayCandidate(argv []string) bool {
 	argv = normalizeArgvForPolicy(argv)
-	return isGitRepoState(argv) || isGitHeadSubjectLog(argv)
+	return isGitRepoState(argv) || isGitHeadSubjectLog(argv) || isFixedRgRepoSearch(argv) || isBoundedRgRepoSearch(argv)
 }
 
 func isReplayableFileInspection(argv []string) bool {
@@ -288,7 +351,8 @@ func isReplayableFileInspection(argv []string) bool {
 }
 
 func isWarmFileBackedInspection(argv []string) bool {
-	return isReplayableCatFileRead(argv) || isBoundedSedPrint(argv) || isBoundedHeadPrint(argv) || isBoundedTailPrint(argv) || isFixedGrepFileSearch(argv) || isFixedRgFileSearch(argv)
+	_, ok := parseWarmFileOperation(argv)
+	return ok
 }
 
 func isManifestFileRead(argv []string) bool {
@@ -325,6 +389,158 @@ func isFixedGrepFileSearch(argv []string) bool {
 func isFixedRgFileSearch(argv []string) bool {
 	_, _, _, _, ok := parseFixedRgArgs(argv)
 	return ok
+}
+
+func isFixedRgRepoSearch(argv []string) bool {
+	_, paths, ok := parseFixedRgRepoArgs(argv)
+	if !ok {
+		return false
+	}
+	return len(paths) != 1 || paths[0] == "." || !isReplayableInspectionName(filepath.Base(paths[0]))
+}
+
+func isBoundedRgRepoSearch(argv []string) bool {
+	_, _, ok := parseBoundedRgRepoArgs(argv)
+	return ok
+}
+
+// parseBoundedRgRepoArgs recognizes a deliberately small, read-only ripgrep
+// surface. Squire never evaluates the regex: the native rg process prepares
+// exact bytes in the background, and replay remains gated by a full workspace
+// proof. Keeping the parser narrow prevents command-producing rg features from
+// entering the preparation path.
+func parseBoundedRgRepoArgs(argv []string) (pattern string, paths []string, ok bool) {
+	if len(argv) < 2 || len(argv) > composedShellMaxArgs || filepath.Base(argv[0]) != "rg" {
+		return "", nil, false
+	}
+	seenPattern := false
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		switch arg {
+		case "-n", "--line-number", "-S", "--smart-case", "-i", "--ignore-case", "--hidden",
+			"--no-heading", "--with-filename", "--no-filename", "-l", "--files-with-matches", "-q", "--quiet":
+			continue
+		case "-g", "--glob":
+			i++
+			if i >= len(argv) || !validBoundedRgText(argv[i], 1024) {
+				return "", nil, false
+			}
+			continue
+		case "-C", "--context", "-A", "--after-context", "-B", "--before-context":
+			i++
+			if i >= len(argv) || !validBoundedRgContext(argv[i]) {
+				return "", nil, false
+			}
+			continue
+		case "-F", "--fixed-strings":
+			continue
+		}
+		switch {
+		case strings.HasPrefix(arg, "--glob="):
+			if !validBoundedRgText(strings.TrimPrefix(arg, "--glob="), 1024) {
+				return "", nil, false
+			}
+			continue
+		case strings.HasPrefix(arg, "--context="):
+			if !validBoundedRgContext(strings.TrimPrefix(arg, "--context=")) {
+				return "", nil, false
+			}
+			continue
+		case strings.HasPrefix(arg, "--after-context="):
+			if !validBoundedRgContext(strings.TrimPrefix(arg, "--after-context=")) {
+				return "", nil, false
+			}
+			continue
+		case strings.HasPrefix(arg, "--before-context="):
+			if !validBoundedRgContext(strings.TrimPrefix(arg, "--before-context=")) {
+				return "", nil, false
+			}
+			continue
+		case len(arg) > 2 && (strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-A") || strings.HasPrefix(arg, "-B")):
+			if !validBoundedRgContext(arg[2:]) {
+				return "", nil, false
+			}
+			continue
+		case len(arg) > 2 && strings.HasPrefix(arg, "-g"):
+			if !validBoundedRgText(arg[2:], 1024) {
+				return "", nil, false
+			}
+			continue
+		case strings.HasPrefix(arg, "-"):
+			return "", nil, false
+		}
+		if !seenPattern {
+			if !validBoundedRgText(arg, 2048) || strings.HasPrefix(arg, "-") {
+				return "", nil, false
+			}
+			pattern = arg
+			seenPattern = true
+			continue
+		}
+		clean := filepath.Clean(arg)
+		if clean != "." && !safeRelativeInspectionPath(clean) {
+			return "", nil, false
+		}
+		paths = append(paths, clean)
+	}
+	if !seenPattern {
+		return "", nil, false
+	}
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+	return pattern, paths, true
+}
+
+func validBoundedRgText(value string, max int) bool {
+	return value != "" && len(value) <= max && !strings.ContainsAny(value, "\x00\n\r")
+}
+
+func validBoundedRgContext(value string) bool {
+	n, err := strconv.Atoi(value)
+	return err == nil && n >= 0 && n <= 1000
+}
+
+func parseFixedRgRepoArgs(argv []string) (pattern string, paths []string, ok bool) {
+	if len(argv) < 3 || filepath.Base(argv[0]) != "rg" {
+		return "", nil, false
+	}
+	fixed := false
+	seenPattern := false
+	for _, arg := range argv[1:] {
+		switch arg {
+		case "-F", "--fixed-strings":
+			if fixed || seenPattern {
+				return "", nil, false
+			}
+			fixed = true
+		case "-q", "--quiet", "-n", "--line-number", "--no-heading", "--with-filename", "--no-filename", "-l", "--files-with-matches":
+			if seenPattern {
+				return "", nil, false
+			}
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", nil, false
+			}
+			if !seenPattern {
+				pattern = arg
+				seenPattern = true
+				continue
+			}
+			clean := filepath.Clean(arg)
+			if clean != "." && !safeRelativeInspectionPath(clean) {
+				return "", nil, false
+			}
+			paths = append(paths, clean)
+		}
+	}
+	if !fixed || pattern == "" || strings.HasPrefix(pattern, "-") || strings.ContainsAny(pattern, "\x00\n\r") {
+		return "", nil, false
+	}
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+	return pattern, paths, true
 }
 
 func parseFixedGrepArgs(argv []string) (pattern, path string, quiet bool, ok bool) {
@@ -441,6 +657,14 @@ func isBoundedTailPrint(argv []string) bool {
 		return false
 	}
 	return isReplayableInspectionName(filepath.Base(filepath.Clean(path)))
+}
+
+func isNumberedAllLines(argv []string) bool {
+	if len(argv) != 3 || filepath.Base(argv[0]) != "nl" || argv[1] != "-ba" {
+		return false
+	}
+	path := filepath.Clean(argv[2])
+	return safeRelativeInspectionPath(path) && isReplayableInspectionName(filepath.Base(path))
 }
 
 func firstArg(argv []string) string {
@@ -581,30 +805,8 @@ func pathContainsHiddenOrVCSPart(path string) bool {
 }
 
 func isSimpleSedPrintRange(expr string) bool {
-	if !strings.HasSuffix(expr, "p") {
-		return false
-	}
-	body := strings.TrimSuffix(expr, "p")
-	if body == "" || strings.ContainsAny(body, "$/\\{}[];!qadciw=") {
-		return false
-	}
-	parts := strings.Split(body, ",")
-	if len(parts) > 2 {
-		return false
-	}
-	start, ok := parsePositiveSmallLine(parts[0])
-	if !ok {
-		return false
-	}
-	end := start
-	if len(parts) == 2 {
-		var endOK bool
-		end, endOK = parsePositiveSmallLine(parts[1])
-		if !endOK {
-			return false
-		}
-	}
-	return start <= end && end-start <= 500
+	_, ok := parseSedPrintSelection(expr)
+	return ok
 }
 
 func parsePositiveSmallLine(s string) (int, bool) {
@@ -651,7 +853,7 @@ func isReplayableInspectionName(name string) bool {
 		".sh", ".bash", ".zsh", ".fish", ".sql",
 		".css", ".scss", ".sass", ".html", ".htm",
 		".json", ".jsonc", ".toml", ".yaml", ".yml", ".xml",
-		".md", ".markdown", ".txt":
+		".md", ".markdown", ".rst", ".txt", ".log":
 		return true
 	default:
 		return false

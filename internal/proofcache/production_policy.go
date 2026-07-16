@@ -40,6 +40,9 @@ func productionRuntimePlanAllowed(cwd string, plan shellPlan, index int, hasInpu
 			_, ok := evalComposedShellFilter(node.argv, nil)
 			return ok
 		}
+		if isComposedShellPwd(node.argv) {
+			return true
+		}
 		inv := NormalizeInvocation(cwd, node.argv)
 		return productionRuntimeDirectAllowed(inv.PolicyArgv)
 	case shellNodePipe:

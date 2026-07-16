@@ -16,6 +16,7 @@ type HotClientStats struct {
 	GoClientReplays        int   `json:"go_client_replays"`
 	PreparedChildReplays   int   `json:"prepared_child_replays"`
 	SyntheticReplays       int   `json:"synthetic_replays"`
+	CurrentFileReplays     int   `json:"current_file_replays"`
 	NativeFallbacks        int   `json:"native_fallbacks"`
 	NativeWallAvoidedMS    int64 `json:"native_wall_avoided_ms"`
 	ReplayWallUS           int64 `json:"replay_wall_us"`
@@ -76,6 +77,7 @@ func isHotClientProof(proof string) bool {
 		proof == "mmap-hot-snapshot" ||
 		proof == "c-mmap-hot-snapshot" ||
 		proof == "c-mmap-hot-synthetic" ||
+		proof == "c-current-file" ||
 		proof == "composed-shell-adapter"
 }
 
@@ -113,6 +115,8 @@ func LoadHotClientStats(storeRoot string) HotClientStats {
 					stats.PreparedChildReplays++
 				case "c-mmap-hot-synthetic":
 					stats.SyntheticReplays++
+				case "c-current-file":
+					stats.CurrentFileReplays++
 				}
 			}
 			var nativeMS int64

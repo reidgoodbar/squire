@@ -7,7 +7,7 @@
 // Supported direct-mmap surfaces:
 //   - enabled Git metadata fast paths
 //   - proof-gated Git repo summaries: ls-files, status, diff
-//   - warmed bounded file inspection: cat/head/tail <file>, sed -n <range>p <file>
+//   - warmed bounded file inspection: cat/head/tail <file>, sed ranges, fused nl -ba | sed ranges
 //   - warmed literal grep/rg checks and native-precomputed file(1) type inspection
 //   - common tool version probes and command path lookups
 //   - static environment probes, printenv <safe-var>, and tight directory listings
@@ -21,7 +21,10 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <limits.h>
+#include <pthread.h>
+#include <regex.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,8 +37,16 @@
 #include <time.h>
 #include <unistd.h>
 
+extern char **environ;
+
 #if defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
+#include <sys/event.h>
+#elif defined(__linux__)
+#include <sys/inotify.h>
+#endif
+
+#if defined(__APPLE__)
 typedef struct {
 	CC_SHA256_CTX inner;
 	int failed;
@@ -92,15 +103,23 @@ static void SQUIRE_SHA256_Final(unsigned char digest[32], SQUIRE_SHA256_CTX *ctx
 #define HOT_MAX_BYTES (64 * 1024 * 1024)
 #define HOT_KIND_EXACT 1
 #define HOT_KIND_WARM_FILE 2
+#define HOT_KIND_REPO_SEARCH_CORPUS 3
+#define HOT_KIND_GIT_HISTORY_CORPUS 4
 #define HOT_CLIENT_STATS_MAX_BYTES (1024 * 1024)
-#define MAX_FAST_OUTPUT_BYTES (64 * 1024)
+#define MAX_FAST_OUTPUT_BYTES (1024 * 1024)
+#define MAX_FILE_OUTPUT_BYTES (64 * 1024)
 #define MAX_WARM_FILE_BYTES (256 * 1024)
+#define MAX_REPO_SEARCH_CORPUS_BYTES (48 * 1024 * 1024)
+#define MAX_GIT_HISTORY_CORPUS_BYTES (8 * 1024 * 1024)
+#define MAX_COMPOSED_INTERMEDIATE_BYTES (2 * 1024 * 1024)
 #define MAX_EXECUTABLE_HASH_BYTES (64 * 1024 * 1024)
+#define MAX_PREPARE_REQUEST_BYTES (64 * 1024)
 #define MAX_ARGC 64
 #define PATH_BUF 4096
 #define HASH_HEX 65
 #define HOT_CLIENT_PROOF_C_MMAP "c-mmap-hot-snapshot"
 #define HOT_CLIENT_PROOF_C_SYNTHETIC "c-mmap-hot-synthetic"
+#define HOT_CLIENT_PROOF_C_CURRENT_FILE "c-current-file"
 
 typedef struct {
 	unsigned char *data;
@@ -135,6 +154,7 @@ typedef struct {
 	unsigned char *data;
 	size_t len;
 	int borrowed;
+	void *cache_token;
 } mapped_snapshot;
 
 typedef struct {
@@ -151,9 +171,361 @@ typedef struct {
 } prepared_exact_replay;
 
 static long long stat_mtime_nano(const struct stat *st);
+static long long stat_ctime_nano(const struct stat *st);
 static int file_stat_signal(const struct stat *st, const char *mode, char *out, size_t cap);
 static int join_path(char *out, size_t cap, const char *left, const char *right);
 static int safe_relative_inspection_path_arg(const char *path);
+static int is_replayable_name(const char *name);
+
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+#define REPO_GUARD_MAX_WATCHES 100000
+#define REPO_GUARD_MAX_EXTERNAL_PATHS 1024
+
+typedef struct {
+	char root[PATH_BUF];
+	int backend_fd;
+	int complete;
+	int workspace_scan;
+	int workspace_registered;
+	int workspace_epoch_valid;
+	int workspace_need_content;
+	int workspace_max_content_files;
+	char workspace_tree[HASH_HEX];
+	char workspace_content[HASH_HEX];
+	int git_context_valid;
+	char git_dir[PATH_BUF];
+	int git_tool_valid;
+	executable_signal git_tool;
+	int rg_tool_valid;
+	executable_signal rg_tool;
+	int git_index_valid;
+	char git_index[HASH_HEX + 16];
+	int git_config_valid;
+	char git_config[HASH_HEX];
+	int git_head_valid;
+	char git_head[128];
+	char git_branch[PATH_BUF];
+	int git_ignore_valid;
+	char git_ignore[HASH_HEX];
+	int git_attributes_valid;
+	char git_attributes[HASH_HEX];
+	int git_log_view_valid;
+	char git_log_view[HASH_HEX];
+	int git_object_namespace_valid;
+	char git_object_namespace[HASH_HEX];
+	int rg_config_valid;
+	char rg_config[HASH_HEX];
+#if defined(__APPLE__)
+	int *watch_fds;
+	struct stat *watch_stats;
+	size_t watch_count;
+	size_t watch_cap;
+#endif
+	char external_paths[REPO_GUARD_MAX_EXTERNAL_PATHS][PATH_BUF];
+	size_t external_count;
+} repo_change_guard;
+
+static _Thread_local repo_change_guard *active_repo_guard;
+
+static int repo_guard_path_in_workspace(const repo_change_guard *guard, const char *path) {
+	if (guard == NULL || path == NULL || guard->root[0] == '\0') {
+		return 0;
+	}
+	size_t root_len = strlen(guard->root);
+	if (strcmp(path, guard->root) == 0) {
+		return 1;
+	}
+	if (strncmp(path, guard->root, root_len) != 0 || path[root_len] != '/') {
+		return 0;
+	}
+	const char *rel = path + root_len + 1;
+	return strcmp(rel, ".git") != 0 && strncmp(rel, ".git/", 5) != 0 &&
+	       strcmp(rel, ".squire") != 0 && strncmp(rel, ".squire/", 8) != 0;
+}
+
+static int repo_guard_parent_path(const char *path, char parent[PATH_BUF]) {
+	if (path == NULL || path[0] == '\0' || strlen(path) >= PATH_BUF) {
+		return 0;
+	}
+	snprintf(parent, PATH_BUF, "%s", path);
+	char *slash = strrchr(parent, '/');
+	if (slash == NULL) {
+		snprintf(parent, PATH_BUF, ".");
+		return 1;
+	}
+	if (slash == parent) {
+		parent[1] = '\0';
+		return 1;
+	}
+	*slash = '\0';
+	return 1;
+}
+
+static int repo_guard_existing_parent(const char *path, char parent[PATH_BUF]) {
+	if (!repo_guard_parent_path(path, parent)) {
+		return 0;
+	}
+	for (;;) {
+		struct stat st;
+		if (lstat(parent, &st) == 0 && S_ISDIR(st.st_mode)) {
+			return 1;
+		}
+		char next[PATH_BUF];
+		if (!repo_guard_parent_path(parent, next) || strcmp(next, parent) == 0) {
+			return 0;
+		}
+		snprintf(parent, PATH_BUF, "%s", next);
+	}
+}
+
+static int repo_guard_init(repo_change_guard *guard, const char *root) {
+	if (guard == NULL || root == NULL || root[0] == '\0') {
+		return 0;
+	}
+	memset(guard, 0, sizeof(*guard));
+	guard->backend_fd = -1;
+	snprintf(guard->root, sizeof(guard->root), "%s", root);
+#if defined(__APPLE__)
+	guard->backend_fd = kqueue();
+#else
+	guard->backend_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+#endif
+	guard->complete = guard->backend_fd >= 0;
+	return guard->complete;
+}
+
+static void repo_guard_release(repo_change_guard *guard) {
+	if (guard == NULL) {
+		return;
+	}
+	if (guard->backend_fd >= 0) {
+		close(guard->backend_fd);
+	}
+#if defined(__APPLE__)
+	for (size_t i = 0; i < guard->watch_count; i++) {
+		if (guard->watch_fds[i] >= 0) {
+			close(guard->watch_fds[i]);
+		}
+	}
+	free(guard->watch_fds);
+	free(guard->watch_stats);
+#endif
+	memset(guard, 0, sizeof(*guard));
+	guard->backend_fd = -1;
+}
+
+#if defined(__APPLE__)
+static int repo_guard_watch_path(repo_change_guard *guard, const char *path) {
+	if (guard == NULL || !guard->complete || path == NULL || path[0] == '\0' || guard->watch_count >= REPO_GUARD_MAX_WATCHES) {
+		if (guard != NULL) {
+			guard->complete = 0;
+		}
+		return 0;
+	}
+	int flags = O_EVTONLY | O_CLOEXEC;
+#if defined(O_SYMLINK)
+	struct stat lst;
+	if (lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode)) {
+		flags |= O_SYMLINK;
+	}
+#endif
+	int fd = open(path, flags);
+	if (fd < 0) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: repo-guard-open-failed path=%s errno=%d\n", path, errno);
+		}
+		guard->complete = 0;
+		return 0;
+	}
+	struct stat baseline;
+	if (fstat(fd, &baseline) != 0) {
+		close(fd);
+		guard->complete = 0;
+		return 0;
+	}
+	if (guard->watch_count == guard->watch_cap) {
+		size_t next_cap = guard->watch_cap == 0 ? 256 : guard->watch_cap * 2;
+		if (next_cap > REPO_GUARD_MAX_WATCHES) {
+			next_cap = REPO_GUARD_MAX_WATCHES;
+		}
+		int *next_fds = (int *)realloc(guard->watch_fds, next_cap * sizeof(int));
+		if (next_fds == NULL) {
+			close(fd);
+			guard->complete = 0;
+			return 0;
+		}
+		guard->watch_fds = next_fds;
+		struct stat *next_stats = (struct stat *)realloc(guard->watch_stats, next_cap * sizeof(struct stat));
+		if (next_stats == NULL) {
+			close(fd);
+			guard->complete = 0;
+			return 0;
+		}
+		guard->watch_stats = next_stats;
+		guard->watch_cap = next_cap;
+	}
+	struct kevent change;
+	EV_SET(&change, (uintptr_t)fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+	       NOTE_DELETE | NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK | NOTE_RENAME | NOTE_REVOKE,
+	       0, (void *)(uintptr_t)(guard->watch_count + 1));
+	if (kevent(guard->backend_fd, &change, 1, NULL, 0, NULL) != 0) {
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+			fprintf(stderr, "squire mmap proof debug: repo-guard-register-failed path=%s errno=%d\n", path, errno);
+		}
+		close(fd);
+		guard->complete = 0;
+		return 0;
+	}
+	guard->watch_fds[guard->watch_count] = fd;
+	guard->watch_stats[guard->watch_count] = baseline;
+	guard->watch_count++;
+	return 1;
+}
+#else
+static int repo_guard_watch_path(repo_change_guard *guard, const char *path) {
+	if (guard == NULL || !guard->complete || path == NULL || path[0] == '\0') {
+		return 0;
+	}
+	uint32_t mask = IN_ATTRIB | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_DELETE_SELF |
+	                IN_MODIFY | IN_MOVE_SELF | IN_MOVED_FROM | IN_MOVED_TO | IN_UNMOUNT;
+	if (inotify_add_watch(guard->backend_fd, path, mask) < 0) {
+		guard->complete = 0;
+		return 0;
+	}
+	return 1;
+}
+#endif
+
+static int repo_guard_watch_workspace_path(repo_change_guard *guard, const char *path, int is_dir) {
+#if defined(__APPLE__)
+	(void)is_dir;
+	return repo_guard_watch_path(guard, path);
+#else
+	if (!is_dir) {
+		return 1;
+	}
+	return repo_guard_watch_path(guard, path);
+#endif
+}
+
+static int repo_guard_external_seen(repo_change_guard *guard, const char *path) {
+	for (size_t i = 0; i < guard->external_count; i++) {
+		if (strcmp(guard->external_paths[i], path) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void repo_guard_watch_dependency(const char *path) {
+	repo_change_guard *guard = active_repo_guard;
+	if (guard == NULL || !guard->complete || path == NULL || path[0] == '\0') {
+		return;
+	}
+	if ((guard->workspace_scan || guard->workspace_registered) && repo_guard_path_in_workspace(guard, path)) {
+		return;
+	}
+	char watched[PATH_BUF];
+	struct stat st;
+#if defined(__APPLE__)
+	if (lstat(path, &st) == 0) {
+		snprintf(watched, sizeof(watched), "%s", path);
+	} else if (!repo_guard_existing_parent(path, watched)) {
+		guard->complete = 0;
+		return;
+	}
+#else
+	if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		snprintf(watched, sizeof(watched), "%s", path);
+	} else if (!repo_guard_existing_parent(path, watched)) {
+		guard->complete = 0;
+		return;
+	}
+#endif
+	if (repo_guard_external_seen(guard, watched)) {
+		return;
+	}
+	if (guard->external_count >= REPO_GUARD_MAX_EXTERNAL_PATHS || !repo_guard_watch_path(guard, watched)) {
+		guard->complete = 0;
+		return;
+	}
+	snprintf(guard->external_paths[guard->external_count++], PATH_BUF, "%s", watched);
+}
+
+static int repo_guard_drain_clean(repo_change_guard *guard) {
+	if (guard == NULL || !guard->complete || guard->backend_fd < 0) {
+		return 0;
+	}
+#if defined(__APPLE__)
+	struct kevent events[32];
+	struct timespec timeout = {0, 0};
+	int dirty = 0;
+	for (;;) {
+		int count = kevent(guard->backend_fd, NULL, 0, events, 32, &timeout);
+		if (count < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			guard->complete = 0;
+			return 0;
+		}
+		if (count == 0) {
+			return !dirty;
+		}
+		for (int i = 0; i < count; i++) {
+			unsigned int flags = (unsigned int)events[i].fflags;
+			if ((flags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE)) != 0) {
+				dirty = 1;
+				continue;
+			}
+			size_t encoded = (size_t)(uintptr_t)events[i].udata;
+			if (encoded == 0 || encoded > guard->watch_count || flags == 0) {
+				dirty = 1;
+				continue;
+			}
+			size_t index = encoded - 1;
+			struct stat current;
+			const struct stat *baseline = &guard->watch_stats[index];
+			if (fstat(guard->watch_fds[index], &current) != 0 ||
+			    current.st_dev != baseline->st_dev || current.st_ino != baseline->st_ino ||
+			    current.st_mode != baseline->st_mode || current.st_nlink != baseline->st_nlink ||
+			    current.st_uid != baseline->st_uid || current.st_gid != baseline->st_gid ||
+			    current.st_size != baseline->st_size ||
+			    stat_mtime_nano(&current) != stat_mtime_nano(baseline) ||
+			    stat_ctime_nano(&current) != stat_ctime_nano(baseline)) {
+				dirty = 1;
+			}
+		}
+	}
+#else
+	unsigned char events[4096];
+	int dirty = 0;
+	for (;;) {
+		ssize_t count = read(guard->backend_fd, events, sizeof(events));
+		if (count > 0) {
+			dirty = 1;
+			continue;
+		}
+		if (count < 0 && errno == EINTR) {
+			continue;
+		}
+		if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return !dirty;
+		}
+		guard->complete = 0;
+		return 0;
+	}
+#endif
+}
+#else
+typedef struct {
+	int unused;
+} repo_change_guard;
+
+static void repo_guard_watch_dependency(const char *path) {
+	(void)path;
+}
+#endif
 
 static const char *base_name(const char *path) {
 	const char *slash = strrchr(path, '/');
@@ -320,6 +692,98 @@ static int mkdir_p(const char *path) {
 	return mkdir(tmp, 0700) == 0 || errno == EEXIST;
 }
 
+#define HOT_EVENT_CACHE_SLOTS 4
+#define HOT_EVENT_FILE_UNAVAILABLE (-1)
+#define HOT_EVENT_FILE_FULL (-2)
+
+typedef struct {
+	char path[PATH_BUF];
+	int fd;
+	off_t bytes;
+} hot_event_cache_entry;
+
+static hot_event_cache_entry hot_event_cache[HOT_EVENT_CACHE_SLOTS];
+static pthread_mutex_t hot_event_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t hot_event_cache_once = PTHREAD_ONCE_INIT;
+static _Thread_local hot_event_cache_entry *hot_event_thread_entry;
+
+static void hot_event_cache_init(void) {
+	for (size_t i = 0; i < HOT_EVENT_CACHE_SLOTS; i++) {
+		hot_event_cache[i].fd = -1;
+	}
+}
+
+static int cached_hot_event_file(const char *path) {
+	if (path == NULL || path[0] == '\0') {
+		return -1;
+	}
+	pthread_once(&hot_event_cache_once, hot_event_cache_init);
+	if (hot_event_thread_entry != NULL && hot_event_thread_entry->fd >= 0 &&
+	    strcmp(hot_event_thread_entry->path, path) == 0) {
+		off_t bytes = __atomic_load_n(&hot_event_thread_entry->bytes, __ATOMIC_RELAXED);
+		return bytes < HOT_CLIENT_STATS_MAX_BYTES ? hot_event_thread_entry->fd : HOT_EVENT_FILE_FULL;
+	}
+	pthread_mutex_lock(&hot_event_cache_mu);
+	for (size_t i = 0; i < HOT_EVENT_CACHE_SLOTS; i++) {
+		if (hot_event_cache[i].fd < 0 || strcmp(hot_event_cache[i].path, path) != 0) {
+			continue;
+		}
+		int fd = hot_event_cache[i].fd;
+		if (__atomic_load_n(&hot_event_cache[i].bytes, __ATOMIC_RELAXED) >= HOT_CLIENT_STATS_MAX_BYTES) {
+			pthread_mutex_unlock(&hot_event_cache_mu);
+			return HOT_EVENT_FILE_FULL;
+		}
+		hot_event_thread_entry = &hot_event_cache[i];
+		pthread_mutex_unlock(&hot_event_cache_mu);
+		return fd;
+	}
+	for (size_t i = 0; i < HOT_EVENT_CACHE_SLOTS; i++) {
+		if (hot_event_cache[i].fd >= 0) {
+			continue;
+		}
+		int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0600);
+		if (fd < 0) {
+			pthread_mutex_unlock(&hot_event_cache_mu);
+			return -1;
+		}
+		struct stat st;
+		if (fstat(fd, &st) != 0) {
+			close(fd);
+			pthread_mutex_unlock(&hot_event_cache_mu);
+			return HOT_EVENT_FILE_UNAVAILABLE;
+		}
+		if (st.st_size >= HOT_CLIENT_STATS_MAX_BYTES) {
+			close(fd);
+			pthread_mutex_unlock(&hot_event_cache_mu);
+			return HOT_EVENT_FILE_FULL;
+		}
+		hot_event_cache[i].fd = fd;
+		hot_event_cache[i].bytes = st.st_size;
+		snprintf(hot_event_cache[i].path, sizeof(hot_event_cache[i].path), "%s", path);
+		hot_event_thread_entry = &hot_event_cache[i];
+		pthread_mutex_unlock(&hot_event_cache_mu);
+		return fd;
+	}
+	pthread_mutex_unlock(&hot_event_cache_mu);
+	return -1;
+}
+
+static void note_cached_hot_event_write(int fd, size_t bytes) {
+	if (hot_event_thread_entry != NULL && hot_event_thread_entry->fd == fd) {
+		(void)__atomic_add_fetch(&hot_event_thread_entry->bytes, (off_t)bytes, __ATOMIC_RELAXED);
+		return;
+	}
+	pthread_mutex_lock(&hot_event_cache_mu);
+	for (size_t i = 0; i < HOT_EVENT_CACHE_SLOTS; i++) {
+		if (hot_event_cache[i].fd == fd) {
+			(void)__atomic_add_fetch(&hot_event_cache[i].bytes, (off_t)bytes, __ATOMIC_RELAXED);
+			hot_event_thread_entry = &hot_event_cache[i];
+			break;
+		}
+	}
+	pthread_mutex_unlock(&hot_event_cache_mu);
+}
+
 static void record_hot_replay_event_kind(const char *store_root, const char *proof, long long native_wall_ms, long long replay_start_ns) {
 	if (proof == NULL || proof[0] == '\0') {
 		proof = HOT_CLIENT_PROOF_C_MMAP;
@@ -351,31 +815,25 @@ static void record_hot_replay_event_kind(const char *store_root, const char *pro
 		mmap_trace_path("event-write-skip-disabled", store_root);
 		return;
 	}
-	if (!mkdir_p(store_root)) {
-		mmap_trace_path("event-write-skip-mkdir", store_root);
-		return;
-	}
 	char event_path[PATH_BUF];
 	if (!join_path(event_path, sizeof(event_path), store_root, "hot_client_events.log")) {
 		mmap_trace_path("event-write-skip-path", store_root);
 		return;
 	}
-	struct stat st;
-	if (stat(event_path, &st) == 0 && st.st_size >= HOT_CLIENT_STATS_MAX_BYTES) {
-		mmap_trace_path("event-write-skip-full", event_path);
-		return;
+	int fd = cached_hot_event_file(event_path);
+	if (fd == HOT_EVENT_FILE_UNAVAILABLE && mkdir_p(store_root)) {
+		fd = cached_hot_event_file(event_path);
 	}
-	int fd = open(event_path, O_CREAT | O_WRONLY | O_APPEND, 0600);
 	if (fd < 0) {
 		mmap_trace_errno_path("event-write-skip-open", event_path, errno);
 		return;
 	}
 	if (write_all(fd, line, (size_t)n)) {
+		note_cached_hot_event_write(fd, (size_t)n);
 		mmap_trace_path("event-write-ok", event_path);
 	} else {
 		mmap_trace_errno_path("event-write-skip-write", event_path, errno);
 	}
-	close(fd);
 }
 
 static void record_hot_replay_event(const char *store_root, long long native_wall_ms, long long replay_start_ns) {
@@ -724,6 +1182,7 @@ static int clean_relative_path(const char *input, char out[PATH_BUF]) {
 }
 
 static int read_file_trimmed(const char *path, char *buf, size_t cap) {
+	repo_guard_watch_dependency(path);
 	int fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		return 0;
@@ -742,12 +1201,14 @@ static int read_file_trimmed(const char *path, char *buf, size_t cap) {
 }
 
 static int read_file_hash(const char *path, char out[HASH_HEX], unsigned char **content, size_t *content_len) {
+	repo_guard_watch_dependency(path);
 	int fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		return 0;
 	}
 	struct stat st;
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > MAX_WARM_FILE_BYTES) {
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+	    (content != NULL && st.st_size > MAX_WARM_FILE_BYTES)) {
 		close(fd);
 		return 0;
 	}
@@ -815,7 +1276,155 @@ static int read_file_hash(const char *path, char out[HASH_HEX], unsigned char **
 	return 1;
 }
 
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+#define HOT_FILE_CACHE_SLOTS 64
+
+typedef struct {
+	char path[PATH_BUF];
+	struct stat st;
+	char content_hash[HASH_HEX];
+	unsigned char *content;
+	size_t content_len;
+	unsigned long long last_used;
+	int occupied;
+	repo_change_guard guard;
+} hot_file_cache_entry;
+
+static hot_file_cache_entry hot_file_cache[HOT_FILE_CACHE_SLOTS];
+static pthread_mutex_t hot_file_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long hot_file_cache_clock;
+
+static int same_file_identity(const struct stat *left, const struct stat *right) {
+	return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+	       left->st_mode == right->st_mode && left->st_size == right->st_size &&
+	       stat_mtime_nano(left) == stat_mtime_nano(right) &&
+	       stat_ctime_nano(left) == stat_ctime_nano(right);
+}
+
+static void hot_file_cache_clear(hot_file_cache_entry *entry) {
+	if (entry == NULL) {
+		return;
+	}
+	if (entry->occupied || entry->guard.root[0] != '\0') {
+		repo_guard_release(&entry->guard);
+	}
+	free(entry->content);
+	memset(entry, 0, sizeof(*entry));
+	entry->guard.backend_fd = -1;
+}
+
+static int hot_file_cache_copy(const hot_file_cache_entry *entry, struct stat *st, char content_hash[HASH_HEX],
+	                           unsigned char **content, size_t *content_len) {
+	if (entry == NULL || !entry->occupied) {
+		return 0;
+	}
+	if (st != NULL) {
+		*st = entry->st;
+	}
+	memcpy(content_hash, entry->content_hash, HASH_HEX);
+	if (content != NULL) {
+		unsigned char *copy = NULL;
+		if (entry->content_len > 0) {
+			copy = (unsigned char *)malloc(entry->content_len);
+			if (copy == NULL) {
+				return 0;
+			}
+			memcpy(copy, entry->content, entry->content_len);
+		}
+		*content = copy;
+		if (content_len != NULL) {
+			*content_len = entry->content_len;
+		}
+	}
+	return 1;
+}
+
+static int hot_file_read_proven(const char *path, struct stat *st, char content_hash[HASH_HEX],
+	                            unsigned char **content, size_t *content_len) {
+	if (content != NULL) {
+		*content = NULL;
+	}
+	if (content_len != NULL) {
+		*content_len = 0;
+	}
+	pthread_mutex_lock(&hot_file_cache_mu);
+	for (size_t i = 0; i < HOT_FILE_CACHE_SLOTS; i++) {
+		hot_file_cache_entry *entry = &hot_file_cache[i];
+		if (!entry->occupied || strcmp(entry->path, path) != 0) {
+			continue;
+		}
+		struct stat current;
+		if (!repo_guard_drain_clean(&entry->guard) || stat(path, &current) != 0 || !same_file_identity(&entry->st, &current)) {
+			hot_file_cache_clear(entry);
+			break;
+		}
+		entry->last_used = ++hot_file_cache_clock;
+		int ok = hot_file_cache_copy(entry, st, content_hash, content, content_len);
+		pthread_mutex_unlock(&hot_file_cache_mu);
+		return ok;
+	}
+
+	hot_file_cache_entry *selected = NULL;
+	for (size_t i = 0; i < HOT_FILE_CACHE_SLOTS; i++) {
+		hot_file_cache_entry *entry = &hot_file_cache[i];
+		if (!entry->occupied) {
+			selected = entry;
+			break;
+		}
+		if (selected == NULL || entry->last_used < selected->last_used) {
+			selected = entry;
+		}
+	}
+	if (selected == NULL) {
+		pthread_mutex_unlock(&hot_file_cache_mu);
+		return 0;
+	}
+
+	for (int attempt = 0; attempt < 2; attempt++) {
+		hot_file_cache_clear(selected);
+		char parent[PATH_BUF];
+		if (!repo_guard_parent_path(path, parent) || !repo_guard_init(&selected->guard, parent)) {
+			break;
+		}
+		struct stat before, after;
+		unsigned char *loaded = NULL;
+		size_t loaded_len = 0;
+		active_repo_guard = &selected->guard;
+		repo_guard_watch_dependency(parent);
+		int ok = stat(path, &before) == 0 && S_ISREG(before.st_mode) && before.st_size >= 0 && before.st_size <= MAX_WARM_FILE_BYTES &&
+		         read_file_hash(path, selected->content_hash, &loaded, &loaded_len) &&
+		         stat(path, &after) == 0 && same_file_identity(&before, &after);
+		active_repo_guard = NULL;
+		if (!ok || loaded_len != (size_t)before.st_size || !repo_guard_drain_clean(&selected->guard)) {
+			free(loaded);
+			continue;
+		}
+		selected->st = after;
+		selected->content = loaded;
+		selected->content_len = loaded_len;
+		selected->last_used = ++hot_file_cache_clock;
+		selected->occupied = 1;
+		snprintf(selected->path, sizeof(selected->path), "%s", path);
+		ok = hot_file_cache_copy(selected, st, content_hash, content, content_len);
+		pthread_mutex_unlock(&hot_file_cache_mu);
+		return ok;
+	}
+	hot_file_cache_clear(selected);
+	pthread_mutex_unlock(&hot_file_cache_mu);
+	return 0;
+}
+#else
+static int hot_file_read_proven(const char *path, struct stat *st, char content_hash[HASH_HEX],
+	                            unsigned char **content, size_t *content_len) {
+	if (stat(path, st) != 0 || !S_ISREG(st->st_mode) || st->st_size < 0 || st->st_size > MAX_WARM_FILE_BYTES) {
+		return 0;
+	}
+	return read_file_hash(path, content_hash, content, content_len);
+}
+#endif
+
 static int read_executable_hash(const char *path, char out[HASH_HEX]) {
+	repo_guard_watch_dependency(path);
 	int fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		return 0;
@@ -1083,17 +1692,87 @@ static int resolve_executable(const char *cwd, const char *name, char out[PATH_B
 	return 0;
 }
 
+#define EXECUTABLE_SIGNAL_CACHE_SLOTS 64
+
+typedef struct {
+	char path[PATH_BUF];
+	struct stat st;
+	executable_signal signal;
+	unsigned long long last_used;
+	int occupied;
+} executable_signal_cache_entry;
+
+static executable_signal_cache_entry executable_signal_cache[EXECUTABLE_SIGNAL_CACHE_SLOTS];
+static pthread_mutex_t executable_signal_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long executable_signal_cache_clock;
+
+static int executable_signal_identity_matches(const struct stat *left, const struct stat *right) {
+	return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+	       left->st_mode == right->st_mode && left->st_size == right->st_size &&
+	       stat_mtime_nano(left) == stat_mtime_nano(right) &&
+	       stat_ctime_nano(left) == stat_ctime_nano(right);
+}
+
+static int executable_signal_cache_lookup(const char *path, const struct stat *st, executable_signal *sig) {
+	pthread_mutex_lock(&executable_signal_cache_mu);
+	for (size_t i = 0; i < EXECUTABLE_SIGNAL_CACHE_SLOTS; i++) {
+		executable_signal_cache_entry *entry = &executable_signal_cache[i];
+		if (!entry->occupied || strcmp(entry->path, path) != 0 ||
+		    !executable_signal_identity_matches(&entry->st, st)) {
+			continue;
+		}
+		entry->last_used = ++executable_signal_cache_clock;
+		*sig = entry->signal;
+		pthread_mutex_unlock(&executable_signal_cache_mu);
+		return 1;
+	}
+	pthread_mutex_unlock(&executable_signal_cache_mu);
+	return 0;
+}
+
+static void executable_signal_cache_store(const char *path, const struct stat *st, const executable_signal *sig) {
+	pthread_mutex_lock(&executable_signal_cache_mu);
+	executable_signal_cache_entry *selected = NULL;
+	for (size_t i = 0; i < EXECUTABLE_SIGNAL_CACHE_SLOTS; i++) {
+		executable_signal_cache_entry *entry = &executable_signal_cache[i];
+		if (entry->occupied && strcmp(entry->path, path) == 0) {
+			selected = entry;
+			break;
+		}
+		if (!entry->occupied) {
+			selected = entry;
+			break;
+		}
+		if (selected == NULL || entry->last_used < selected->last_used) {
+			selected = entry;
+		}
+	}
+	if (selected != NULL) {
+		memset(selected, 0, sizeof(*selected));
+		selected->occupied = 1;
+		snprintf(selected->path, sizeof(selected->path), "%s", path);
+		selected->st = *st;
+		selected->signal = *sig;
+		selected->last_used = ++executable_signal_cache_clock;
+	}
+	pthread_mutex_unlock(&executable_signal_cache_mu);
+}
+
 static int executable_signal_for(const char *cwd, const char *name, executable_signal *sig) {
 	char path[PATH_BUF];
 	if (!resolve_executable(cwd, name, path)) {
 		return 0;
 	}
+	repo_guard_watch_dependency(path);
 	struct stat st;
 	if (stat(path, &st) != 0 || S_ISDIR(st.st_mode) || (st.st_mode & 0111) == 0) {
 		if (getenv("SQUIRE_SHIM_DEBUG") != NULL && strcmp(name, "file") == 0) {
 			fprintf(stderr, "squire mmap proof debug: executable file stat reject path=%s errno=%d\n", path, errno);
 		}
 		return 0;
+	}
+	if (executable_signal_cache_lookup(path, &st, sig)) {
+		return 1;
 	}
 	char mode[32];
 	if (!mode_string(st.st_mode, mode)) {
@@ -1123,6 +1802,7 @@ static int executable_signal_for(const char *cwd, const char *name, executable_s
 	    strcmp(cached_stat_signal, stat_signal) == 0 &&
 	    strlen(cached_file_hash) == HASH_HEX - 1) {
 		snprintf(sig->file_hash, HASH_HEX, "%s", cached_file_hash);
+		executable_signal_cache_store(path, &st, sig);
 		return 1;
 	}
 	char content_hash[HASH_HEX];
@@ -1135,6 +1815,7 @@ static int executable_signal_for(const char *cwd, const char *name, executable_s
 	char signal[PATH_BUF + HASH_HEX + 256];
 	snprintf(signal, sizeof(signal), "%s|%s|%s", base_name(path), content_hash, stat_signal);
 	sha256_hex_str(signal, sig->file_hash);
+	executable_signal_cache_store(path, &st, sig);
 	return 1;
 }
 
@@ -1301,6 +1982,30 @@ static void file_hash_or_missing(const char *path, char out[HASH_HEX + 16]) {
 	char path_hash[HASH_HEX];
 	sha256_hex_str(path, path_hash);
 	snprintf(out, HASH_HEX + 16, "missing:%s", path_hash);
+}
+
+static int ripgrep_config_fingerprint(char out[HASH_HEX]) {
+	const char *path = getenv("RIPGREP_CONFIG_PATH");
+	if (path == NULL) {
+		path = "";
+	}
+	char fp[HASH_HEX + 16];
+	file_hash_or_missing(path, fp);
+	byte_buf b = {0};
+	int ok = bytes_append_str(&b, path) && bytes_append_byte(&b, 0) && bytes_append_str(&b, fp);
+	if (ok) {
+		sha256_hex_buf(&b, out);
+	}
+	bytes_free(&b);
+	return ok;
+}
+
+static int ripgrep_environment_fingerprint(char out[HASH_HEX]) {
+	static const char *keys[] = {
+		"RIPGREP_CONFIG_PATH", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "TERM",
+		"COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "GREP_COLORS",
+	};
+	return hash_selected_environment(keys, sizeof(keys) / sizeof(keys[0]), out);
 }
 
 static int list_add_path_hash_part(string_list *parts, const char *left, const char *right) {
@@ -1732,6 +2437,7 @@ static int git_config_summary_fingerprint(const char *repo_root, const char *git
 }
 
 static int collect_tree_file_fingerprints(const char *dir, string_list *parts) {
+	repo_guard_watch_dependency(dir);
 	DIR *d = opendir(dir);
 	if (d == NULL) {
 		return 1;
@@ -1771,7 +2477,7 @@ static int collect_tree_file_fingerprints(const char *dir, string_list *parts) {
 static int git_log_view_fingerprint(const char *git_dir, char out[HASH_HEX]) {
 	string_list parts = {0};
 	char path[PATH_BUF], fp[HASH_HEX + 16];
-	static const char *direct_paths[] = {"packed-refs", "info/grafts", "refs/replace"};
+	static const char *direct_paths[] = {"packed-refs", "info/grafts", "shallow", "refs"};
 	for (size_t i = 0; i < sizeof(direct_paths) / sizeof(direct_paths[0]); i++) {
 		if (!join_path(path, sizeof(path), git_dir, direct_paths[i])) {
 			list_free(&parts);
@@ -1783,12 +2489,177 @@ static int git_log_view_fingerprint(const char *git_dir, char out[HASH_HEX]) {
 			return 0;
 		}
 	}
-	if (!join_path(path, sizeof(path), git_dir, "refs/replace") ||
+	if (!join_path(path, sizeof(path), git_dir, "refs") ||
 	    !collect_tree_file_fingerprints(path, &parts)) {
 		list_free(&parts);
 		return 0;
 	}
 	int ok = hash_joined_lines(&parts, out);
+	list_free(&parts);
+	return ok;
+}
+
+static int lower_hex_n(const char *value, size_t len) {
+	if (value == NULL || len == 0 || strlen(value) != len) {
+		return 0;
+	}
+	for (size_t i = 0; i < len; i++) {
+		if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f'))) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int git_history_standard_layout(const char *git_dir) {
+	static const char *keys[] = {
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_COMMON_DIR",
+		"GIT_NAMESPACE",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NO_REPLACE_OBJECTS",
+		"GIT_REPLACE_REF_BASE",
+		"GIT_SHALLOW_FILE",
+		"GIT_LITERAL_PATHSPECS",
+		"GIT_GLOB_PATHSPECS",
+		"GIT_NOGLOB_PATHSPECS",
+		"GIT_ICASE_PATHSPECS",
+		"GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+	};
+	for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+		const char *value = getenv(keys[i]);
+		if (value != NULL && value[0] != '\0') {
+			return 0;
+		}
+	}
+	char path[PATH_BUF], text[PATH_BUF];
+	static const char *layout_files[] = {"commondir", "objects/info/alternates"};
+	for (size_t i = 0; i < sizeof(layout_files) / sizeof(layout_files[0]); i++) {
+		if (!join_path(path, sizeof(path), git_dir, layout_files[i])) {
+			return 0;
+		}
+		repo_guard_watch_dependency(path);
+		struct stat st;
+		if (lstat(path, &st) == 0) {
+			if (!S_ISREG(st.st_mode)) {
+				return 0;
+			}
+			if (st.st_size > 0 && (!read_file_trimmed(path, text, sizeof(text)) || text[0] != '\0')) {
+				return 0;
+			}
+		} else if (errno != ENOENT) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int git_object_namespace_fingerprint(const char *git_dir, char out[HASH_HEX]) {
+	if (!git_history_standard_layout(git_dir)) {
+		return 0;
+	}
+	char objects_dir[PATH_BUF];
+	if (!join_path(objects_dir, sizeof(objects_dir), git_dir, "objects")) {
+		return 0;
+	}
+	repo_guard_watch_dependency(objects_dir);
+	struct stat objects_st;
+	if (lstat(objects_dir, &objects_st) != 0 || !S_ISDIR(objects_st.st_mode)) {
+		return 0;
+	}
+	DIR *objects = opendir(objects_dir);
+	if (objects == NULL) {
+		return 0;
+	}
+	string_list parts = {0};
+	static const char format[] = "format:sha1";
+	int ok = list_add_bytes(&parts, (const unsigned char *)format, strlen(format));
+	struct dirent *entry;
+	while (ok && (entry = readdir(objects)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		char path[PATH_BUF];
+		if (!join_path(path, sizeof(path), objects_dir, entry->d_name)) {
+			ok = 0;
+			break;
+		}
+		if (lower_hex_n(entry->d_name, 2)) {
+			repo_guard_watch_dependency(path);
+			DIR *loose = opendir(path);
+			if (loose == NULL) {
+				ok = 0;
+				break;
+			}
+			struct dirent *object;
+			while (ok && (object = readdir(loose)) != NULL) {
+				if (!lower_hex_n(object->d_name, 38)) {
+					continue;
+				}
+				char object_path[PATH_BUF];
+				struct stat object_st;
+				if (!join_path(object_path, sizeof(object_path), path, object->d_name) ||
+				    lstat(object_path, &object_st) != 0) {
+					ok = 0;
+					break;
+				}
+				if (!S_ISREG(object_st.st_mode)) {
+					continue;
+				}
+				char label[64];
+				int n = snprintf(label, sizeof(label), "loose:%s%s", entry->d_name, object->d_name);
+				if (n <= 0 || (size_t)n >= sizeof(label) ||
+				    !list_add_bytes(&parts, (const unsigned char *)label, (size_t)n)) {
+					ok = 0;
+				}
+			}
+			closedir(loose);
+			continue;
+		}
+		if (strcmp(entry->d_name, "pack") != 0) {
+			continue;
+		}
+		repo_guard_watch_dependency(path);
+		DIR *pack = opendir(path);
+		if (pack == NULL) {
+			ok = 0;
+			break;
+		}
+		struct dirent *item;
+		while (ok && (item = readdir(pack)) != NULL) {
+			size_t name_len = strlen(item->d_name);
+			int is_index = name_len > 4 && strcmp(item->d_name + name_len - 4, ".idx") == 0;
+			int is_multi = strcmp(item->d_name, "multi-pack-index") == 0;
+			if (!is_index && !is_multi) {
+				continue;
+			}
+			char item_path[PATH_BUF], fp[HASH_HEX + 16], label[PATH_BUF];
+			struct stat item_st;
+			if (!join_path(item_path, sizeof(item_path), path, item->d_name) ||
+			    lstat(item_path, &item_st) != 0 || !S_ISREG(item_st.st_mode)) {
+				ok = 0;
+				break;
+			}
+			file_hash_or_missing(item_path, fp);
+			if (is_multi) {
+				snprintf(label, sizeof(label), "multi-pack-index");
+			} else if (snprintf(label, sizeof(label), "pack-index:%s", item->d_name) >= (int)sizeof(label)) {
+				ok = 0;
+				break;
+			}
+			if (!list_add_path_hash_part(&parts, label, fp)) {
+				ok = 0;
+			}
+		}
+		closedir(pack);
+	}
+	closedir(objects);
+	if (ok) {
+		ok = hash_joined_lines(&parts, out);
+	}
 	list_free(&parts);
 	return ok;
 }
@@ -1869,6 +2740,16 @@ static long long stat_mtime_nano(const struct stat *st) {
 	return (long long)st->st_mtim.tv_sec * 1000000000LL + (long long)st->st_mtim.tv_nsec;
 #else
 	return (long long)st->st_mtime * 1000000000LL;
+#endif
+}
+
+static long long stat_ctime_nano(const struct stat *st) {
+#if defined(__APPLE__)
+	return (long long)st->st_ctimespec.tv_sec * 1000000000LL + (long long)st->st_ctimespec.tv_nsec;
+#elif defined(__linux__)
+	return (long long)st->st_ctim.tv_sec * 1000000000LL + (long long)st->st_ctim.tv_nsec;
+#else
+	return (long long)st->st_ctime * 1000000000LL;
 #endif
 }
 
@@ -2066,6 +2947,11 @@ static int add_content_part(string_list *list, const char *rel, const char *hash
 }
 
 static int collect_workspace_epochs(workspace_epoch_builder *b, const char *dir) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->workspace_scan) {
+		(void)repo_guard_watch_workspace_path(active_repo_guard, dir, 1);
+	}
+#endif
 	DIR *d = opendir(dir);
 	if (d == NULL) {
 		b->complete = 0;
@@ -2086,6 +2972,11 @@ static int collect_workspace_epochs(workspace_epoch_builder *b, const char *dir)
 			b->complete = 0;
 			continue;
 		}
+#if defined(SQUIRE_MMAP_HOT_API) && defined(__APPLE__)
+		if (active_repo_guard != NULL && active_repo_guard->workspace_scan && S_ISREG(st.st_mode)) {
+			(void)repo_guard_watch_workspace_path(active_repo_guard, path, 0);
+		}
+#endif
 		if (S_ISDIR(st.st_mode) && (strcmp(ent->d_name, ".git") == 0 || strcmp(ent->d_name, ".squire") == 0)) {
 			continue;
 		}
@@ -2128,19 +3019,55 @@ static int collect_workspace_epochs(workspace_epoch_builder *b, const char *dir)
 }
 
 static int exact_workspace_epochs(const char *root, int max_content_files, int need_content, char tree[HASH_HEX], char content[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->workspace_epoch_valid &&
+	    strcmp(active_repo_guard->root, root) == 0 &&
+	    active_repo_guard->workspace_need_content == need_content &&
+	    active_repo_guard->workspace_max_content_files == max_content_files) {
+		snprintf(tree, HASH_HEX, "%s", active_repo_guard->workspace_tree);
+		snprintf(content, HASH_HEX, "%s", active_repo_guard->workspace_content);
+		return 1;
+	}
+#endif
 	workspace_epoch_builder b = {0};
 	b.root = root;
 	b.need_content = need_content;
 	b.max_content_files = max_content_files;
 	b.complete = 1;
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->workspace_scan = !active_repo_guard->workspace_registered;
+	}
+#endif
 	if (!collect_workspace_epochs(&b, root)) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+		if (active_repo_guard != NULL) {
+			active_repo_guard->workspace_scan = 0;
+		}
+#endif
 		list_free(&b.tree);
 		list_free(&b.content);
 		return 0;
 	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->workspace_scan = 0;
+		active_repo_guard->workspace_registered = active_repo_guard->complete;
+	}
+#endif
 	int ok = b.complete && hash_joined_lines(&b.tree, tree) && hash_joined_lines(&b.content, content);
 	list_free(&b.tree);
 	list_free(&b.content);
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (ok && active_repo_guard != NULL && active_repo_guard->complete &&
+	    strcmp(active_repo_guard->root, root) == 0) {
+		active_repo_guard->workspace_epoch_valid = 1;
+		active_repo_guard->workspace_need_content = need_content;
+		active_repo_guard->workspace_max_content_files = max_content_files;
+		snprintf(active_repo_guard->workspace_tree, HASH_HEX, "%s", tree);
+		snprintf(active_repo_guard->workspace_content, HASH_HEX, "%s", content);
+	}
+#endif
 	return ok;
 }
 
@@ -2306,12 +3233,218 @@ static int is_git_metadata(policy_invocation *inv) {
 	       strcmp(inv->argv[3], "HEAD") == 0;
 }
 
-static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
+static int guarded_git_context(policy_invocation *inv, char repo_root[PATH_BUF], char git_dir[PATH_BUF]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_context_valid) {
+		snprintf(repo_root, PATH_BUF, "%s", active_repo_guard->root);
+		snprintf(git_dir, PATH_BUF, "%s", active_repo_guard->git_dir);
+		return 1;
+	}
+#endif
+	if (!discover_git_dir(inv->cwd, repo_root, git_dir)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && strcmp(active_repo_guard->root, repo_root) == 0) {
+		active_repo_guard->git_context_valid = 1;
+		snprintf(active_repo_guard->git_dir, PATH_BUF, "%s", git_dir);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_executable_signal(const char *cwd, const char *name, executable_signal *sig) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		if (strcmp(name, "git") == 0 && active_repo_guard->git_tool_valid) {
+			*sig = active_repo_guard->git_tool;
+			return 1;
+		}
+		if (strcmp(name, "rg") == 0 && active_repo_guard->rg_tool_valid) {
+			*sig = active_repo_guard->rg_tool;
+			return 1;
+		}
+	}
+#endif
+	if (!executable_signal_for(cwd, name, sig)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		if (strcmp(name, "git") == 0) {
+			active_repo_guard->git_tool = *sig;
+			active_repo_guard->git_tool_valid = 1;
+		} else if (strcmp(name, "rg") == 0) {
+			active_repo_guard->rg_tool = *sig;
+			active_repo_guard->rg_tool_valid = 1;
+		}
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_index_fingerprint(const char *git_dir, char out[HASH_HEX + 16]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_index_valid) {
+		snprintf(out, HASH_HEX + 16, "%s", active_repo_guard->git_index);
+		return 1;
+	}
+#endif
+	char index_path[PATH_BUF];
+	if (!join_path(index_path, sizeof(index_path), git_dir, "index")) {
+		return 0;
+	}
+	file_hash_or_missing(index_path, out);
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_index_valid = 1;
+		snprintf(active_repo_guard->git_index, sizeof(active_repo_guard->git_index), "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_config_fingerprint(const char *repo_root, const char *git_dir, char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_config_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->git_config);
+		return 1;
+	}
+#endif
+	if (!git_config_summary_fingerprint(repo_root, git_dir, out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_config_valid = 1;
+		snprintf(active_repo_guard->git_config, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_head(const char *git_dir, char head[128], char branch[PATH_BUF]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_head_valid) {
+		snprintf(head, 128, "%s", active_repo_guard->git_head);
+		snprintf(branch, PATH_BUF, "%s", active_repo_guard->git_branch);
+		return 1;
+	}
+#endif
+	if (!current_head_and_branch(git_dir, head, branch)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_head_valid = 1;
+		snprintf(active_repo_guard->git_head, sizeof(active_repo_guard->git_head), "%s", head);
+		snprintf(active_repo_guard->git_branch, sizeof(active_repo_guard->git_branch), "%s", branch);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_ignore_fingerprint(const char *repo_root, const char *git_dir, char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_ignore_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->git_ignore);
+		return 1;
+	}
+#endif
+	if (!workspace_ignore_fingerprint(repo_root, git_dir, out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_ignore_valid = 1;
+		snprintf(active_repo_guard->git_ignore, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_attribute_fingerprint(const char *repo_root, const char *git_dir, char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_attributes_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->git_attributes);
+		return 1;
+	}
+#endif
+	if (!git_attribute_fingerprint(repo_root, git_dir, out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_attributes_valid = 1;
+		snprintf(active_repo_guard->git_attributes, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_log_view_fingerprint(const char *git_dir, char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_log_view_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->git_log_view);
+		return 1;
+	}
+#endif
+	if (!git_log_view_fingerprint(git_dir, out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_log_view_valid = 1;
+		snprintf(active_repo_guard->git_log_view, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_git_object_namespace_fingerprint(const char *git_dir, char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->git_object_namespace_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->git_object_namespace);
+		return 1;
+	}
+#endif
+	if (!git_object_namespace_fingerprint(git_dir, out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->git_object_namespace_valid = 1;
+		snprintf(active_repo_guard->git_object_namespace, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int guarded_rg_config_fingerprint(char out[HASH_HEX]) {
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL && active_repo_guard->rg_config_valid) {
+		snprintf(out, HASH_HEX, "%s", active_repo_guard->rg_config);
+		return 1;
+	}
+#endif
+	if (!ripgrep_config_fingerprint(out)) {
+		return 0;
+	}
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+	if (active_repo_guard != NULL) {
+		active_repo_guard->rg_config_valid = 1;
+		snprintf(active_repo_guard->rg_config, HASH_HEX, "%s", out);
+	}
+#endif
+	return 1;
+}
+
+static int git_metadata_epoch_uncached(policy_invocation *inv, char epoch[256]) {
 	if (!is_git_metadata(inv)) {
 		return 0;
 	}
 	char repo_root[PATH_BUF], git_dir[PATH_BUF], head[128], branch[PATH_BUF], git_rel[PATH_BUF];
-	if (!discover_git_dir(inv->cwd, repo_root, git_dir) || !current_head_and_branch(git_dir, head, branch) || !rel_git_dir(inv->cwd, git_dir, git_rel)) {
+	if (!guarded_git_context(inv, repo_root, git_dir) || !guarded_git_head(git_dir, head, branch) || !rel_git_dir(inv->cwd, git_dir, git_rel)) {
 		return 0;
 	}
 	char h[HASH_HEX];
@@ -2391,7 +3524,7 @@ static int is_git_read_only_diff(policy_invocation *inv) {
 	if (inv->argc == 2) {
 		return 1;
 	}
-	if (inv->argc == 3 && strcmp(inv->argv[2], "--stat") == 0) {
+	if (inv->argc == 3 && (strcmp(inv->argv[2], "--stat") == 0 || strcmp(inv->argv[2], "--check") == 0)) {
 		return 1;
 	}
 	if (inv->argc >= 4 && strcmp(inv->argv[2], "--") == 0) {
@@ -2405,35 +3538,226 @@ static int is_git_read_only_diff(policy_invocation *inv) {
 	return 0;
 }
 
+static int is_fixed_rg_repo_search(policy_invocation *inv) {
+	if (inv->argc < 3 || strcmp(inv->argv[0], "rg") != 0) {
+		return 0;
+	}
+	int fixed = 0;
+	int seen_pattern = 0;
+	int path_count = 0;
+	char only_path[PATH_BUF] = {0};
+	for (int i = 1; i < inv->argc; i++) {
+		const char *arg = inv->argv[i];
+		if (strcmp(arg, "-F") == 0 || strcmp(arg, "--fixed-strings") == 0) {
+			if (fixed || seen_pattern) {
+				return 0;
+			}
+			fixed = 1;
+			continue;
+		}
+		if (strcmp(arg, "-q") == 0 || strcmp(arg, "--quiet") == 0 ||
+		    strcmp(arg, "-n") == 0 || strcmp(arg, "--line-number") == 0 ||
+		    strcmp(arg, "--no-heading") == 0 || strcmp(arg, "--with-filename") == 0 ||
+		    strcmp(arg, "--no-filename") == 0 || strcmp(arg, "-l") == 0 ||
+		    strcmp(arg, "--files-with-matches") == 0) {
+			if (seen_pattern) {
+				return 0;
+			}
+			continue;
+		}
+		if (arg[0] == '-') {
+			return 0;
+		}
+		if (!seen_pattern) {
+			if (arg[0] == '\0' || strchr(arg, '\n') != NULL || strchr(arg, '\r') != NULL) {
+				return 0;
+			}
+			seen_pattern = 1;
+			continue;
+		}
+		if (strcmp(arg, ".") != 0 && !safe_relative_inspection_path_arg(arg)) {
+			return 0;
+		}
+		path_count++;
+		if (path_count == 1) {
+			snprintf(only_path, sizeof(only_path), "%s", arg);
+		}
+	}
+	if (!fixed || !seen_pattern) {
+		return 0;
+	}
+	if (path_count == 0 || path_count > 1 || strcmp(only_path, ".") == 0) {
+		return 1;
+	}
+	return !is_replayable_name(base_name(only_path));
+}
+
+static int bounded_rg_text(const char *value, size_t max_len) {
+	if (value == NULL || value[0] == '\0' || strnlen(value, max_len + 1) > max_len) {
+		return 0;
+	}
+	return strchr(value, '\n') == NULL && strchr(value, '\r') == NULL;
+}
+
+static int bounded_rg_context(const char *value) {
+	if (!bounded_rg_text(value, 8)) {
+		return 0;
+	}
+	char *end = NULL;
+	errno = 0;
+	long count = strtol(value, &end, 10);
+	return errno == 0 && end != value && end != NULL && *end == '\0' && count >= 0 && count <= 1000;
+}
+
+/*
+ * This is a preparation policy, not a regex implementation. The native rg
+ * process computes exact bytes after a miss; Squire only replays those bytes
+ * while the complete workspace, rg binary, config, and relevant environment
+ * proof are unchanged.
+ */
+static int is_bounded_rg_repo_search(policy_invocation *inv) {
+	if (inv->argc < 2 || inv->argc > 32 || strcmp(inv->argv[0], "rg") != 0) {
+		return 0;
+	}
+	int seen_pattern = 0;
+	for (int i = 1; i < inv->argc; i++) {
+		const char *arg = inv->argv[i];
+		if (strcmp(arg, "-n") == 0 || strcmp(arg, "--line-number") == 0 ||
+		    strcmp(arg, "-S") == 0 || strcmp(arg, "--smart-case") == 0 ||
+		    strcmp(arg, "-i") == 0 || strcmp(arg, "--ignore-case") == 0 ||
+		    strcmp(arg, "--hidden") == 0 || strcmp(arg, "--no-heading") == 0 ||
+		    strcmp(arg, "--with-filename") == 0 || strcmp(arg, "--no-filename") == 0 ||
+		    strcmp(arg, "-l") == 0 || strcmp(arg, "--files-with-matches") == 0 ||
+		    strcmp(arg, "-q") == 0 || strcmp(arg, "--quiet") == 0) {
+			continue;
+		}
+		if (strcmp(arg, "-F") == 0 || strcmp(arg, "--fixed-strings") == 0) {
+			continue;
+		}
+		if (strcmp(arg, "-g") == 0 || strcmp(arg, "--glob") == 0) {
+			if (++i >= inv->argc || !bounded_rg_text(inv->argv[i], 1024)) {
+				return 0;
+			}
+			continue;
+		}
+		if (strcmp(arg, "-C") == 0 || strcmp(arg, "--context") == 0 ||
+		    strcmp(arg, "-A") == 0 || strcmp(arg, "--after-context") == 0 ||
+		    strcmp(arg, "-B") == 0 || strcmp(arg, "--before-context") == 0) {
+			if (++i >= inv->argc || !bounded_rg_context(inv->argv[i])) {
+				return 0;
+			}
+			continue;
+		}
+		if (strncmp(arg, "--glob=", 7) == 0) {
+			if (!bounded_rg_text(arg + 7, 1024)) {
+				return 0;
+			}
+			continue;
+		}
+		static const char *context_prefixes[] = {"--context=", "--after-context=", "--before-context="};
+		int matched_context = 0;
+		for (size_t j = 0; j < sizeof(context_prefixes) / sizeof(context_prefixes[0]); j++) {
+			size_t prefix_len = strlen(context_prefixes[j]);
+			if (strncmp(arg, context_prefixes[j], prefix_len) == 0) {
+				if (!bounded_rg_context(arg + prefix_len)) {
+					return 0;
+				}
+				matched_context = 1;
+				break;
+			}
+		}
+		if (matched_context) {
+			continue;
+		}
+		if (strlen(arg) > 2 && (strncmp(arg, "-C", 2) == 0 || strncmp(arg, "-A", 2) == 0 || strncmp(arg, "-B", 2) == 0)) {
+			if (!bounded_rg_context(arg + 2)) {
+				return 0;
+			}
+			continue;
+		}
+		if (strlen(arg) > 2 && strncmp(arg, "-g", 2) == 0) {
+			if (!bounded_rg_text(arg + 2, 1024)) {
+				return 0;
+			}
+			continue;
+		}
+		if (arg[0] == '-') {
+			return 0;
+		}
+		if (!seen_pattern) {
+			if (!bounded_rg_text(arg, 2048)) {
+				return 0;
+			}
+			seen_pattern = 1;
+			continue;
+		}
+		if (strcmp(arg, ".") != 0 && !safe_relative_inspection_path_arg(arg)) {
+			return 0;
+		}
+	}
+	return seen_pattern;
+}
+
 static int append_normalized_epoch_input(byte_buf *b, policy_invocation *inv) {
 	return bytes_append_argv_norm(b, inv);
 }
 
-static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
-	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) && !is_git_read_only_diff(inv)) {
+static int repo_summary_epoch_uncached(policy_invocation *inv, char epoch[256]) {
+	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) &&
+	    !is_git_read_only_diff(inv) && !is_fixed_rg_repo_search(inv) && !is_bounded_rg_repo_search(inv)) {
 		return 0;
 	}
 	char repo_root[PATH_BUF], git_dir[PATH_BUF];
-	if (!discover_git_dir(inv->cwd, repo_root, git_dir)) {
+	if (!guarded_git_context(inv, repo_root, git_dir)) {
 		return 0;
 	}
 	executable_signal tool;
-	if (!executable_signal_for(inv->cwd, "git", &tool)) {
+	int rg_search = is_fixed_rg_repo_search(inv) || is_bounded_rg_repo_search(inv);
+	if (!guarded_executable_signal(inv->cwd, rg_search ? "rg" : "git", &tool)) {
 		return 0;
 	}
-	char index_path[PATH_BUF], index_fp[HASH_HEX + 16], config_fp[HASH_HEX], tree[HASH_HEX], content[HASH_HEX], input_hash[HASH_HEX];
-	if (!join_path(index_path, sizeof(index_path), git_dir, "index")) {
-		return 0;
+	char index_fp[HASH_HEX + 16], config_fp[HASH_HEX], tree[HASH_HEX], content[HASH_HEX], input_hash[HASH_HEX];
+	if (rg_search) {
+		char ignore_fp[HASH_HEX], rg_config_fp[HASH_HEX], rg_env_fp[HASH_HEX];
+		if (!exact_workspace_epochs(repo_root, 10000, 1, tree, content) ||
+		    !guarded_git_ignore_fingerprint(repo_root, git_dir, ignore_fp) ||
+		    !guarded_rg_config_fingerprint(rg_config_fp) ||
+		    !ripgrep_environment_fingerprint(rg_env_fp)) {
+			return 0;
+		}
+		byte_buf rg_input = {0};
+		int rg_ok = bytes_append_str(&rg_input, repo_root) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            append_normalized_epoch_input(&rg_input, inv) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, ignore_fp) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, rg_config_fp) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, rg_env_fp) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, tree) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, content) &&
+		            bytes_append_byte(&rg_input, '|') &&
+		            bytes_append_str(&rg_input, tool.file_hash);
+		if (rg_ok) {
+			sha256_hex_buf(&rg_input, input_hash);
+			snprintf(epoch, 256, "hot-repo-summary:%s:%s",
+			         is_bounded_rg_repo_search(inv) ? "rg-bounded" : "rg-fixed", input_hash);
+		}
+		bytes_free(&rg_input);
+		return rg_ok;
 	}
-	file_hash_or_missing(index_path, index_fp);
-	if (!git_config_summary_fingerprint(repo_root, git_dir, config_fp)) {
+	if (!guarded_git_index_fingerprint(git_dir, index_fp) ||
+	    !guarded_git_config_fingerprint(repo_root, git_dir, config_fp)) {
 		return 0;
 	}
 	byte_buf b = {0};
 	int ok = 0;
 	if (is_git_head_subject_log(inv)) {
 		char head[128], branch[PATH_BUF], log_view_fp[HASH_HEX];
-		if (!current_head_and_branch(git_dir, head, branch) || !git_log_view_fingerprint(git_dir, log_view_fp)) {
+		if (!guarded_git_head(git_dir, head, branch) || !guarded_git_log_view_fingerprint(git_dir, log_view_fp)) {
 			bytes_free(&b);
 			return 0;
 		}
@@ -2483,7 +3807,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 	}
 	if (is_git_status(inv)) {
 		char head[128], branch[PATH_BUF], ignore_fp[HASH_HEX];
-		if (!current_head_and_branch(git_dir, head, branch) || !workspace_ignore_fingerprint(repo_root, git_dir, ignore_fp)) {
+		if (!guarded_git_head(git_dir, head, branch) || !guarded_git_ignore_fingerprint(repo_root, git_dir, ignore_fp)) {
 			bytes_free(&b);
 			return 0;
 		}
@@ -2518,7 +3842,7 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 	}
 	if (is_git_read_only_diff(inv)) {
 		char attr_fp[HASH_HEX];
-		if (!git_attribute_fingerprint(repo_root, git_dir, attr_fp)) {
+		if (!guarded_git_attribute_fingerprint(repo_root, git_dir, attr_fp)) {
 			bytes_free(&b);
 			return 0;
 		}
@@ -2550,6 +3874,359 @@ static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
 	bytes_free(&b);
 	return 0;
 }
+
+static int repo_search_corpus_epoch_uncached(policy_invocation *inv, char epoch[256]) {
+	const char *rg_config_path = getenv("RIPGREP_CONFIG_PATH");
+	if (inv == NULL || (rg_config_path != NULL && rg_config_path[0] != '\0')) {
+		return 0;
+	}
+	char repo_root[PATH_BUF], git_dir[PATH_BUF];
+	if (!guarded_git_context(inv, repo_root, git_dir)) {
+		return 0;
+	}
+	executable_signal tool;
+	char tree[HASH_HEX], content[HASH_HEX], ignore_fp[HASH_HEX], config_fp[HASH_HEX], env_fp[HASH_HEX];
+	if (!guarded_executable_signal(inv->cwd, "rg", &tool) ||
+	    !exact_workspace_epochs(repo_root, 10000, 1, tree, content) ||
+	    !guarded_git_ignore_fingerprint(repo_root, git_dir, ignore_fp) ||
+	    !guarded_rg_config_fingerprint(config_fp) ||
+	    !ripgrep_environment_fingerprint(env_fp)) {
+		return 0;
+	}
+	byte_buf input = {0};
+	int ok = bytes_append_str(&input, repo_root) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, ignore_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, config_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, env_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, tree) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, content) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, tool.file_hash);
+	if (ok) {
+		char hash[HASH_HEX];
+		sha256_hex_buf(&input, hash);
+		snprintf(epoch, 256, "hot-repo-search-corpus:%s", hash);
+	}
+	bytes_free(&input);
+	return ok;
+}
+
+static int git_history_corpus_epoch_uncached(policy_invocation *inv, char epoch[256]) {
+	if (inv == NULL) {
+		return 0;
+	}
+	char repo_root[PATH_BUF], git_dir[PATH_BUF], head[128], branch[PATH_BUF];
+	if (!guarded_git_context(inv, repo_root, git_dir) || !guarded_git_head(git_dir, head, branch)) {
+		return 0;
+	}
+	executable_signal tool;
+	char config_fp[HASH_HEX], log_view_fp[HASH_HEX], object_namespace_fp[HASH_HEX];
+	if (!guarded_executable_signal(inv->cwd, "git", &tool) ||
+	    !guarded_git_config_fingerprint(repo_root, git_dir, config_fp) ||
+	    !guarded_git_log_view_fingerprint(git_dir, log_view_fp) ||
+	    !guarded_git_object_namespace_fingerprint(git_dir, object_namespace_fp)) {
+		return 0;
+	}
+	byte_buf input = {0};
+	int ok = bytes_append_str(&input, repo_root) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, head) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, branch) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, config_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, log_view_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, object_namespace_fp) &&
+	         bytes_append_byte(&input, '|') &&
+	         bytes_append_str(&input, tool.file_hash);
+	if (ok) {
+		char hash[HASH_HEX];
+		sha256_hex_buf(&input, hash);
+		snprintf(epoch, 256, "hot-git-history-corpus:%s", hash);
+	}
+	bytes_free(&input);
+	return ok;
+}
+
+#if defined(SQUIRE_MMAP_HOT_API) && (defined(__APPLE__) || defined(__linux__))
+#define REPO_WORLD_CACHE_SLOTS 4
+#define REPO_WORLD_COMMAND_SLOTS 256
+#define REPO_WORLD_ENV_MAX_ENTRIES 4096
+#define REPO_WORLD_ENV_MAX_BYTES (1024U * 1024U)
+
+typedef struct {
+	char command_key[HASH_HEX];
+	char epoch[256];
+	unsigned long long last_used;
+	int occupied;
+} repo_world_command_entry;
+
+typedef struct {
+	char root[PATH_BUF];
+	char environment_hash[HASH_HEX];
+	repo_world_command_entry commands[REPO_WORLD_COMMAND_SLOTS];
+	unsigned long long last_used;
+	int occupied;
+	repo_change_guard guard;
+} repo_world_cache_entry;
+
+static repo_world_cache_entry repo_world_cache[REPO_WORLD_CACHE_SLOTS];
+static pthread_mutex_t repo_world_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long repo_world_cache_clock;
+typedef int (*repo_epoch_compute_fn)(policy_invocation *inv, char epoch[256]);
+
+static int repo_world_environment_hash(char out[HASH_HEX]) {
+	size_t total = 0;
+	size_t count = 0;
+	if (environ != NULL) {
+		for (; environ[count] != NULL; count++) {
+			if (count >= REPO_WORLD_ENV_MAX_ENTRIES) {
+				return 0;
+			}
+			size_t len = strlen(environ[count]);
+			if (len > REPO_WORLD_ENV_MAX_BYTES - total) {
+				return 0;
+			}
+			total += len;
+		}
+	}
+	SQUIRE_SHA256_CTX ctx;
+	SQUIRE_SHA256_Init(&ctx);
+	for (size_t i = 0; i < count; i++) {
+		SQUIRE_SHA256_Update(&ctx, environ[i], strlen(environ[i]));
+		unsigned char zero = 0;
+		SQUIRE_SHA256_Update(&ctx, &zero, 1);
+	}
+	SQUIRE_SHA256_Update(&ctx, &count, sizeof(count));
+	unsigned char digest[32];
+	static const char hex[] = "0123456789abcdef";
+	SQUIRE_SHA256_Final(digest, &ctx);
+	for (size_t i = 0; i < sizeof(digest); i++) {
+		out[i * 2] = hex[digest[i] >> 4];
+		out[i * 2 + 1] = hex[digest[i] & 0x0f];
+	}
+	out[64] = '\0';
+	return 1;
+}
+
+static void repo_world_cache_clear(repo_world_cache_entry *entry) {
+	if (entry == NULL) {
+		return;
+	}
+	if (entry->guard.root[0] != '\0') {
+		repo_guard_release(&entry->guard);
+	}
+	memset(entry, 0, sizeof(*entry));
+	entry->guard.backend_fd = -1;
+}
+
+static repo_world_command_entry *repo_world_find_command(repo_world_cache_entry *entry, const char *key) {
+	for (size_t i = 0; i < REPO_WORLD_COMMAND_SLOTS; i++) {
+		if (entry->commands[i].occupied && strcmp(entry->commands[i].command_key, key) == 0) {
+			return &entry->commands[i];
+		}
+	}
+	return NULL;
+}
+
+static void repo_world_store_command(repo_world_cache_entry *entry, const char *key, const char *epoch) {
+	repo_world_command_entry *selected = NULL;
+	for (size_t i = 0; i < REPO_WORLD_COMMAND_SLOTS; i++) {
+		repo_world_command_entry *candidate = &entry->commands[i];
+		if (!candidate->occupied) {
+			selected = candidate;
+			break;
+		}
+		if (selected == NULL || candidate->last_used < selected->last_used) {
+			selected = candidate;
+		}
+	}
+	if (selected == NULL) {
+		return;
+	}
+	memset(selected, 0, sizeof(*selected));
+	selected->occupied = 1;
+	snprintf(selected->command_key, sizeof(selected->command_key), "%s", key);
+	snprintf(selected->epoch, sizeof(selected->epoch), "%s", epoch);
+	selected->last_used = ++repo_world_cache_clock;
+}
+
+static int repo_world_epoch(policy_invocation *inv, char epoch[256], const char *domain,
+	                        int command_scoped, repo_epoch_compute_fn compute) {
+	char repo_root[PATH_BUF], git_dir[PATH_BUF];
+	if (domain == NULL || domain[0] == '\0' || !discover_git_dir(inv->cwd, repo_root, git_dir)) {
+		mmap_trace_path("repo-world-miss-discovery", domain);
+		return 0;
+	}
+	char environment_hash[HASH_HEX];
+	if (!repo_world_environment_hash(environment_hash)) {
+		mmap_trace_path("repo-world-miss-environment", domain);
+		return 0;
+	}
+	char invocation_key[HASH_HEX] = {0}, key_input[HASH_HEX + 64], key[HASH_HEX];
+	if (command_scoped) {
+		command_key(inv, invocation_key);
+	}
+	int key_len = snprintf(key_input, sizeof(key_input), "%s:%s", domain,
+	                       command_scoped ? invocation_key : "workspace");
+	if (key_len <= 0 || (size_t)key_len >= sizeof(key_input)) {
+		mmap_trace_path("repo-world-miss-key", domain);
+		return 0;
+	}
+	sha256_hex_str(key_input, key);
+	pthread_mutex_lock(&repo_world_cache_mu);
+	repo_world_cache_entry *world = NULL;
+	for (size_t i = 0; i < REPO_WORLD_CACHE_SLOTS; i++) {
+		repo_world_cache_entry *entry = &repo_world_cache[i];
+		if (!entry->occupied || strcmp(entry->root, repo_root) != 0) {
+			continue;
+		}
+		if (strcmp(entry->environment_hash, environment_hash) != 0) {
+			mmap_trace_path("repo-world-reset-environment", domain);
+			repo_world_cache_clear(entry);
+			break;
+		}
+		if (!repo_guard_drain_clean(&entry->guard)) {
+			mmap_trace_path("repo-world-reset-dirty", domain);
+			repo_world_cache_clear(entry);
+			break;
+		}
+		world = entry;
+		break;
+	}
+
+	if (world != NULL) {
+		world->last_used = ++repo_world_cache_clock;
+		repo_world_command_entry *command = repo_world_find_command(world, key);
+		if (command != NULL) {
+			command->last_used = ++repo_world_cache_clock;
+			snprintf(epoch, 256, "%s", command->epoch);
+			pthread_mutex_unlock(&repo_world_cache_mu);
+			return 1;
+		}
+		active_repo_guard = &world->guard;
+		int ok = compute(inv, epoch);
+		active_repo_guard = NULL;
+		if (!ok) {
+			mmap_trace_path("repo-world-miss-compute", domain);
+			repo_world_cache_clear(world);
+			pthread_mutex_unlock(&repo_world_cache_mu);
+			return 0;
+		}
+		if (!repo_guard_drain_clean(&world->guard)) {
+			mmap_trace_path("repo-world-miss-post-compute-dirty", domain);
+			repo_world_cache_clear(world);
+			pthread_mutex_unlock(&repo_world_cache_mu);
+			return 0;
+		}
+		repo_world_store_command(world, key, epoch);
+		pthread_mutex_unlock(&repo_world_cache_mu);
+		return 1;
+	}
+
+	repo_world_cache_entry *selected = NULL;
+	for (size_t i = 0; i < REPO_WORLD_CACHE_SLOTS; i++) {
+		repo_world_cache_entry *entry = &repo_world_cache[i];
+		if (!entry->occupied) {
+			selected = entry;
+			break;
+		}
+		if (selected == NULL || entry->last_used < selected->last_used) {
+			selected = entry;
+		}
+	}
+	if (selected == NULL) {
+		pthread_mutex_unlock(&repo_world_cache_mu);
+		return 0;
+	}
+
+	for (int attempt = 0; attempt < 2; attempt++) {
+		repo_world_cache_clear(selected);
+		if (!repo_guard_init(&selected->guard, repo_root)) {
+			mmap_trace_path("repo-world-miss-guard-init", domain);
+			break;
+		}
+		active_repo_guard = &selected->guard;
+		int ok = compute(inv, epoch);
+		active_repo_guard = NULL;
+		if (!ok) {
+			mmap_trace_path("repo-world-retry-compute", domain);
+		}
+		int clean = ok && repo_guard_drain_clean(&selected->guard);
+		if (!clean) {
+			if (ok) {
+				mmap_trace_path("repo-world-retry-dirty", domain);
+			}
+			continue;
+		}
+		selected->occupied = 1;
+		snprintf(selected->root, sizeof(selected->root), "%s", repo_root);
+		snprintf(selected->environment_hash, sizeof(selected->environment_hash), "%s", environment_hash);
+		selected->last_used = ++repo_world_cache_clock;
+		repo_world_store_command(selected, key, epoch);
+		if (getenv("SQUIRE_SHIM_DEBUG") != NULL) {
+#if defined(__APPLE__)
+			fprintf(stderr, "squire mmap proof debug: repo-world-build root=%s key=%s epoch=%s watches=%zu\n",
+			        repo_root, key, epoch, selected->guard.watch_count);
+#else
+			fprintf(stderr, "squire mmap proof debug: repo-world-build root=%s key=%s epoch=%s\n", repo_root, key, epoch);
+#endif
+		}
+		pthread_mutex_unlock(&repo_world_cache_mu);
+		return 1;
+	}
+	repo_world_cache_clear(selected);
+	mmap_trace_path("repo-world-miss-retries-exhausted", domain);
+	pthread_mutex_unlock(&repo_world_cache_mu);
+	return 0;
+}
+
+static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
+	if (!is_git_metadata(inv)) {
+		return 0;
+	}
+	return repo_world_epoch(inv, epoch, "git-metadata", 1, git_metadata_epoch_uncached);
+}
+
+static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
+	if (!is_git_head_subject_log(inv) && !is_git_ls_files(inv) && !is_git_status(inv) &&
+	    !is_git_read_only_diff(inv) && !is_fixed_rg_repo_search(inv) && !is_bounded_rg_repo_search(inv)) {
+		return 0;
+	}
+	return repo_world_epoch(inv, epoch, "repo-summary", 1, repo_summary_epoch_uncached);
+}
+
+static int repo_search_corpus_epoch(policy_invocation *inv, char epoch[256]) {
+	return repo_world_epoch(inv, epoch, "repo-search-corpus", 0, repo_search_corpus_epoch_uncached);
+}
+
+static int git_history_corpus_epoch(policy_invocation *inv, char epoch[256]) {
+	return repo_world_epoch(inv, epoch, "git-history-corpus", 1, git_history_corpus_epoch_uncached);
+}
+#else
+static int git_metadata_epoch(policy_invocation *inv, char epoch[256]) {
+	return git_metadata_epoch_uncached(inv, epoch);
+}
+
+static int repo_summary_epoch(policy_invocation *inv, char epoch[256]) {
+	return repo_summary_epoch_uncached(inv, epoch);
+}
+
+static int repo_search_corpus_epoch(policy_invocation *inv, char epoch[256]) {
+	return repo_search_corpus_epoch_uncached(inv, epoch);
+}
+
+static int git_history_corpus_epoch(policy_invocation *inv, char epoch[256]) {
+	return git_history_corpus_epoch_uncached(inv, epoch);
+}
+#endif
 
 static int is_common_tool_name(const char *name) {
 	static const char *tools[] = {"git", "rg", "go", "node", "npm", "pnpm", "yarn", "python", "python3", "pip", "pip3", "cargo", "rustc", "make"};
@@ -3045,7 +4722,7 @@ static int is_replayable_name(const char *name) {
 		".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs", ".java", ".kt",
 		".kts", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".swift", ".sh",
 		".bash", ".zsh", ".fish", ".sql", ".css", ".scss", ".sass", ".html", ".htm", ".json",
-		".jsonc", ".toml", ".yaml", ".yml", ".xml", ".md", ".markdown", ".txt",
+		".jsonc", ".toml", ".yaml", ".yml", ".xml", ".md", ".markdown", ".rst", ".txt", ".log",
 	};
 	for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
 		if (has_ext(name, exts[i])) {
@@ -3055,27 +4732,103 @@ static int is_replayable_name(const char *name) {
 	return 0;
 }
 
-static int parse_sed_range(const char *expr, int *start, int *end) {
-	size_t n = strlen(expr);
-	if (n < 2 || expr[n - 1] != 'p') {
+#define MAX_LINE_SELECTION_RANGES 8
+
+typedef struct {
+	int start;
+	int end;
+} line_range;
+
+typedef struct {
+	line_range ranges[MAX_LINE_SELECTION_RANGES];
+	int count;
+} line_selection;
+
+static int parse_line_selection_number(const char **cursor, int *value) {
+	const char *p = *cursor;
+	if (p == NULL || !isdigit((unsigned char)*p)) {
 		return 0;
 	}
-	char body[64];
-	if (n >= sizeof(body)) {
+	int parsed = 0;
+	while (isdigit((unsigned char)*p)) {
+		parsed = parsed * 10 + (*p - '0');
+		if (parsed > 10000) {
+			return 0;
+		}
+		p++;
+	}
+	if (parsed <= 0) {
 		return 0;
 	}
-	memcpy(body, expr, n - 1);
-	body[n - 1] = '\0';
-	char *comma = strchr(body, ',');
-	if (comma != NULL) {
-		*comma = '\0';
-		*start = atoi(body);
-		*end = atoi(comma + 1);
-	} else {
-		*start = atoi(body);
-		*end = *start;
+	*cursor = p;
+	*value = parsed;
+	return 1;
+}
+
+static int parse_sed_print_selection(const char *expr, line_selection *selection) {
+	if (expr == NULL || selection == NULL || expr[0] == '\0') {
+		return 0;
 	}
-	return *start > 0 && *end >= *start && *end - *start <= 500 && *end <= 10000;
+	memset(selection, 0, sizeof(*selection));
+	const char *p = expr;
+	while (*p != '\0') {
+		if (selection->count >= MAX_LINE_SELECTION_RANGES) {
+			return 0;
+		}
+		int start = 0;
+		int end = 0;
+		if (!parse_line_selection_number(&p, &start)) {
+			return 0;
+		}
+		end = start;
+		if (*p == ',') {
+			p++;
+			if (!parse_line_selection_number(&p, &end)) {
+				return 0;
+			}
+		}
+		if (*p != 'p' || end < start || end - start > 500) {
+			return 0;
+		}
+		selection->ranges[selection->count].start = start;
+		selection->ranges[selection->count].end = end;
+		selection->count++;
+		p++;
+		if (*p == '\0') {
+			return 1;
+		}
+		if (*p != ';' || p[1] == '\0') {
+			return 0;
+		}
+		p++;
+	}
+	return 0;
+}
+
+static int line_selection_max_end(const line_selection *selection) {
+	int max = 0;
+	if (selection == NULL) {
+		return max;
+	}
+	for (int i = 0; i < selection->count; i++) {
+		if (selection->ranges[i].end > max) {
+			max = selection->ranges[i].end;
+		}
+	}
+	return max;
+}
+
+static int line_selection_match_count(const line_selection *selection, int line) {
+	int matches = 0;
+	if (selection == NULL) {
+		return matches;
+	}
+	for (int i = 0; i < selection->count; i++) {
+		if (line >= selection->ranges[i].start && line <= selection->ranges[i].end) {
+			matches++;
+		}
+	}
+	return matches;
 }
 
 static int parse_head_tail_count(const char *s, int tail, int *count) {
@@ -3130,6 +4883,14 @@ static int parse_head_tail_args(policy_invocation *inv, int tail, const char **p
 		return 0;
 	}
 	*path = inv->argv[path_index];
+	return 1;
+}
+
+static int parse_nl_all_args(policy_invocation *inv, const char **path) {
+	if (inv == NULL || inv->argc != 3 || strcmp(inv->argv[0], "nl") != 0 || strcmp(inv->argv[1], "-ba") != 0) {
+		return 0;
+	}
+	*path = inv->argv[2];
 	return 1;
 }
 
@@ -3317,69 +5078,96 @@ static int warm_file_replay_enabled(void) {
 #endif
 }
 
-static int is_warm_file_candidate(policy_invocation *inv) {
+typedef enum {
+	WARM_FILE_OPERATION_NONE = 0,
+	WARM_FILE_OPERATION_CAT,
+	WARM_FILE_OPERATION_SED,
+	WARM_FILE_OPERATION_HEAD,
+	WARM_FILE_OPERATION_TAIL,
+	WARM_FILE_OPERATION_NL,
+	WARM_FILE_OPERATION_GREP,
+	WARM_FILE_OPERATION_RG,
+} warm_file_operation_kind;
+
+typedef struct {
+	warm_file_operation_kind kind;
+	const char *path;
+	line_selection selection;
+	int line_count;
+	const char *pattern;
+	int quiet;
+	int line_number;
+} warm_file_operation;
+
+static int parse_warm_file_operation(policy_invocation *inv, warm_file_operation *operation) {
+	if (inv == NULL || operation == NULL || inv->argc <= 0) {
+		return 0;
+	}
+	memset(operation, 0, sizeof(*operation));
 	if (inv->argc == 2 && strcmp(inv->argv[0], "cat") == 0) {
+		operation->kind = WARM_FILE_OPERATION_CAT;
+		operation->path = inv->argv[1];
 		return 1;
 	}
 	if (inv->argc == 4 && strcmp(inv->argv[0], "sed") == 0 && strcmp(inv->argv[1], "-n") == 0) {
-		int start, end;
-		return parse_sed_range(inv->argv[2], &start, &end);
+		if (!parse_sed_print_selection(inv->argv[2], &operation->selection)) {
+			return 0;
+		}
+		operation->kind = WARM_FILE_OPERATION_SED;
+		operation->path = inv->argv[3];
+		return 1;
 	}
 	if (strcmp(inv->argv[0], "head") == 0 || strcmp(inv->argv[0], "tail") == 0) {
-		const char *path = NULL;
-		int count = 0;
-		return parse_head_tail_args(inv, strcmp(inv->argv[0], "tail") == 0, &path, &count);
+		int tail = strcmp(inv->argv[0], "tail") == 0;
+		if (!parse_head_tail_args(inv, tail, &operation->path, &operation->line_count)) {
+			return 0;
+		}
+		operation->kind = tail ? WARM_FILE_OPERATION_TAIL : WARM_FILE_OPERATION_HEAD;
+		return 1;
+	}
+	if (strcmp(inv->argv[0], "nl") == 0) {
+		if (!parse_nl_all_args(inv, &operation->path)) {
+			return 0;
+		}
+		operation->kind = WARM_FILE_OPERATION_NL;
+		return 1;
 	}
 	if (strcmp(inv->argv[0], "grep") == 0) {
-		const char *pattern = NULL;
-		const char *path = NULL;
-		int quiet = 0;
-		return parse_fixed_grep_args(inv, &pattern, &path, &quiet);
+		if (!parse_fixed_grep_args(inv, &operation->pattern, &operation->path, &operation->quiet)) {
+			return 0;
+		}
+		operation->kind = WARM_FILE_OPERATION_GREP;
+		return 1;
 	}
 	if (strcmp(inv->argv[0], "rg") == 0) {
-		const char *pattern = NULL;
-		const char *path = NULL;
-		int quiet = 0;
-		int line_number = 0;
-		return parse_fixed_rg_args(inv, &pattern, &path, &quiet, &line_number);
+		if (!parse_fixed_rg_args(inv, &operation->pattern, &operation->path, &operation->quiet, &operation->line_number)) {
+			return 0;
+		}
+		operation->kind = WARM_FILE_OPERATION_RG;
+		return 1;
 	}
 	return 0;
 }
 
-static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoch[256], char path[PATH_BUF], int *sed_start, int *sed_end, int *line_count) {
-	const char *arg_path = NULL;
-	*sed_start = 0;
-	*sed_end = 0;
-	*line_count = 0;
-	if (inv->argc == 2 && strcmp(inv->argv[0], "cat") == 0) {
-		arg_path = inv->argv[1];
-	} else if (inv->argc == 4 && strcmp(inv->argv[0], "sed") == 0 && strcmp(inv->argv[1], "-n") == 0) {
-		if (!parse_sed_range(inv->argv[2], sed_start, sed_end)) {
-			return 0;
-		}
-		arg_path = inv->argv[3];
-	} else if (strcmp(inv->argv[0], "head") == 0 || strcmp(inv->argv[0], "tail") == 0) {
-		if (!parse_head_tail_args(inv, strcmp(inv->argv[0], "tail") == 0, &arg_path, line_count)) {
-			return 0;
-		}
-	} else if (strcmp(inv->argv[0], "grep") == 0) {
-		const char *pattern = NULL;
-		int quiet = 0;
-		if (!parse_fixed_grep_args(inv, &pattern, &arg_path, &quiet)) {
-			return 0;
-		}
-	} else if (strcmp(inv->argv[0], "rg") == 0) {
-		const char *pattern = NULL;
-		int quiet = 0;
-		int line_number = 0;
-		if (!parse_fixed_rg_args(inv, &pattern, &arg_path, &quiet, &line_number)) {
-			return 0;
-		}
-	} else {
+static int is_warm_file_candidate(policy_invocation *inv) {
+	warm_file_operation operation;
+	return parse_warm_file_operation(inv, &operation);
+}
+
+static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoch[256], char path[PATH_BUF], warm_file_operation *operation_out,
+                           char content_hash_out[HASH_HEX], unsigned char **content_out, size_t *content_len_out) {
+	warm_file_operation operation;
+	if (!parse_warm_file_operation(inv, &operation)) {
 		return 0;
 	}
+	if (content_out != NULL) {
+		*content_out = NULL;
+	}
+	if (content_len_out != NULL) {
+		*content_len_out = 0;
+	}
 	char rel[PATH_BUF];
-	if (!clean_relative_path(arg_path, rel)) {
+	if (!clean_relative_path(operation.path, rel)) {
 		return 0;
 	}
 	const char *name = base_name(rel);
@@ -3394,19 +5182,24 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 		return 0;
 	}
 	snprintf(path, PATH_BUF, "%s", path_real);
-	struct stat st;
-	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > MAX_WARM_FILE_BYTES) {
-		return 0;
-	}
-	if (strcmp(inv->argv[0], "cat") == 0 && st.st_size > MAX_FAST_OUTPUT_BYTES) {
-		return 0;
-	}
 	char content_hash[HASH_HEX];
-	if (!read_file_hash(path, content_hash, NULL, NULL)) {
+	unsigned char *proof_content = NULL;
+	size_t proof_content_len = 0;
+	struct stat st;
+	if (!hot_file_read_proven(path, &st, content_hash, content_out != NULL ? &proof_content : NULL,
+	                          content_out != NULL ? &proof_content_len : NULL)) {
 		return 0;
+	}
+	if (operation.kind == WARM_FILE_OPERATION_CAT && st.st_size > MAX_FILE_OUTPUT_BYTES) {
+		free(proof_content);
+		return 0;
+	}
+	if (content_hash_out != NULL) {
+		memcpy(content_hash_out, content_hash, HASH_HEX);
 	}
 	char mode[32];
 	if (!mode_string(st.st_mode, mode)) {
+		free(proof_content);
 		return 0;
 	}
 	char key_input[PATH_BUF * 2];
@@ -3417,6 +5210,15 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 	char epoch_hash[HASH_HEX];
 	sha256_hex_str(epoch_input, epoch_hash);
 	snprintf(epoch, 256, "hot-warm-file:%s", epoch_hash);
+	if (content_out != NULL) {
+		*content_out = proof_content;
+		if (content_len_out != NULL) {
+			*content_len_out = proof_content_len;
+		}
+	}
+	if (operation_out != NULL) {
+		*operation_out = operation;
+	}
 	return 1;
 }
 
@@ -3432,33 +5234,163 @@ static int map_snapshot_fd(int fd, mapped_snapshot *snap) {
 	snap->data = data;
 	snap->len = (size_t)st.st_size;
 	snap->borrowed = 0;
+	snap->cache_token = NULL;
 	return 1;
 }
 
-static int map_snapshot_fd_cached(int fd, mapped_snapshot *snap) {
-	static int cached_fd = -1;
-	static unsigned char *cached_data;
-	static size_t cached_len;
-	if (cached_fd == fd && cached_data != NULL && cached_len >= HOT_HEADER_BYTES) {
-		snap->data = cached_data;
-		snap->len = cached_len;
-		snap->borrowed = 1;
-		return 1;
-	}
+static pthread_once_t inherited_snapshot_once = PTHREAD_ONCE_INIT;
+static int inherited_snapshot_fd = -1;
+static unsigned char *inherited_snapshot_data;
+static size_t inherited_snapshot_len;
+
+static void initialize_inherited_snapshot(void) {
+	int fd = hot_snapshot_fd();
 	struct stat st;
-	if (fstat(fd, &st) != 0 || st.st_size < HOT_HEADER_BYTES || st.st_size > HOT_MAX_BYTES) {
-		return 0;
+	if (fd < 0 || fstat(fd, &st) != 0 || st.st_size < HOT_HEADER_BYTES || st.st_size > HOT_MAX_BYTES) {
+		return;
 	}
 	unsigned char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (data == MAP_FAILED) {
+		return;
+	}
+	inherited_snapshot_fd = fd;
+	inherited_snapshot_data = data;
+	inherited_snapshot_len = (size_t)st.st_size;
+}
+
+static int map_snapshot_fd_cached(int fd, mapped_snapshot *snap) {
+	pthread_once(&inherited_snapshot_once, initialize_inherited_snapshot);
+	if (inherited_snapshot_fd == fd && inherited_snapshot_data != NULL && inherited_snapshot_len >= HOT_HEADER_BYTES) {
+		snap->data = inherited_snapshot_data;
+		snap->len = inherited_snapshot_len;
+		snap->borrowed = 1;
+		snap->cache_token = NULL;
+		return 1;
+	}
+	return map_snapshot_fd(fd, snap);
+}
+
+#define HOT_SNAPSHOT_CACHE_SLOTS 4
+
+typedef struct {
+	char path[PATH_BUF];
+	unsigned char *data;
+	size_t len;
+	dev_t dev;
+	ino_t ino;
+	long long mtime_ns;
+	long long ctime_ns;
+	unsigned int references;
+	unsigned long long last_used;
+} hot_snapshot_cache_entry;
+
+static hot_snapshot_cache_entry hot_snapshot_cache[HOT_SNAPSHOT_CACHE_SLOTS];
+static pthread_rwlock_t hot_snapshot_cache_lock = PTHREAD_RWLOCK_INITIALIZER;
+static unsigned long long hot_snapshot_cache_clock;
+
+static int same_snapshot_identity(const hot_snapshot_cache_entry *entry, const char *path, const struct stat *st) {
+	return entry->data != NULL && strcmp(entry->path, path) == 0 &&
+	       entry->dev == st->st_dev && entry->ino == st->st_ino &&
+	       entry->len == (size_t)st->st_size && entry->mtime_ns == stat_mtime_nano(st) &&
+	       entry->ctime_ns == stat_ctime_nano(st);
+}
+
+static int map_snapshot_path_cached(const char *path, mapped_snapshot *snap) {
+	struct stat path_st;
+	if (stat(path, &path_st) != 0 || !S_ISREG(path_st.st_mode) ||
+	    path_st.st_size < HOT_HEADER_BYTES || path_st.st_size > HOT_MAX_BYTES) {
 		return 0;
 	}
-	cached_fd = fd;
-	cached_data = data;
-	cached_len = (size_t)st.st_size;
-	snap->data = cached_data;
-	snap->len = cached_len;
+	pthread_rwlock_rdlock(&hot_snapshot_cache_lock);
+	for (size_t i = 0; i < HOT_SNAPSHOT_CACHE_SLOTS; i++) {
+		hot_snapshot_cache_entry *entry = &hot_snapshot_cache[i];
+		if (!same_snapshot_identity(entry, path, &path_st)) {
+			continue;
+		}
+		__atomic_add_fetch(&entry->references, 1U, __ATOMIC_ACQ_REL);
+		snap->data = entry->data;
+		snap->len = entry->len;
+		snap->borrowed = 1;
+		snap->cache_token = entry;
+		pthread_rwlock_unlock(&hot_snapshot_cache_lock);
+		mmap_trace_path("snapshot-cache-hit", path);
+		return 1;
+	}
+	pthread_rwlock_unlock(&hot_snapshot_cache_lock);
+	mmap_trace_path("snapshot-cache-refresh", path);
+
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+	struct stat st;
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < HOT_HEADER_BYTES || st.st_size > HOT_MAX_BYTES) {
+		close(fd);
+		return 0;
+	}
+	unsigned char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (data == MAP_FAILED) {
+		return 0;
+	}
+
+	pthread_rwlock_wrlock(&hot_snapshot_cache_lock);
+	for (size_t i = 0; i < HOT_SNAPSHOT_CACHE_SLOTS; i++) {
+		hot_snapshot_cache_entry *entry = &hot_snapshot_cache[i];
+		if (!same_snapshot_identity(entry, path, &st)) {
+			continue;
+		}
+		munmap(data, (size_t)st.st_size);
+		__atomic_add_fetch(&entry->references, 1U, __ATOMIC_ACQ_REL);
+		entry->last_used = ++hot_snapshot_cache_clock;
+		snap->data = entry->data;
+		snap->len = entry->len;
+		snap->borrowed = 1;
+		snap->cache_token = entry;
+		pthread_rwlock_unlock(&hot_snapshot_cache_lock);
+		mmap_trace_path("snapshot-cache-raced-hit", path);
+		return 1;
+	}
+	hot_snapshot_cache_entry *selected = NULL;
+	for (size_t i = 0; i < HOT_SNAPSHOT_CACHE_SLOTS; i++) {
+		hot_snapshot_cache_entry *entry = &hot_snapshot_cache[i];
+		if (__atomic_load_n(&entry->references, __ATOMIC_ACQUIRE) != 0) {
+			continue;
+		}
+		if (selected == NULL || entry->data == NULL || entry->last_used < selected->last_used) {
+			selected = entry;
+			if (entry->data == NULL) {
+				break;
+			}
+		}
+	}
+	if (selected == NULL) {
+		pthread_rwlock_unlock(&hot_snapshot_cache_lock);
+		snap->data = data;
+		snap->len = (size_t)st.st_size;
+		snap->borrowed = 0;
+		snap->cache_token = NULL;
+		return 1;
+	}
+	if (selected->data != NULL) {
+		munmap(selected->data, selected->len);
+	}
+	memset(selected, 0, sizeof(*selected));
+	snprintf(selected->path, sizeof(selected->path), "%s", path);
+	selected->data = data;
+	selected->len = (size_t)st.st_size;
+	selected->dev = st.st_dev;
+	selected->ino = st.st_ino;
+	selected->mtime_ns = stat_mtime_nano(&st);
+	selected->ctime_ns = stat_ctime_nano(&st);
+	__atomic_store_n(&selected->references, 1U, __ATOMIC_RELEASE);
+	selected->last_used = ++hot_snapshot_cache_clock;
+	snap->data = selected->data;
+	snap->len = selected->len;
 	snap->borrowed = 1;
+	snap->cache_token = selected;
+	pthread_rwlock_unlock(&hot_snapshot_cache_lock);
+	mmap_trace_path("snapshot-cache-store", path);
 	return 1;
 }
 
@@ -3472,33 +5404,23 @@ static int map_snapshot(const char *store_root, mapped_snapshot *snap) {
 	if (!join_path(snapshot_path, sizeof(snapshot_path), store_root, "hot_snapshot.bin")) {
 		return 0;
 	}
-	int fd = open(snapshot_path, O_RDONLY);
-	if (fd < 0) {
-		return 0;
-	}
-	struct stat st;
-	if (fstat(fd, &st) != 0 || st.st_size < HOT_HEADER_BYTES || st.st_size > HOT_MAX_BYTES) {
-		close(fd);
-		return 0;
-	}
-	unsigned char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	close(fd);
-	if (data == MAP_FAILED) {
-		return 0;
-	}
-	snap->data = data;
-	snap->len = (size_t)st.st_size;
-	snap->borrowed = 0;
-	return 1;
+	return map_snapshot_path_cached(snapshot_path, snap);
 }
 
 static void unmap_snapshot(mapped_snapshot *snap) {
-	if (snap->data != NULL && !snap->borrowed) {
+	if (snap->cache_token != NULL) {
+		hot_snapshot_cache_entry *entry = (hot_snapshot_cache_entry *)snap->cache_token;
+		unsigned int previous = __atomic_fetch_sub(&entry->references, 1U, __ATOMIC_ACQ_REL);
+		if (previous == 0) {
+			__atomic_store_n(&entry->references, 0U, __ATOMIC_RELEASE);
+		}
+	} else if (snap->data != NULL && !snap->borrowed) {
 		munmap(snap->data, snap->len);
 	}
 	snap->data = NULL;
 	snap->len = 0;
 	snap->borrowed = 0;
+	snap->cache_token = NULL;
 }
 
 static int snapshot_header(mapped_snapshot *snap, uint32_t *count, uint32_t *payload_offset, uint32_t *total_size) {
@@ -3555,15 +5477,25 @@ static int snapshot_find(mapped_snapshot *snap, const char command_hash[HASH_HEX
 	sha256_hex_str(epoch, epoch_hash);
 	uint32_t start = 0;
 	if (!snapshot_command_start(snap, count, command_hash, &start)) {
+		mmap_trace_path("snapshot-miss-command", command_hash);
 		return 0;
 	}
+	int saw_command = 0;
 	for (uint32_t i = start; i < count; i++) {
 		unsigned char *entry = snap->data + HOT_HEADER_BYTES + i * HOT_ENTRY_BYTES;
 		int key_cmp = snapshot_key_compare(entry, command_hash);
 		if (key_cmp != 0) {
 			break;
 		}
+		saw_command = 1;
 		if (memcmp(entry + 64, epoch_hash, 64) != 0) {
+			if (i == start && mmap_trace_enabled()) {
+				char available_epoch_hash[HASH_HEX];
+				memcpy(available_epoch_hash, entry + 64, 64);
+				available_epoch_hash[64] = '\0';
+				mmap_trace_path("snapshot-miss-want-epoch-hash", epoch_hash);
+				mmap_trace_path("snapshot-miss-first-epoch-hash", available_epoch_hash);
+			}
 			continue;
 		}
 		char stdout_hash[HASH_HEX];
@@ -3601,13 +5533,21 @@ static int snapshot_find(mapped_snapshot *snap, const char command_hash[HASH_HEX
 		}
 		return 1;
 	}
+	if (saw_command) {
+		mmap_trace_path("snapshot-miss-epoch", command_hash);
+	}
 	return 0;
 }
 
-static int output_sed_range(const unsigned char *content, uint32_t len, int start, int end) {
+static int output_line_selection(const unsigned char *content, uint32_t len, const line_selection *selection, size_t max_output) {
+	if (selection == NULL || selection->count <= 0) {
+		return 0;
+	}
+	size_t output_len = 0;
 	int line = 1;
+	int max_end = line_selection_max_end(selection);
 	uint32_t offset = 0;
-	while (offset < len && line <= end) {
+	while (offset < len && line <= max_end) {
 		uint32_t line_end = offset;
 		while (line_end < len && content[line_end] != '\n') {
 			line_end++;
@@ -3615,15 +5555,27 @@ static int output_sed_range(const unsigned char *content, uint32_t len, int star
 		if (line_end < len && content[line_end] == '\n') {
 			line_end++;
 		}
-		if (line >= start) {
-			if (!write_all(STDOUT_FILENO, content + offset, line_end - offset)) {
+		int matches = line_selection_match_count(selection, line);
+		for (int match = 0; match < matches; match++) {
+			size_t line_len = line_end - offset;
+			if ((max_output > 0 && (output_len > max_output || line_len > max_output - output_len)) ||
+			    !write_all(STDOUT_FILENO, content + offset, line_len)) {
 				return 0;
 			}
+			output_len += line_len;
 		}
 		offset = line_end;
 		line++;
 	}
 	return 1;
+}
+
+static int output_sed_range(const unsigned char *content, uint32_t len, int start, int end) {
+	line_selection selection = {0};
+	selection.ranges[0].start = start;
+	selection.ranges[0].end = end;
+	selection.count = 1;
+	return output_line_selection(content, len, &selection, MAX_FILE_OUTPUT_BYTES);
 }
 
 static int count_lines(const unsigned char *content, uint32_t len) {
@@ -3653,6 +5605,65 @@ static int output_tail_lines(const unsigned char *content, uint32_t len, int cou
 		start = 1;
 	}
 	return output_sed_range(content, len, start, total);
+}
+
+static int is_default_nl_delimiter(const unsigned char *line, size_t len) {
+	if (len != 2 && len != 4 && len != 6) {
+		return 0;
+	}
+	for (size_t i = 0; i < len; i += 2) {
+		if (line[i] != '\\' || line[i + 1] != ':') {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int output_nl_all(const unsigned char *content, uint32_t len) {
+	size_t output_len = 0;
+	int line = 1;
+	uint32_t offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		if (is_default_nl_delimiter(content + offset, line_end - offset)) {
+			return 0;
+		}
+		char prefix[32];
+		int prefix_len = snprintf(prefix, sizeof(prefix), "%6d\t", line);
+		uint32_t write_end = line_end < len ? line_end + 1 : line_end;
+		size_t line_len = write_end - offset;
+		if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix) ||
+		    output_len > MAX_FILE_OUTPUT_BYTES ||
+		    (size_t)prefix_len > MAX_FILE_OUTPUT_BYTES - output_len ||
+		    line_len > MAX_FILE_OUTPUT_BYTES - output_len - (size_t)prefix_len) {
+			return 0;
+		}
+		output_len += (size_t)prefix_len + line_len;
+		offset = write_end;
+		line++;
+	}
+	line = 1;
+	offset = 0;
+	while (offset < len) {
+		uint32_t line_end = offset;
+		while (line_end < len && content[line_end] != '\n') {
+			line_end++;
+		}
+		uint32_t write_end = line_end < len ? line_end + 1 : line_end;
+		char prefix[32];
+		int prefix_len = snprintf(prefix, sizeof(prefix), "%6d\t", line);
+		if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix) ||
+		    !write_all(STDOUT_FILENO, prefix, (size_t)prefix_len) ||
+		    !write_all(STDOUT_FILENO, content + offset, write_end - offset)) {
+			return 0;
+		}
+		offset = write_end;
+		line++;
+	}
+	return 1;
 }
 
 static int mem_contains_bytes(const unsigned char *haystack, uint32_t haystack_len, const unsigned char *needle, size_t needle_len) {
@@ -3777,6 +5788,107 @@ static int discover_store_root(const char *cwd, char store_root[PATH_BUF]) {
 	return join_path(store_root, PATH_BUF, git_dir, "squire/state");
 }
 
+static int bytes_append_le32(byte_buf *b, uint32_t value) {
+	unsigned char raw[4] = {
+		(unsigned char)(value & 0xff),
+		(unsigned char)((value >> 8) & 0xff),
+		(unsigned char)((value >> 16) & 0xff),
+		(unsigned char)((value >> 24) & 0xff),
+	};
+	return bytes_append(b, raw, sizeof(raw));
+}
+
+static int is_prepare_request_candidate(policy_invocation *inv) {
+	char target[PATH_BUF], flag[16];
+	const char *lookup_target = NULL;
+	return is_git_head_subject_log(inv) || is_git_ls_files(inv) || is_git_status(inv) ||
+	       is_git_read_only_diff(inv) || is_fixed_rg_repo_search(inv) || is_bounded_rg_repo_search(inv) ||
+	       is_tool_version_probe(inv) || command_path_lookup_target(inv, &lookup_target) ||
+	       is_static_environment_probe(inv) || is_printenv_probe(inv) ||
+	       parse_directory_listing(inv, target, flag) || is_file_type_candidate(inv);
+}
+
+/*
+ * A miss never executes through this path. It only publishes a bounded request
+ * for the resident Go maintainer, which independently reparses the request and
+ * applies the same read-only policy before preparing an exact snapshot.
+ */
+static int enqueue_prepare_request_at_cwd(const char *cwd, int argc, char **argv) {
+	policy_invocation inv;
+	if (!normalize_invocation_at_cwd(cwd, argc, argv, &inv) || !is_prepare_request_candidate(&inv)) {
+		return 0;
+	}
+	char store_root[PATH_BUF];
+	if (!discover_store_root(inv.cwd, store_root)) {
+		return 0;
+	}
+	char request_dir[PATH_BUF];
+	if (!join_path(request_dir, sizeof(request_dir), store_root, "prepare_requests") || !mkdir_p(request_dir)) {
+		return 0;
+	}
+	char key[HASH_HEX];
+	command_key(&inv, key);
+	char filename[96];
+	if (snprintf(filename, sizeof(filename), "%s.req", key) <= 0) {
+		return 0;
+	}
+	char final_path[PATH_BUF];
+	if (!join_path(final_path, sizeof(final_path), request_dir, filename)) {
+		return 0;
+	}
+	struct stat existing;
+	if (lstat(final_path, &existing) == 0) {
+		return S_ISREG(existing.st_mode);
+	}
+
+	static const unsigned char magic[8] = {'S', 'Q', 'R', 'Q', '0', '0', '0', '1'};
+	byte_buf body = {0};
+	size_t cwd_len = strlen(inv.cwd);
+	int ok = cwd_len > 0 && cwd_len < PATH_BUF &&
+	         bytes_append(&body, magic, sizeof(magic)) &&
+	         bytes_append_le32(&body, (uint32_t)cwd_len) &&
+	         bytes_append_le32(&body, (uint32_t)inv.argc) &&
+	         bytes_append(&body, inv.cwd, cwd_len);
+	for (int i = 0; ok && i < inv.argc; i++) {
+		size_t arg_len = strlen(inv.argv[i]);
+		ok = arg_len > 0 && arg_len < PATH_BUF &&
+		     bytes_append_le32(&body, (uint32_t)arg_len) &&
+		     bytes_append(&body, inv.argv[i], arg_len) &&
+		     body.len <= MAX_PREPARE_REQUEST_BYTES;
+	}
+	if (!ok || body.len > MAX_PREPARE_REQUEST_BYTES) {
+		bytes_free(&body);
+		return 0;
+	}
+
+	char temp_name[128];
+	long long nonce = now_realtime_ns();
+	if (snprintf(temp_name, sizeof(temp_name), ".%s.%ld.%lld.tmp", key, (long)getpid(), nonce) <= 0) {
+		bytes_free(&body);
+		return 0;
+	}
+	char temp_path[PATH_BUF];
+	if (!join_path(temp_path, sizeof(temp_path), request_dir, temp_name)) {
+		bytes_free(&body);
+		return 0;
+	}
+	int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd < 0) {
+		bytes_free(&body);
+		return errno == EEXIST;
+	}
+	ok = write_all(fd, body.data, body.len);
+	if (close(fd) != 0) {
+		ok = 0;
+	}
+	bytes_free(&body);
+	if (!ok || rename(temp_path, final_path) != 0) {
+		(void)unlink(temp_path);
+		return 0;
+	}
+	return 1;
+}
+
 static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const char epoch[256], const char *store_root, long long replay_start_ns) {
 	char key[HASH_HEX];
 	command_key(inv, key);
@@ -3790,6 +5902,8 @@ static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const cha
 	int exit_code;
 	uint64_t native_wall_ms = 0;
 	if (!snapshot_find(snap, key, epoch, HOT_KIND_EXACT, &out, &out_len, &err, &err_len, &exit_code, &native_wall_ms)) {
+		mmap_trace_path("exact-miss-key", key);
+		mmap_trace_path("exact-miss-epoch", epoch);
 		return 0;
 	}
 	if (out_len + err_len > MAX_FAST_OUTPUT_BYTES) {
@@ -3807,8 +5921,8 @@ static int replay_exact(mapped_snapshot *snap, policy_invocation *inv, const cha
 
 static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const char *store_root, long long replay_start_ns) {
 	char key[HASH_HEX], epoch[256], path[PATH_BUF];
-	int sed_start, sed_end, line_count;
-	if (!warm_file_proof(inv, key, epoch, path, &sed_start, &sed_end, &line_count)) {
+	warm_file_operation operation;
+	if (!warm_file_proof(inv, key, epoch, path, &operation, NULL, NULL, NULL)) {
 		return 0;
 	}
 	char command_hash[HASH_HEX];
@@ -3825,8 +5939,8 @@ static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const
 	if (err_len != 0 || exit_code != 0) {
 		return 0;
 	}
-	if (strcmp(inv->argv[0], "cat") == 0) {
-		if (content_len > MAX_FAST_OUTPUT_BYTES) {
+	if (operation.kind == WARM_FILE_OPERATION_CAT) {
+		if (content_len > MAX_FILE_OUTPUT_BYTES) {
 			return 0;
 		}
 		if (content_len > 0 && !write_all(STDOUT_FILENO, content, content_len)) {
@@ -3835,51 +5949,45 @@ static int replay_warm_file(mapped_snapshot *snap, policy_invocation *inv, const
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(0);
 	}
-	if (strcmp(inv->argv[0], "sed") == 0) {
-		if (!output_sed_range(content, content_len, sed_start, sed_end)) {
+	if (operation.kind == WARM_FILE_OPERATION_SED) {
+		if (!output_line_selection(content, content_len, &operation.selection, MAX_FILE_OUTPUT_BYTES)) {
 			return 0;
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(0);
 	}
-	if (strcmp(inv->argv[0], "head") == 0) {
-		if (!output_sed_range(content, content_len, 1, line_count)) {
+	if (operation.kind == WARM_FILE_OPERATION_HEAD) {
+		if (!output_sed_range(content, content_len, 1, operation.line_count)) {
 			return 0;
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(0);
 	}
-	if (strcmp(inv->argv[0], "tail") == 0) {
-		if (!output_tail_lines(content, content_len, line_count)) {
+	if (operation.kind == WARM_FILE_OPERATION_TAIL) {
+		if (!output_tail_lines(content, content_len, operation.line_count)) {
 			return 0;
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(0);
 	}
-	if (strcmp(inv->argv[0], "grep") == 0) {
-		const char *pattern = NULL;
-		const char *path = NULL;
-		int quiet = 0;
-		if (!parse_fixed_grep_args(inv, &pattern, &path, &quiet)) {
+	if (operation.kind == WARM_FILE_OPERATION_NL) {
+		if (!output_nl_all(content, content_len)) {
 			return 0;
 		}
+		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
+		_exit(0);
+	}
+	if (operation.kind == WARM_FILE_OPERATION_GREP) {
 		int matched = 0;
-		if (!output_fixed_grep(content, content_len, pattern, quiet, &matched)) {
+		if (!output_fixed_grep(content, content_len, operation.pattern, operation.quiet, &matched)) {
 			return 0;
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
 		_exit(matched ? 0 : 1);
 	}
-	if (strcmp(inv->argv[0], "rg") == 0) {
-		const char *pattern = NULL;
-		const char *path = NULL;
-		int quiet = 0;
-		int line_number = 0;
-		if (!parse_fixed_rg_args(inv, &pattern, &path, &quiet, &line_number)) {
-			return 0;
-		}
+	if (operation.kind == WARM_FILE_OPERATION_RG) {
 		int matched = 0;
-		if (!output_fixed_rg(content, content_len, pattern, quiet, line_number, &matched)) {
+		if (!output_fixed_rg(content, content_len, operation.pattern, operation.quiet, operation.line_number, &matched)) {
 			return 0;
 		}
 		record_hot_replay_event(store_root, (long long)native_wall_ms, replay_start_ns);
@@ -3896,6 +6004,8 @@ static int prepare_exact_replay_for_epoch(mapped_snapshot *snap, policy_invocati
 	int exit_code;
 	uint64_t native_wall_ms = 0;
 	if (!snapshot_find(snap, key, epoch, HOT_KIND_EXACT, &out, &out_len, &err, &err_len, &exit_code, &native_wall_ms)) {
+		mmap_trace_path("exact-prepare-miss-key", key);
+		mmap_trace_path("exact-prepare-miss-epoch", epoch);
 		return 0;
 	}
 	if (out_len + err_len > MAX_FAST_OUTPUT_BYTES) {
@@ -3931,9 +6041,14 @@ static int prepare_exact_replay_at_cwd(const char *cwd, int argc, char **argv, p
 		prepared->synthetic_safe = 1;
 		return 1;
 	}
-	if (repo_summary_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
-		prepared->synthetic_safe = 1;
-		return 1;
+	if (is_git_head_subject_log(&inv) || is_git_ls_files(&inv) || is_git_status(&inv) ||
+	    is_git_read_only_diff(&inv) || is_fixed_rg_repo_search(&inv) || is_bounded_rg_repo_search(&inv)) {
+		if (!repo_summary_epoch(&inv, epoch)) {
+			mmap_trace_path("exact-prepare-miss-repo-summary-proof", inv.cwd);
+		} else if (prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
+			prepared->synthetic_safe = 1;
+			return 1;
+		}
 	}
 	if (tool_version_epoch(&inv, epoch) && prepare_exact_replay_for_epoch(&prepared->snap, &inv, epoch, prepared)) {
 		prepared->synthetic_safe = 1;

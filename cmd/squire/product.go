@@ -141,7 +141,7 @@ func productRuntimeLanes() []productStatusLane {
 			Tier:  "bounded",
 			Scope: "hash-validated workspace files and directories",
 			Operations: []string{
-				"cat, sed -n, head, tail",
+				"cat, sed -n, head, tail, nl -ba windows",
 				"grep -F and single-file rg -F",
 				"tight ls, safe printenv, hostname, uname",
 			},

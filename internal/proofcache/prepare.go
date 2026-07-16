@@ -22,29 +22,33 @@ const (
 	PreparedKindSourceSymbolIndex  = "source_symbol_index"
 	PreparedKindProofGatedOutput   = "proof_gated_output"
 	PreparedKindWarmFile           = "warm_file"
+	PreparedKindRepoSearchCorpus   = "repo_search_corpus"
+	PreparedKindGitHistoryCorpus   = "git_history_corpus"
 
 	proofGatedPrewarmCommandFileLimit = 160
 	workspaceImagePrewarmFileLimit    = 2048
 )
 
 type WarmReport struct {
-	Claim                   string               `json:"claim"`
-	RepoRoot                string               `json:"repo_root"`
-	OracleAvailable         bool                 `json:"oracle_available"`
-	FastPathPrepared        int                  `json:"fast_path_prepared"`
-	ProofGatedPrewarmed     int                  `json:"proof_gated_prewarmed"`
-	WarmFilesPrepared       int                  `json:"warm_files_prepared"`
-	FileTreeIndexesPrepared int                  `json:"file_tree_indexes_prepared"`
-	ProjectMetadataPrepared int                  `json:"project_metadata_prepared"`
-	CommandPathPrepared     int                  `json:"command_path_prepared"`
-	EcosystemPrepared       int                  `json:"ecosystem_prepared"`
-	DependencyPrepared      int                  `json:"dependency_metadata_prepared"`
-	SourceSymbolPrepared    int                  `json:"source_symbol_indexes_prepared"`
-	Prepared                []WarmPreparedReport `json:"prepared"`
-	PrivacyMode             string               `json:"privacy_mode"`
-	AgentVisibleSuggestions bool                 `json:"agent_visible_suggestions"`
-	ReplaySetUnchanged      bool                 `json:"replay_set_unchanged"`
-	Notes                   []string             `json:"notes,omitempty"`
+	Claim                    string               `json:"claim"`
+	RepoRoot                 string               `json:"repo_root"`
+	OracleAvailable          bool                 `json:"oracle_available"`
+	FastPathPrepared         int                  `json:"fast_path_prepared"`
+	ProofGatedPrewarmed      int                  `json:"proof_gated_prewarmed"`
+	WarmFilesPrepared        int                  `json:"warm_files_prepared"`
+	RepoSearchCorpusPrepared int                  `json:"repo_search_corpus_prepared"`
+	GitHistoryCorpusPrepared int                  `json:"git_history_corpus_prepared"`
+	FileTreeIndexesPrepared  int                  `json:"file_tree_indexes_prepared"`
+	ProjectMetadataPrepared  int                  `json:"project_metadata_prepared"`
+	CommandPathPrepared      int                  `json:"command_path_prepared"`
+	EcosystemPrepared        int                  `json:"ecosystem_prepared"`
+	DependencyPrepared       int                  `json:"dependency_metadata_prepared"`
+	SourceSymbolPrepared     int                  `json:"source_symbol_indexes_prepared"`
+	Prepared                 []WarmPreparedReport `json:"prepared"`
+	PrivacyMode              string               `json:"privacy_mode"`
+	AgentVisibleSuggestions  bool                 `json:"agent_visible_suggestions"`
+	ReplaySetUnchanged       bool                 `json:"replay_set_unchanged"`
+	Notes                    []string             `json:"notes,omitempty"`
 }
 
 type WarmPreparedReport struct {
@@ -155,6 +159,29 @@ func (k *Engine) warm(ctx context.Context, cwd string, metadataOnly bool) (WarmR
 	warmFiles, warmFileReports := k.prewarmWarmFiles(ctx, cwd, ws, ledger, &phases)
 	report.WarmFilesPrepared += warmFiles
 	report.Prepared = append(report.Prepared, warmFileReports...)
+
+	if k.prewarmRepoSearchCorpus(ctx, cwd, ws, ledger, &phases) {
+		report.RepoSearchCorpusPrepared++
+		report.Prepared = append(report.Prepared, WarmPreparedReport{
+			Kind:              PreparedKindRepoSearchCorpus,
+			OperatorFamily:    FamilySearchList,
+			NormalizedCommand: "bounded repository search corpus",
+			ReplayEligible:    true,
+			EvidenceQuality:   EvidenceStrong,
+			Privacy:           "eligible local repository paths and bytes stored locally for proof-bound bounded search",
+		})
+	}
+	if k.prewarmGitHistoryCorpus(ctx, cwd, ws, ledger, &phases) {
+		report.GitHistoryCorpusPrepared++
+		report.Prepared = append(report.Prepared, WarmPreparedReport{
+			Kind:              PreparedKindGitHistoryCorpus,
+			OperatorFamily:    FamilyLocalRepoMetadata,
+			NormalizedCommand: "bounded git history corpus",
+			ReplayEligible:    true,
+			EvidenceQuality:   EvidenceStrong,
+			Privacy:           "recent commit oneline output and changed paths stored locally for bounded proof-gated history queries",
+		})
+	}
 
 	if addPreparedFileTreeIndex(ws, ledger) {
 		report.FileTreeIndexesPrepared++
@@ -319,11 +346,39 @@ func (k *Engine) prewarmProofGatedOutputs(ctx context.Context, cwd string, ws Wo
 		hotEpoch string
 		hotOK    bool
 	}
+	observeStable := func(argv []string) (result, bool, bool) {
+		if !IsProofGatedReplayCandidate(argv) || proofGatedWarmBlocked(cwd, argv) {
+			return result{}, false, false
+		}
+		beforeFPS, beforeEpoch, beforeOK := preparedHotProof(cwd, argv)
+		if !beforeOK {
+			return result{}, false, false
+		}
+		native := runProofGatedNative(ctx, cwd, argv)
+		if proofGatedWarmBlocked(cwd, argv) {
+			return result{}, false, false
+		}
+		afterFPS, afterEpoch, afterOK := preparedHotProof(cwd, argv)
+		if !afterOK || beforeEpoch != afterEpoch || !mapsEqual(beforeFPS, afterFPS) {
+			return result{}, false, true
+		}
+		return result{argv: argv, native: native, hotFPS: afterFPS, hotEpoch: afterEpoch, hotOK: true}, true, false
+	}
+
+	var parallelCandidates [][]string
+	var serialGitCandidates [][]string
+	for _, argv := range candidates {
+		if isGitRepoState(argv) {
+			serialGitCandidates = append(serialGitCandidates, argv)
+		} else {
+			parallelCandidates = append(parallelCandidates, argv)
+		}
+	}
 	jobs := make(chan []string)
 	results := make(chan result, len(candidates))
 	workers := 4
-	if len(candidates) < workers {
-		workers = len(candidates)
+	if len(parallelCandidates) < workers {
+		workers = len(parallelCandidates)
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -331,39 +386,46 @@ func (k *Engine) prewarmProofGatedOutputs(ctx context.Context, cwd string, ws Wo
 		go func() {
 			defer wg.Done()
 			for argv := range jobs {
-				if !IsProofGatedReplayCandidate(argv) {
-					continue
+				if observed, ok, _ := observeStable(argv); ok {
+					results <- observed
 				}
-				if proofGatedWarmBlocked(cwd, argv) {
-					continue
-				}
-				beforeFPS, beforeEpoch, beforeOK := preparedHotProof(cwd, argv)
-				if !beforeOK {
-					continue
-				}
-				native := runProofGatedNative(ctx, cwd, argv)
-				if proofGatedWarmBlocked(cwd, argv) {
-					continue
-				}
-				afterFPS, afterEpoch, afterOK := preparedHotProof(cwd, argv)
-				if !afterOK || beforeEpoch != afterEpoch || !mapsEqual(beforeFPS, afterFPS) {
-					continue
-				}
-				results <- result{argv: argv, native: native, hotFPS: afterFPS, hotEpoch: afterEpoch, hotOK: true}
 			}
 		}()
 	}
-	for _, argv := range candidates {
+	for _, argv := range parallelCandidates {
 		jobs <- argv
 	}
 	close(jobs)
 	wg.Wait()
+	// Git's read-only porcelain can refresh index stat metadata. A command late
+	// in the sequence can therefore invalidate an observation made earlier in
+	// the same sequence. Treat the whole Git phase as a transaction: discard a
+	// round if any command changes its proof and publish only a fully stable
+	// round. Normal warms use one round; a stale index converges on the second.
+	for round := 0; round < 3; round++ {
+		roundResults := make([]result, 0, len(serialGitCandidates))
+		roundChanged := false
+		for _, argv := range serialGitCandidates {
+			observed, ok, changed := observeStable(argv)
+			roundChanged = roundChanged || changed
+			if ok {
+				roundResults = append(roundResults, observed)
+			}
+		}
+		if roundChanged {
+			continue
+		}
+		for _, observed := range roundResults {
+			results <- observed
+		}
+		break
+	}
 	close(results)
 
 	var count int
 	var reports []WarmPreparedReport
 	for res := range results {
-		if res.native.ExitCode != 0 {
+		if !proofGatedNativeResultCacheable(res.argv, res.native) {
 			continue
 		}
 		op := Operation{
@@ -443,6 +505,7 @@ func proofGatedPrewarmCandidates(ws WorldState) [][]string {
 		add([]string{"git", "status", "--porcelain"})
 		add([]string{"git", "diff"})
 		add([]string{"git", "diff", "--stat"})
+		add([]string{"git", "diff", "--check"})
 		add([]string{"git", "log", "-1", "--format=%H%n%s"})
 		add([]string{"rg", "--files"})
 		for _, rel := range replayableGitLsFilesPrewarmTargets(ws.RepoRoot, 64) {
@@ -594,7 +657,7 @@ func replayableInspectionPrewarmFiles(root string, limit int) []string {
 		if err != nil || !info.Mode().IsRegular() || info.Size() > maxReplayableInspectionFileBytes {
 			return nil
 		}
-		if isReplayableCatFileRead([]string{"cat", name}) && info.Size() > maxFastPathOutputBytes {
+		if isReplayableCatFileRead([]string{"cat", name}) && info.Size() > maxFileInspectionOutputBytes {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
@@ -629,7 +692,9 @@ func isLikelySourceInspectionFile(path string) bool {
 		".py", ".rs", ".java", ".kt", ".kts", ".rb", ".php",
 		".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".swift",
 		".sh", ".bash", ".zsh", ".fish", ".sql",
-		".css", ".scss", ".sass", ".html", ".htm", ".md", ".markdown":
+		".css", ".scss", ".sass", ".html", ".htm",
+		".json", ".jsonc", ".toml", ".yaml", ".yml", ".xml",
+		".md", ".markdown", ".rst", ".txt", ".log":
 		return true
 	default:
 		return false
@@ -674,6 +739,16 @@ func runProofGatedNative(ctx context.Context, cwd string, argv []string) NativeR
 		return NativeResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode, Wall: time.Since(start), Err: err}
 	}
 	return runNative(ctx, cwd, argv)
+}
+
+func proofGatedNativeResultCacheable(argv []string, native NativeResult) bool {
+	if len(native.Stdout)+len(native.Stderr) > maxFastPathOutputBytes {
+		return false
+	}
+	if native.ExitCode == 0 {
+		return true
+	}
+	return native.ExitCode == 1 && (isFixedRgFileSearch(argv) || isFixedRgRepoSearch(argv) || isBoundedRgRepoSearch(argv) || isFixedGrepFileSearch(argv) || isPrintenvProbe(argv))
 }
 
 func proofGatedWarmBlocked(cwd string, argv []string) bool {

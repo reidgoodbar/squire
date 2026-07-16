@@ -52,6 +52,34 @@ func TestPrewarmedFileReplaysOtherSedRangesAndCat(t *testing.T) {
 	assertSameResult(t, resCat.Stdout, resCat.Stderr, resCat.ExitCode, runNative(ctx, repo, argvCat))
 }
 
+func TestPrewarmedFileReplaysMultiRangeSedExactly(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	rel := filepath.Join("src", "multi.txt")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("one\ntwo\nthree\nfour\nfive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatal("adaptive prewarm did not prepare file")
+	}
+
+	for _, expr := range []string{"1,2p;4,5p", "1,3p;2,4p;2p", "3p;1p"} {
+		argv := []string{"sed", "-n", expr, rel}
+		res := k.Run(ctx, "test", repo, argv)
+		if res.Mode != ModeReplay {
+			t.Fatalf("sed %q mode = %s, want replay; diagnostics=%v", expr, res.Mode, res.Diagnostics)
+		}
+		assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+	}
+}
+
 func TestWarmFileFixedGrepReplayMatchesNative(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)
@@ -334,6 +362,70 @@ func TestWarmFileHeadTailReplayMatchesNative(t *testing.T) {
 			assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
 		})
 	}
+}
+
+func TestWarmFileNLAllReplayMatchesNative(t *testing.T) {
+	if _, err := exec.LookPath("nl"); err != nil {
+		t.Skip("nl command unavailable")
+	}
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "numbered.py")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("alpha\n\ngamma"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+	argv := []string{"nl", "-ba", rel}
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode != ModeReplay {
+		t.Fatalf("mode = %s, want replay; diagnostics=%v", res.Mode, res.Diagnostics)
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
+
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("delta\n\nepsilon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := k.Run(ctx, "test", repo, argv)
+	if changed.Mode == ModeReplay {
+		t.Fatalf("nl replayed after file content changed")
+	}
+	assertSameResult(t, changed.Stdout, changed.Stderr, changed.ExitCode, runNative(ctx, repo, argv))
+}
+
+func TestWarmFileNLLogicalPageDelimiterFallsBack(t *testing.T) {
+	if _, err := exec.LookPath("nl"); err != nil {
+		t.Skip("nl command unavailable")
+	}
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("src", "pages.txt")
+	if err := os.WriteFile(filepath.Join(repo, rel), []byte("body\n\\:\\:\nnew body\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := New(DefaultStoreRoot(repo))
+	if count, err := k.PrewarmAdjacent(ctx, repo, "test", []string{"sed", "-n", "1,1p", rel}); err != nil {
+		t.Fatal(err)
+	} else if count == 0 {
+		t.Fatalf("adaptive prewarm did not prepare file")
+	}
+	argv := []string{"nl", "-ba", rel}
+	res := k.Run(ctx, "test", repo, argv)
+	if res.Mode == ModeReplay {
+		t.Fatalf("nl logical-page input replayed")
+	}
+	assertSameResult(t, res.Stdout, res.Stderr, res.ExitCode, runNative(ctx, repo, argv))
 }
 
 func TestWarmFileHeadTailDoNotReplayAfterFileChange(t *testing.T) {

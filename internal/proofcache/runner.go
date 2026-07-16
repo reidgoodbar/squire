@@ -232,7 +232,7 @@ func (k *Engine) Run(ctx context.Context, sessionID, cwd string, argv []string) 
 }
 
 func (k *Engine) observeForegroundNativeAsync(sessionID string, inv CommandInvocation, native NativeResult) {
-	if k.Store == nil || native.ExitCode != 0 || !IsReplayAllowed(inv.PolicyArgv) {
+	if k.Store == nil || !proofGatedNativeResultCacheable(inv.PolicyArgv, native) || !IsReplayAllowed(inv.PolicyArgv) {
 		return
 	}
 	k.mu.Lock()
@@ -328,7 +328,7 @@ func (k *Engine) observeForegroundNativeAsync(sessionID string, inv CommandInvoc
 		ledger.UpsertPrepared(prepared)
 		k.mu.Unlock()
 		if isReplayableFileInspection(argv) {
-			_ = k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, &phases, "foreground observed file bytes prepared for arbitrary bounded sed/cat replay; native fallback still available")
+			_ = k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, &phases, "foreground observed file bytes prepared for arbitrary bounded cat/sed/head/tail/nl/grep/rg replay; native fallback still available")
 		}
 		k.hydratePreparedReplayCache(ledger, k.Store.Signal(), &phases)
 		_ = k.saveLedgerSync(ledger, &phases)

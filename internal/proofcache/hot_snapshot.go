@@ -13,13 +13,15 @@ import (
 )
 
 const (
-	hotSnapshotMagic        uint64 = 0x3150535148535153 // SQSHSQP1, little-endian marker for hot snapshot files.
-	hotSnapshotHeaderBytes         = 64
-	hotSnapshotEntryBytes          = 320 // Five 64-byte cache lines.
-	hotSnapshotMaxEntries          = 8192
-	hotSnapshotMaxBytes            = 64 << 20
-	hotSnapshotKindExact    uint32 = 1
-	hotSnapshotKindWarmFile uint32 = 2
+	hotSnapshotMagic                uint64 = 0x3150535148535153 // SQSHSQP1, little-endian marker for hot snapshot files.
+	hotSnapshotHeaderBytes                 = 64
+	hotSnapshotEntryBytes                  = 320 // Five 64-byte cache lines.
+	hotSnapshotMaxEntries                  = 8192
+	hotSnapshotMaxBytes                    = 64 << 20
+	hotSnapshotKindExact            uint32 = 1
+	hotSnapshotKindWarmFile         uint32 = 2
+	hotSnapshotKindRepoSearchCorpus uint32 = 3
+	hotSnapshotKindGitHistoryCorpus uint32 = 4
 )
 
 type hotSnapshotCandidate struct {
@@ -37,16 +39,18 @@ type hotSnapshotCandidate struct {
 }
 
 type HotSnapshotStats struct {
-	Available        bool
-	Path             string
-	SharedMemoryMode string
-	Version          int
-	SizeBytes        int64
-	Entries          int
-	ExactEntries     int
-	WarmFileEntries  int
-	PayloadBytes     int64
-	Diagnostic       string
+	Available               bool
+	Path                    string
+	SharedMemoryMode        string
+	Version                 int
+	SizeBytes               int64
+	Entries                 int
+	ExactEntries            int
+	WarmFileEntries         int
+	RepoSearchCorpusEntries int
+	GitHistoryCorpusEntries int
+	PayloadBytes            int64
+	Diagnostic              string
 }
 
 func hotCacheSnapshotPath(storeRoot string) string {
@@ -103,12 +107,16 @@ func HotSnapshotStatsForStore(storeRoot string) HotSnapshotStats {
 			stats.ExactEntries++
 		case hotSnapshotKindWarmFile:
 			stats.WarmFileEntries++
+		case hotSnapshotKindRepoSearchCorpus:
+			stats.RepoSearchCorpusEntries++
+		case hotSnapshotKindGitHistoryCorpus:
+			stats.GitHistoryCorpusEntries++
 		}
 	}
 	return stats
 }
 
-func (k *Engine) publishHotSnapshot(replays map[string][]preparedReplay, warmFiles map[string][]preparedWarmFile) {
+func (k *Engine) publishHotSnapshot(replays map[string][]preparedReplay, warmFiles map[string][]preparedWarmFile, corpora []preparedRepoSearchCorpus) {
 	if k == nil || k.Store == nil {
 		return
 	}
@@ -116,7 +124,7 @@ func (k *Engine) publishHotSnapshot(replays map[string][]preparedReplay, warmFil
 	if path == "" {
 		return
 	}
-	candidates := hotSnapshotCandidates(replays, warmFiles)
+	candidates := hotSnapshotCandidates(replays, warmFiles, corpora)
 	if len(candidates) == 0 {
 		_ = os.Remove(path)
 		return
@@ -139,7 +147,7 @@ func (k *Engine) publishHotSnapshot(replays map[string][]preparedReplay, warmFil
 	_ = os.Chmod(path, 0o600)
 }
 
-func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[string][]preparedWarmFile) []hotSnapshotCandidate {
+func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[string][]preparedWarmFile, corpora []preparedRepoSearchCorpus) []hotSnapshotCandidate {
 	var candidates []hotSnapshotCandidate
 	for commandKey, items := range replays {
 		for _, replay := range items {
@@ -191,6 +199,39 @@ func hotSnapshotCandidates(replays map[string][]preparedReplay, warmFiles map[st
 				preparedAt:   replay.Entry.PreparedAt,
 			})
 		}
+	}
+	for _, corpus := range corpora {
+		fingerprintKey := "repo_search_corpus"
+		outputKey := "repo_search_corpus"
+		commandPrefix := "repo-search-corpus:"
+		kind := hotSnapshotKindRepoSearchCorpus
+		maxBytes := maxRepoSearchCorpusBytes
+		if corpus.Entry.Kind == PreparedKindGitHistoryCorpus {
+			fingerprintKey = "git_history_corpus"
+			outputKey = "git_history_corpus"
+			commandPrefix = "git-history-corpus:"
+			kind = hotSnapshotKindGitHistoryCorpus
+			maxBytes = gitHistoryCorpusMaxBytes
+		}
+		key := corpus.Entry.HotFingerprints[fingerprintKey]
+		contentHash := corpus.Entry.OutputFingerprints[outputKey]
+		if key == "" || corpus.Entry.HotInvalidationEpoch == "" || len(corpus.Content) == 0 ||
+			len(corpus.Content) > maxBytes || contentHash == "" || hashBytes(corpus.Content) != contentHash {
+			continue
+		}
+		candidates = append(candidates, hotSnapshotCandidate{
+			commandKey:   hashString(commandPrefix + key),
+			epoch:        corpus.Entry.HotInvalidationEpoch,
+			stdout:       corpus.Content,
+			stderr:       nil,
+			exitCode:     0,
+			nativeWallMS: corpus.NativeWallMS,
+			stdoutHash:   contentHash,
+			stderrHash:   hashBytes(nil),
+			kind:         kind,
+			priority:     940,
+			preparedAt:   corpus.Entry.PreparedAt,
+		})
 	}
 	candidates = dedupeHotSnapshotCandidates(candidates)
 	sort.Slice(candidates, func(i, j int) bool {
@@ -254,6 +295,11 @@ func betterHotSnapshotCandidate(a, b hotSnapshotCandidate) bool {
 
 func hotSnapshotCandidatePriority(entry PreparedEntry) int {
 	command := entry.NormalizedCommand
+	for _, note := range entry.Notes {
+		if strings.Contains(note, "foreground-safe miss requested exact background preparation") {
+			return 995
+		}
+	}
 	switch {
 	case entry.Kind == PreparedKindFastPathOutput:
 		return 1000
@@ -297,11 +343,19 @@ func encodeHotSnapshot(candidates []hotSnapshotCandidate) ([]byte, bool) {
 		stdout := candidate.stdout
 		stderr := candidate.stderr
 		if len(stdout)+len(stderr) > maxFastPathOutputBytes {
-			if candidate.kind != hotSnapshotKindWarmFile || len(stdout)+len(stderr) > maxReplayableInspectionFileBytes {
+			maxBytes := maxReplayableInspectionFileBytes
+			if candidate.kind == hotSnapshotKindRepoSearchCorpus {
+				maxBytes = maxRepoSearchCorpusBytes
+			} else if candidate.kind == hotSnapshotKindGitHistoryCorpus {
+				maxBytes = gitHistoryCorpusMaxBytes
+			}
+			if (candidate.kind != hotSnapshotKindWarmFile && candidate.kind != hotSnapshotKindRepoSearchCorpus &&
+				candidate.kind != hotSnapshotKindGitHistoryCorpus) || len(stdout)+len(stderr) > maxBytes {
 				continue
 			}
 		}
-		if candidate.kind != hotSnapshotKindExact && candidate.kind != hotSnapshotKindWarmFile {
+		if candidate.kind != hotSnapshotKindExact && candidate.kind != hotSnapshotKindWarmFile &&
+			candidate.kind != hotSnapshotKindRepoSearchCorpus && candidate.kind != hotSnapshotKindGitHistoryCorpus {
 			continue
 		}
 		stdoutOffset := payloadOffset + len(payload)
@@ -590,7 +644,7 @@ func decodeHotSnapshotWarmFileResponse(data []byte, commandKey, epochHash string
 		return hotCacheResponse{}, err
 	}
 	stdout, exitCode, ok := warmFileCommandOutputIndexed(resp.Stdout, lineStartsForContent(resp.Stdout), argv)
-	if !ok || len(stdout) > maxFastPathOutputBytes {
+	if !ok || len(stdout) > maxFileInspectionOutputBytes {
 		return hotCacheResponse{}, errors.New("hot snapshot warm-file command output unavailable")
 	}
 	stderr := []byte(nil)

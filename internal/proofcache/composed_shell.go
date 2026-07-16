@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	composedShellMaxTokens = 128
-	composedShellMaxNodes  = 128
-	composedShellMaxArgs   = 32
-	composedShellMaxWord   = 512
+	composedShellMaxTokens            = 128
+	composedShellMaxNodes             = 128
+	composedShellMaxArgs              = 32
+	composedShellMaxWord              = 512
+	composedShellMaxIntermediateBytes = 2 * 1024 * 1024
 )
 
 type shellTokenKind int
@@ -231,8 +232,29 @@ func tokenizeComposedWord(script string, i int) (string, int, bool) {
 			quote := script[i]
 			i++
 			for i < len(script) && script[i] != quote {
-				if !isComposedQuotedWordByteAllowed(script[i], quote) || (quote == '"' && (script[i] == '$' || script[i] == '`' || script[i] == '\\' || script[i] == '!')) {
+				if !isComposedQuotedWordByteAllowed(script[i]) {
 					return "", 0, false
+				}
+				if quote == '"' {
+					if script[i] == '$' || script[i] == '`' || script[i] == '!' {
+						return "", 0, false
+					}
+					if script[i] == '\\' {
+						if i+1 >= len(script) {
+							return "", 0, false
+						}
+						switch script[i+1] {
+						case '"', '\\':
+							if b.Len()+1 >= composedShellMaxWord {
+								return "", 0, false
+							}
+							b.WriteByte(script[i+1])
+							i += 2
+							continue
+						case '$', '`', '\n':
+							return "", 0, false
+						}
+					}
 				}
 				if b.Len()+1 >= composedShellMaxWord {
 					return "", 0, false
@@ -291,11 +313,8 @@ func isComposedWordByteAllowed(c byte) bool {
 	}
 }
 
-func isComposedQuotedWordByteAllowed(c byte, quote byte) bool {
-	if quote == '\'' && c == '\\' {
-		return true
-	}
-	return isComposedWordByteAllowed(c)
+func isComposedQuotedWordByteAllowed(c byte) bool {
+	return c >= 0x20 && c < 0x7f
 }
 
 func (p *shellParser) parseSequence() (int, bool) {
@@ -540,6 +559,11 @@ func (k *Engine) evalComposedShellNode(ctx context.Context, sessionID, cwd strin
 		}
 		return k.evalComposedShellSource(ctx, sessionID, cwd, node.argv)
 	case shellNodePipe:
+		if input == nil {
+			if fused, ok := k.evalComposedNumberedRange(cwd, plan, node.left, node.right); ok {
+				return fused, true
+			}
+		}
 		left, ok := k.evalComposedShellNode(ctx, sessionID, cwd, plan, node.left, input)
 		if !ok {
 			return shellEvalResult{}, false
@@ -609,9 +633,41 @@ func (k *Engine) evalComposedShellNode(ctx context.Context, sessionID, cwd strin
 	}
 }
 
+func (k *Engine) evalComposedNumberedRange(cwd string, plan shellPlan, leftIdx, rightIdx int) (shellEvalResult, bool) {
+	if leftIdx < 0 || leftIdx >= len(plan.nodes) || rightIdx < 0 || rightIdx >= len(plan.nodes) {
+		return shellEvalResult{}, false
+	}
+	left := plan.nodes[leftIdx]
+	right := plan.nodes[rightIdx]
+	if left.kind != shellNodeExec || right.kind != shellNodeExec || !isNumberedAllLines(left.argv) {
+		return shellEvalResult{}, false
+	}
+	selection, ok := parseComposedShellFilterSed(right.argv)
+	if !ok {
+		return shellEvalResult{}, false
+	}
+	inv := NormalizeInvocation(cwd, left.argv)
+	candidate, _, ok := k.findCurrentPreparedWarmFile(inv, nil, &PhaseTimings{})
+	if !ok {
+		return shellEvalResult{}, false
+	}
+	stdout, ok := numberedLineSelectionBytes(candidate.Content, selection, maxFileInspectionOutputBytes)
+	if !ok {
+		return shellEvalResult{}, false
+	}
+	return shellEvalResult{stdout: stdout, exitCode: 0, nativeMS: candidate.NativeWallMS}, true
+}
+
 func (k *Engine) evalComposedShellSource(ctx context.Context, sessionID, cwd string, argv []string) (shellEvalResult, bool) {
 	if len(argv) == 0 {
 		return shellEvalResult{}, false
+	}
+	if isComposedShellPwd(argv) {
+		resolved, err := filepath.Abs(cwd)
+		if err != nil {
+			return shellEvalResult{}, false
+		}
+		return shellEvalResult{stdout: []byte(resolved + "\n"), exitCode: 0}, true
 	}
 	if filepath.Base(argv[0]) == "printf" {
 		return evalComposedShellPrintf(argv)
@@ -619,6 +675,17 @@ func (k *Engine) evalComposedShellSource(ctx context.Context, sessionID, cwd str
 	inv := NormalizeInvocation(cwd, argv)
 	if !IsReplayAllowed(inv.PolicyArgv) {
 		return shellEvalResult{}, false
+	}
+	if isNumberedAllLines(inv.PolicyArgv) {
+		candidate, _, ok := k.findCurrentPreparedWarmFile(inv, nil, &PhaseTimings{})
+		if !ok {
+			return shellEvalResult{}, false
+		}
+		stdout, ok := numberedAllLinesBytes(candidate.Content, composedShellMaxIntermediateBytes)
+		if !ok {
+			return shellEvalResult{}, false
+		}
+		return shellEvalResult{stdout: stdout, exitCode: 0, nativeMS: candidate.NativeWallMS}, true
 	}
 	res, ok := k.FastReplayInvocation(ctx, sessionID, inv)
 	if !ok || res.Mode != ModeReplay {
@@ -699,6 +766,16 @@ func evalComposedShellFilter(argv []string, input []byte) (shellEvalResult, bool
 			return shellEvalResult{}, false
 		}
 		return shellEvalResult{stdout: tailLineBytes(input, n), exitCode: 0}, true
+	case "sed":
+		selection, ok := parseComposedShellFilterSed(argv)
+		if !ok {
+			return shellEvalResult{}, false
+		}
+		stdout, ok := sedPrintSelectionBytesIndexed(input, nil, selection, maxFastPathOutputBytes)
+		if !ok {
+			return shellEvalResult{}, false
+		}
+		return shellEvalResult{stdout: stdout, exitCode: 0}, true
 	case "grep":
 		pattern, quiet, ok := parseComposedShellFilterGrep(argv)
 		if !ok || bytes.IndexByte(input, 0) >= 0 {
@@ -726,6 +803,13 @@ func evalComposedShellFilter(argv []string, input []byte) (shellEvalResult, bool
 	default:
 		return shellEvalResult{}, false
 	}
+}
+
+func parseComposedShellFilterSed(argv []string) (lineSelection, bool) {
+	if len(argv) != 3 || argv[1] != "-n" {
+		return lineSelection{}, false
+	}
+	return parseSedPrintSelection(argv[2])
 }
 
 func formatComposedShellWCLineCount(n int) string {
@@ -764,7 +848,14 @@ func parseComposedShellFilterLineCount(argv []string) (int, bool) {
 	if len(argv) == 2 && strings.HasPrefix(argv[1], "-n") && len(argv[1]) > 2 {
 		return parseComposedShellNonNegativeLineCount(argv[1][2:])
 	}
+	if len(argv) == 2 && strings.HasPrefix(argv[1], "-") && len(argv[1]) > 1 {
+		return parseComposedShellNonNegativeLineCount(argv[1][1:])
+	}
 	return 0, false
+}
+
+func isComposedShellPwd(argv []string) bool {
+	return len(argv) == 1 && filepath.Base(argv[0]) == "pwd"
 }
 
 func parseComposedShellNonNegativeLineCount(s string) (int, bool) {

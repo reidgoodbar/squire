@@ -102,7 +102,7 @@ func TestHotSnapshotCandidatesPrioritizeHighValueCommandsUnderPressure(t *testin
 		now,
 	)}
 
-	candidates := hotSnapshotCandidates(replays, nil)
+	candidates := hotSnapshotCandidates(replays, nil, nil)
 	if len(candidates) != hotSnapshotMaxEntries {
 		t.Fatalf("candidate count = %d, want %d", len(candidates), hotSnapshotMaxEntries)
 	}
@@ -118,6 +118,42 @@ func TestHotSnapshotCandidatesPrioritizeHighValueCommandsUnderPressure(t *testin
 	if !foundStatus {
 		t.Fatal("high-value git status candidate was evicted under snapshot pressure")
 	}
+}
+
+func TestHotSnapshotCandidatesRetainForegroundDemandUnderPressure(t *testing.T) {
+	replays := make(map[string][]preparedReplay)
+	now := time.Now()
+	for i := 0; i < hotSnapshotMaxEntries+10; i++ {
+		key := hashString(fmt.Sprintf("broad-warm-%05d", i))
+		replays[key] = []preparedReplay{testPreparedReplayForHotSnapshot(
+			"head -n 20 src/file.go",
+			key,
+			hashString(fmt.Sprintf("epoch-broad-%05d", i)),
+			[]byte("line\n"),
+			now,
+		)}
+	}
+	demandKey := hashString("foreground-demand")
+	demandEpoch := hashString("foreground-demand-epoch")
+	demand := testPreparedReplayForHotSnapshot(
+		"rg -F demanded-literal .",
+		demandKey,
+		demandEpoch,
+		[]byte("src/file.go:demanded-literal\n"),
+		now.Add(-time.Hour),
+	)
+	demand.Entry.Notes = []string{
+		"foreground-safe miss requested exact background preparation; native fallback remains available",
+	}
+	replays[demandKey] = []preparedReplay{demand}
+
+	candidates := hotSnapshotCandidates(replays, nil, nil)
+	for _, candidate := range candidates {
+		if candidate.commandKey == demandKey && candidate.epoch == demandEpoch {
+			return
+		}
+	}
+	t.Fatal("foreground-demanded candidate was evicted by broad warming")
 }
 
 func testPreparedReplayForHotSnapshot(command, key, epoch string, stdout []byte, preparedAt time.Time) preparedReplay {

@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-const maxFastPathOutputBytes = 64 * 1024
+const (
+	maxFastPathOutputBytes       = 1024 * 1024
+	maxFileInspectionOutputBytes = 64 * 1024
+	maxRepoSearchCorpusBytes     = 48 * 1024 * 1024
+)
 const maxReplayableInspectionFileBytes = 256 * 1024
 
 type ValidityLedger struct {
@@ -43,6 +47,9 @@ func (s *LedgerStore) Init() error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(s.Root, "warm_files"), 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(s.Root, "repo_search_corpora"), 0o700); err != nil {
 		return err
 	}
 	cfg := filepath.Join(s.Root, "config.json")
@@ -272,6 +279,35 @@ func (s *LedgerStore) LoadWarmFile(ref string) ([]byte, error) {
 		return nil, errors.New("invalid warm file ref")
 	}
 	return os.ReadFile(filepath.Join(s.Root, "warm_files", ref, "content"))
+}
+
+func (s *LedgerStore) StoreRepoSearchCorpus(key string, content []byte) (string, error) {
+	if len(content) == 0 || len(content) > maxRepoSearchCorpusBytes {
+		return "", errors.New("repository search corpus exceeds bounded store limit")
+	}
+	ref := hashString("repo-search-corpus|" + key + "|" + hashBytes(content))
+	dir := filepath.Join(s.Root, "repo_search_corpora", ref)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "content"), content, 0o600); err != nil {
+		return "", err
+	}
+	return ref, nil
+}
+
+func (s *LedgerStore) LoadRepoSearchCorpus(ref string) ([]byte, error) {
+	if ref == "" || strings.Contains(ref, "..") || strings.ContainsRune(ref, filepath.Separator) {
+		return nil, errors.New("invalid repository search corpus ref")
+	}
+	content, err := os.ReadFile(filepath.Join(s.Root, "repo_search_corpora", ref, "content"))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) == 0 || len(content) > maxRepoSearchCorpusBytes {
+		return nil, errors.New("invalid repository search corpus size")
+	}
+	return content, nil
 }
 
 func (l *ValidityLedger) FindValid(key string, fingerprints map[string]string, epoch string) (*LedgerEntry, bool) {
@@ -580,6 +616,28 @@ func repoSummaryProof(cwd string, argv []string, ws WorldState) (map[string]stri
 		fp["git_config"] = configFP
 		epoch := "repo-summary:git-ls-files:" + hashString(root+"|"+normalizeArgv(argv)+"|"+indexFP+"|"+configFP+"|"+toolSignal.FileHash)
 		return fp, epoch, true
+	case isFixedRgRepoSearch(argv) || isBoundedRgRepoSearch(argv):
+		if gitDirAbs == "" {
+			return nil, "", false
+		}
+		tree, content, complete := exactWorkspaceEpochs(root, 10000, true)
+		if !complete {
+			return nil, "", false
+		}
+		ignoreFP := workspaceIgnoreFingerprint(root, gitDirAbs)
+		configFP := ripgrepConfigFingerprint()
+		envFP := ripgrepEnvironmentFingerprint()
+		fp["ignore_rules"] = ignoreFP
+		fp["ripgrep_config"] = configFP
+		fp["ripgrep_environment"] = envFP
+		fp["file_tree_epoch"] = tree
+		fp["file_content_epoch"] = content
+		kind := "rg-fixed"
+		if isBoundedRgRepoSearch(argv) {
+			kind = "rg-bounded"
+		}
+		epoch := "repo-summary:" + kind + ":" + hashString(root+"|"+normalizeArgv(argv)+"|"+ignoreFP+"|"+configFP+"|"+envFP+"|"+tree+"|"+content+"|"+toolSignal.FileHash)
+		return fp, epoch, true
 	case isGitStatusState(argv):
 		if gitDirAbs == "" {
 			return nil, "", false
@@ -636,7 +694,7 @@ func fileInspectionProof(op Operation, ws WorldState) (map[string]string, string
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Size() > maxReplayableInspectionFileBytes {
 		return nil, "", false
 	}
-	if isReplayableCatFileRead(op.Argv) && info.Size() > maxFastPathOutputBytes {
+	if isReplayableCatFileRead(op.Argv) && info.Size() > maxFileInspectionOutputBytes {
 		return nil, "", false
 	}
 	contentHash, ok := hashFile(path)
@@ -852,6 +910,31 @@ func fileHashOrMissing(path string) string {
 	return "missing:" + hashString(path)
 }
 
+func ripgrepConfigFingerprint() string {
+	path := os.Getenv("RIPGREP_CONFIG_PATH")
+	return hashString(path + "\x00" + fileHashOrMissing(path))
+}
+
+func ripgrepEnvironmentFingerprint() string {
+	keys := []string{
+		"RIPGREP_CONFIG_PATH",
+		"NO_COLOR",
+		"CLICOLOR",
+		"CLICOLOR_FORCE",
+		"TERM",
+		"COLORTERM",
+		"LANG",
+		"LC_ALL",
+		"LC_CTYPE",
+		"GREP_COLORS",
+	}
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+hashString(os.Getenv(key)))
+	}
+	return hashString(strings.Join(parts, "\n"))
+}
+
 func gitConfigSummaryFingerprint(repoRoot, gitDirAbs string) string {
 	var parts []string
 	parts = append(parts, gitConfigFileFingerprints("", filepath.Join(gitDirAbs, "config"))...)
@@ -866,12 +949,13 @@ func gitLogViewFingerprint(gitDirAbs string) string {
 	for _, path := range []string{
 		filepath.Join(gitDirAbs, "packed-refs"),
 		filepath.Join(gitDirAbs, "info", "grafts"),
-		filepath.Join(gitDirAbs, "refs", "replace"),
+		filepath.Join(gitDirAbs, "shallow"),
+		filepath.Join(gitDirAbs, "refs"),
 	} {
 		parts = append(parts, path+"\x00"+fileHashOrMissing(path))
 	}
-	replaceRoot := filepath.Join(gitDirAbs, "refs", "replace")
-	_ = filepath.WalkDir(replaceRoot, func(path string, d os.DirEntry, err error) error {
+	refsRoot := filepath.Join(gitDirAbs, "refs")
+	_ = filepath.WalkDir(refsRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() {
 			return nil
 		}

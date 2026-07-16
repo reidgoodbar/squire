@@ -926,6 +926,48 @@ func TestProofGatedRepoSummaryReplaysAfterWarm(t *testing.T) {
 	}
 }
 
+func TestWarmConvergesAfterGitIndexStatRefresh(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t, ctx)
+	target := filepath.Join(repo, "file.txt")
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(DefaultStoreRoot(repo))
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, append(append([]byte(nil), original...), []byte("transient\n")...), before.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, original, before.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Warm(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, argv := range [][]string{{"git", "ls-files"}, {"git", "diff", "--check"}} {
+		replay := k.Run(ctx, "test", repo, argv)
+		if replay.Mode != ModeReplay {
+			t.Fatalf("%s mode = %s after converged warm, want replay; diagnostics=%v", displayCommand(argv), replay.Mode, replay.Diagnostics)
+		}
+		if replay.Proof == nil || replay.Proof.OperationKey != "mmap-hot-snapshot" {
+			t.Fatalf("%s proof = %+v, want freshly published mmap snapshot", displayCommand(argv), replay.Proof)
+		}
+		assertSameResult(t, replay.Stdout, replay.Stderr, replay.ExitCode, runNative(ctx, repo, argv))
+	}
+}
+
 func TestProofGatedRepoSummaryDoesNotReplayAfterSameStatSignalWorkspaceChange(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t, ctx)
@@ -1504,6 +1546,8 @@ func TestPrewarmFileSelectionSkipsDependencyAndBuildDirectories(t *testing.T) {
 	}
 	files := map[string]string{
 		"src/app.ts":                "export const app = true;\n",
+		"src/service.log":           "service ready\n",
+		"src/guide.rst":             "Guide\n=====\n",
 		"package.json":              "{\"name\":\"app\"}\n",
 		"node_modules/pkg/index.ts": "export const dependency = true;\n",
 		".next/server/render.js":    "module.exports = {}\n",
@@ -1520,7 +1564,7 @@ func TestPrewarmFileSelectionSkipsDependencyAndBuildDirectories(t *testing.T) {
 	for _, rel := range selected {
 		selectedSet[rel] = true
 	}
-	for _, want := range []string{"package.json", "src/app.ts"} {
+	for _, want := range []string{"package.json", "src/app.ts", "src/service.log", "src/guide.rst"} {
 		if !selectedSet[want] {
 			t.Fatalf("expected %s in prewarm selection, got %v", want, selected)
 		}

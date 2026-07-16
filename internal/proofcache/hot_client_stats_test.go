@@ -68,17 +68,23 @@ func TestAppendHotClientEventLineValidatesInput(t *testing.T) {
 	if err := AppendHotClientEventLine(storeRoot, []byte("123 replay c-mmap-hot-snapshot 9 42\n")); err != nil {
 		t.Fatal(err)
 	}
+	if err := AppendHotClientEventLine(storeRoot, []byte("124 replay c-current-file 0 17\n")); err != nil {
+		t.Fatal(err)
+	}
 	if err := AppendHotClientEventLine(storeRoot, []byte("not an event\n")); err != nil {
 		t.Fatal(err)
 	}
 	stats := LoadHotClientStats(storeRoot)
-	if stats.Replays != 1 {
-		t.Fatalf("replays = %d, want 1", stats.Replays)
+	if stats.Replays != 2 {
+		t.Fatalf("replays = %d, want 2", stats.Replays)
+	}
+	if stats.CurrentFileReplays != 1 {
+		t.Fatalf("current-file replays = %d, want 1", stats.CurrentFileReplays)
 	}
 	if stats.NativeWallAvoidedMS != 9 {
 		t.Fatalf("native avoided = %d, want 9", stats.NativeWallAvoidedMS)
 	}
-	if stats.ReplayWallUS != 42 {
-		t.Fatalf("replay wall = %d, want 42", stats.ReplayWallUS)
+	if stats.ReplayWallUS != 59 {
+		t.Fatalf("replay wall = %d, want 59", stats.ReplayWallUS)
 	}
 }

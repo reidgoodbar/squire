@@ -28,6 +28,9 @@ type MaintainerReport struct {
 	FastPathPrepared        int       `json:"fast_path_prepared"`
 	ProofGatedPrewarmed     int       `json:"proof_gated_prewarmed"`
 	PreparedEntriesObserved int       `json:"prepared_entries_observed"`
+	PrepareRequestsObserved int       `json:"prepare_requests_observed"`
+	PrepareRequestsPrepared int       `json:"prepare_requests_prepared"`
+	PrepareRequestsRejected int       `json:"prepare_requests_rejected"`
 	LastSignal              string    `json:"last_signal,omitempty"`
 	LastWorkspaceEpoch      string    `json:"last_workspace_epoch,omitempty"`
 	LastMaintainedAt        time.Time `json:"last_maintained_at,omitempty"`
@@ -83,6 +86,17 @@ func (k *Engine) RunMaintainer(ctx context.Context, cwd string, opts MaintainerO
 		report.HotCacheSocket = server.socketPath
 		defer server.Close()
 	}
+	recordRequests := func(requests prepareRequestCycle, requestErr error) {
+		report.PrepareRequestsObserved += requests.Observed
+		report.PrepareRequestsPrepared += requests.Prepared
+		report.PrepareRequestsRejected += requests.Rejected
+		if requestErr != nil {
+			report.Diagnostics = append(report.Diagnostics, requestErr.Error())
+		}
+		if requests.Prepared > 0 {
+			report.LastMaintainedAt = time.Now()
+		}
+	}
 	for {
 		cycleStart := time.Now()
 		ws := k.Oracle.ShadowSnapshot(ctx, cwd)
@@ -109,6 +123,7 @@ func (k *Engine) RunMaintainer(ctx context.Context, cwd string, opts MaintainerO
 			report.RepoRoot = warm.RepoRoot
 			report.OracleAvailable = warm.OracleAvailable
 		}
+		recordRequests(k.consumePrepareRequests(ctx, 32))
 		report.LastSignal = signal
 		if opts.MaxCycles > 0 && report.PollCycles >= opts.MaxCycles {
 			return report, nil
@@ -118,11 +133,24 @@ func (k *Engine) RunMaintainer(ctx context.Context, cwd string, opts MaintainerO
 			wait = 0
 		}
 		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return report, nil
-		case <-timer.C:
+		demandInterval := 100 * time.Millisecond
+		if wait > 0 && wait < demandInterval {
+			demandInterval = wait
+		}
+		demand := time.NewTicker(demandInterval)
+	waitLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				demand.Stop()
+				return report, nil
+			case <-timer.C:
+				demand.Stop()
+				break waitLoop
+			case <-demand.C:
+				recordRequests(k.consumePrepareRequests(ctx, 32))
+			}
 		}
 	}
 }

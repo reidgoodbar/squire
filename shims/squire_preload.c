@@ -736,13 +736,15 @@ static int shell_eval_copy_bytes(byte_buf *dst, const unsigned char *data, uint3
 	return bytes_append(dst, data, len);
 }
 
-static int shell_append_sed_range(byte_buf *out, const unsigned char *content, uint32_t len, int start, int end) {
-	if (start <= 0 || end < start) {
+static int shell_append_line_selection(byte_buf *out, const unsigned char *content, uint32_t len,
+                                       const line_selection *selection, size_t max_output) {
+	if (selection == NULL || selection->count <= 0) {
 		return 0;
 	}
 	int line = 1;
+	int max_end = line_selection_max_end(selection);
 	uint32_t offset = 0;
-	while (offset < len) {
+	while (offset < len && line <= max_end) {
 		uint32_t line_end = offset;
 		while (line_end < len && content[line_end] != '\n') {
 			line_end++;
@@ -751,18 +753,26 @@ static int shell_append_sed_range(byte_buf *out, const unsigned char *content, u
 		if (line_end < len && content[line_end] == '\n') {
 			write_end = line_end + 1;
 		}
-		if (line >= start && line <= end) {
-			if (!shell_eval_copy_bytes(out, content + offset, write_end - offset)) {
+		int matches = line_selection_match_count(selection, line);
+		for (int match = 0; match < matches; match++) {
+			size_t line_len = write_end - offset;
+			if ((max_output > 0 && (out->len > max_output || line_len > max_output - out->len)) ||
+			    !shell_eval_copy_bytes(out, content + offset, (uint32_t)line_len)) {
 				return 0;
 			}
-		}
-		if (line > end) {
-			break;
 		}
 		line++;
 		offset = write_end;
 	}
 	return 1;
+}
+
+static int shell_append_sed_range(byte_buf *out, const unsigned char *content, uint32_t len, int start, int end) {
+	line_selection selection = {0};
+	selection.ranges[0].start = start;
+	selection.ranges[0].end = end;
+	selection.count = 1;
+	return shell_append_line_selection(out, content, len, &selection, MAX_COMPOSED_INTERMEDIATE_BYTES);
 }
 
 static int shell_append_tail_lines(byte_buf *out, const unsigned char *content, uint32_t len, int count) {
@@ -918,8 +928,8 @@ static int shell_prepare_warm_file_output(int argc, char **argv, shell_eval_resu
 		return 0;
 	}
 	char key[HASH_HEX], epoch[256], path[PATH_BUF];
-	int sed_start = 0, sed_end = 0, line_count = 0;
-	if (!warm_file_proof(&inv, key, epoch, path, &sed_start, &sed_end, &line_count)) {
+	warm_file_operation operation;
+	if (!warm_file_proof(&inv, key, epoch, path, &operation, NULL, NULL, NULL)) {
 		unmap_snapshot(&snap);
 		return 0;
 	}
@@ -937,25 +947,28 @@ static int shell_prepare_warm_file_output(int argc, char **argv, shell_eval_resu
 		return 0;
 	}
 	int ok = 0;
-	if (strcmp(inv.argv[0], "cat") == 0) {
+	if (operation.kind == WARM_FILE_OPERATION_CAT) {
 		ok = shell_eval_copy_bytes(&out->stdout_buf, content, content_len);
 		out->exit_code = 0;
-	} else if (strcmp(inv.argv[0], "sed") == 0) {
-		ok = shell_append_sed_range(&out->stdout_buf, content, content_len, sed_start, sed_end);
+	} else if (operation.kind == WARM_FILE_OPERATION_SED) {
+		ok = shell_append_line_selection(&out->stdout_buf, content, content_len,
+		                                 &operation.selection, MAX_FILE_OUTPUT_BYTES);
 		out->exit_code = 0;
-	} else if (strcmp(inv.argv[0], "head") == 0) {
-		ok = shell_append_sed_range(&out->stdout_buf, content, content_len, 1, line_count);
+	} else if (operation.kind == WARM_FILE_OPERATION_HEAD) {
+		line_selection selection = {0};
+		selection.ranges[0].start = 1;
+		selection.ranges[0].end = operation.line_count;
+		selection.count = 1;
+		ok = shell_append_line_selection(&out->stdout_buf, content, content_len, &selection, MAX_FILE_OUTPUT_BYTES);
 		out->exit_code = 0;
-	} else if (strcmp(inv.argv[0], "tail") == 0) {
-		ok = shell_append_tail_lines(&out->stdout_buf, content, content_len, line_count);
+	} else if (operation.kind == WARM_FILE_OPERATION_TAIL) {
+		ok = shell_append_tail_lines(&out->stdout_buf, content, content_len, operation.line_count) &&
+		     out->stdout_buf.len <= MAX_FILE_OUTPUT_BYTES;
 		out->exit_code = 0;
-	} else if (strcmp(inv.argv[0], "grep") == 0) {
-		const char *pattern = NULL;
-		const char *grep_path = NULL;
-		int quiet = 0;
+	} else if (operation.kind == WARM_FILE_OPERATION_GREP) {
 		int matched = 0;
-		ok = parse_fixed_grep_args(&inv, &pattern, &grep_path, &quiet) &&
-		     shell_append_fixed_grep(&out->stdout_buf, content, content_len, pattern, quiet, &matched);
+		ok = shell_append_fixed_grep(&out->stdout_buf, content, content_len,
+		                             operation.pattern, operation.quiet, &matched);
 		out->exit_code = matched ? 0 : 1;
 	}
 	if (ok) {
@@ -1985,8 +1998,8 @@ static int emit_synthetic_warm_file_replay(int argc, char **argv, const posix_sp
 		return 0;
 	}
 	char key[HASH_HEX], epoch[256], path[PATH_BUF];
-	int sed_start = 0, sed_end = 0, line_count = 0;
-	if (!warm_file_proof(&inv, key, epoch, path, &sed_start, &sed_end, &line_count)) {
+	warm_file_operation operation;
+	if (!warm_file_proof(&inv, key, epoch, path, &operation, NULL, NULL, NULL)) {
 		unmap_snapshot(&snap);
 		return 0;
 	}
@@ -2006,21 +2019,21 @@ static int emit_synthetic_warm_file_replay(int argc, char **argv, const posix_sp
 	byte_buf out = {0};
 	int exit_code = 0;
 	int ok = 0;
-	if (strcmp(inv.argv[0], "cat") == 0) {
+	if (operation.kind == WARM_FILE_OPERATION_CAT) {
 		ok = shell_eval_copy_bytes(&out, content, content_len);
-	} else if (strcmp(inv.argv[0], "sed") == 0) {
-		ok = shell_append_sed_range(&out, content, content_len, sed_start, sed_end);
-	} else if (strcmp(inv.argv[0], "head") == 0) {
-		ok = shell_append_sed_range(&out, content, content_len, 1, line_count);
-	} else if (strcmp(inv.argv[0], "tail") == 0) {
-		ok = shell_append_tail_lines(&out, content, content_len, line_count);
-	} else if (strcmp(inv.argv[0], "grep") == 0) {
-		const char *pattern = NULL;
-		const char *grep_path = NULL;
-		int quiet = 0;
+	} else if (operation.kind == WARM_FILE_OPERATION_SED) {
+		ok = shell_append_line_selection(&out, content, content_len, &operation.selection, MAX_FILE_OUTPUT_BYTES);
+	} else if (operation.kind == WARM_FILE_OPERATION_HEAD) {
+		line_selection selection = {0};
+		selection.ranges[0].start = 1;
+		selection.ranges[0].end = operation.line_count;
+		selection.count = 1;
+		ok = shell_append_line_selection(&out, content, content_len, &selection, MAX_FILE_OUTPUT_BYTES);
+	} else if (operation.kind == WARM_FILE_OPERATION_TAIL) {
+		ok = shell_append_tail_lines(&out, content, content_len, operation.line_count) && out.len <= MAX_FILE_OUTPUT_BYTES;
+	} else if (operation.kind == WARM_FILE_OPERATION_GREP) {
 		int matched = 0;
-		ok = parse_fixed_grep_args(&inv, &pattern, &grep_path, &quiet) &&
-		     shell_append_fixed_grep(&out, content, content_len, pattern, quiet, &matched);
+		ok = shell_append_fixed_grep(&out, content, content_len, operation.pattern, operation.quiet, &matched);
 		exit_code = matched ? 0 : 1;
 	}
 	if (!ok) {

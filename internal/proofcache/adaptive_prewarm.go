@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -69,7 +68,7 @@ func (k *Engine) prewarmProofGatedCandidate(ctx context.Context, cwd, sessionID 
 		return false
 	}
 	native := runProofGatedNative(ctx, cwd, argv)
-	if native.ExitCode != 0 || proofGatedWarmBlocked(cwd, argv) {
+	if !proofGatedNativeResultCacheable(argv, native) || proofGatedWarmBlocked(cwd, argv) {
 		return false
 	}
 	afterFPS, afterEpoch, afterOK := preparedHotProof(cwd, argv)
@@ -95,7 +94,7 @@ func (k *Engine) prewarmProofGatedCandidate(ctx context.Context, cwd, sessionID 
 	epoch := invalidationEpoch(op, ws)
 	warmFilePrepared := false
 	if isReplayableFileInspection(argv) {
-		warmFilePrepared = k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "adaptive file bytes prepared for arbitrary bounded sed/cat replay; native fallback still available")
+		warmFilePrepared = k.prepareWarmFileFromCommand(cwd, argv, ws, ledger, phases, "adaptive file bytes prepared for arbitrary bounded cat/sed/head/tail/nl/grep/rg replay; native fallback still available")
 	}
 	if err := k.storeReplayableObservation(argv, sessionID, cwd, native, ws, ledger, phases, ModeNative); err != nil {
 		return warmFilePrepared
@@ -139,10 +138,12 @@ func adaptiveSedPrewarmCandidates(argv []string) [][]string {
 	if !isBoundedSedPrint(argv) {
 		return nil
 	}
-	start, end, ok := parseSedPrintRange(argv[2])
+	selection, ok := parseSedPrintSelection(argv[2])
 	if !ok {
 		return nil
 	}
+	start := selection.minStart()
+	end := selection.maxEnd()
 	path := argv[3]
 	width := end - start + 1
 	if width < 80 {
@@ -272,31 +273,4 @@ func dedupeAdaptiveCandidates(candidates [][]string) [][]string {
 		out = append(out, candidate)
 	}
 	return out
-}
-
-func parseSedPrintRange(expr string) (int, int, bool) {
-	if !strings.HasSuffix(expr, "p") {
-		return 0, 0, false
-	}
-	body := strings.TrimSuffix(expr, "p")
-	parts := strings.Split(body, ",")
-	if len(parts) > 2 {
-		return 0, 0, false
-	}
-	start, ok := parsePositiveSmallLine(parts[0])
-	if !ok {
-		return 0, 0, false
-	}
-	end := start
-	if len(parts) == 2 {
-		var endOK bool
-		end, endOK = parsePositiveSmallLine(parts[1])
-		if !endOK {
-			return 0, 0, false
-		}
-	}
-	if start > end {
-		return 0, 0, false
-	}
-	return start, end, true
 }

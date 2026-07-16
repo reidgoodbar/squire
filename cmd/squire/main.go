@@ -477,7 +477,7 @@ available, tries the same mmap proof before selected exec calls, and falls
 through to native exec on any miss. For known unsafe launchers, or when preload
 is unavailable, the session runs native with no command interception. The
 command and anything it launches still emits ordinary commands such as git,
-cat, sed, node, or python; the model never has to call Squire.
+cat, sed, nl, node, or python; the model never has to call Squire.
 
 --preload requires the preload transport for any launcher and errors if the
 local library is not available.

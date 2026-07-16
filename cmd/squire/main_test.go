@@ -1170,6 +1170,7 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		HotClientGoReplays:           0,
 		HotClientPreparedReplays:     0,
 		HotClientSyntheticReplays:    1,
+		HotClientCurrentFileReplays:  1,
 		HotClientNativeFallbacks:     0,
 		HotClientNativeAvoidedMS:     9,
 		HotClientReplayWallUS:        1200,
@@ -1195,6 +1196,7 @@ func TestBoostStatusOutputFormats(t *testing.T) {
 		"native_fallbacks: 2",
 		"hot_client_replays: 1",
 		"hot_client_synthetic_replays: 1",
+		"hot_client_current_file_replays: 1",
 		"hot_client_replay_wall_avg_us: 1200",
 		"hot_client_net_saved_measured_ms: 8",
 		"hot_client_event_log_path: /tmp/squire/hot_client_events.log",
@@ -1229,12 +1231,13 @@ func TestHotEventPipeRecordsValidReplayEvents(t *testing.T) {
 	}
 	_, _ = pipe.writer.WriteString("123 replay c-mmap-hot-snapshot 7 11\n")
 	_, _ = pipe.writer.WriteString("124 replay c-mmap-hot-synthetic 9 13\n")
+	_, _ = pipe.writer.WriteString("125 replay c-current-file 0 17\n")
 	_, _ = pipe.writer.WriteString("not an event\n")
 	_ = pipe.writer.Close()
 	finishHotEventPipe(pipe)
 	stats := proofcache.LoadHotClientStats(storeRoot)
-	if stats.Replays != 2 {
-		t.Fatalf("replays = %d, want 2", stats.Replays)
+	if stats.Replays != 3 {
+		t.Fatalf("replays = %d, want 3", stats.Replays)
 	}
 	if stats.PreparedChildReplays != 1 {
 		t.Fatalf("prepared replays = %d, want 1", stats.PreparedChildReplays)
@@ -1242,11 +1245,14 @@ func TestHotEventPipeRecordsValidReplayEvents(t *testing.T) {
 	if stats.SyntheticReplays != 1 {
 		t.Fatalf("synthetic replays = %d, want 1", stats.SyntheticReplays)
 	}
+	if stats.CurrentFileReplays != 1 {
+		t.Fatalf("current-file replays = %d, want 1", stats.CurrentFileReplays)
+	}
 	if stats.NativeWallAvoidedMS != 16 {
 		t.Fatalf("native wall avoided = %d, want 16", stats.NativeWallAvoidedMS)
 	}
-	if stats.ReplayWallUS != 24 {
-		t.Fatalf("replay wall = %d, want 24", stats.ReplayWallUS)
+	if stats.ReplayWallUS != 41 {
+		t.Fatalf("replay wall = %d, want 41", stats.ReplayWallUS)
 	}
 }
 

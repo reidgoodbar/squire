@@ -40,6 +40,7 @@ type BoostStatusReport struct {
 	HotClientGoReplays           int            `json:"hot_client_go_replays"`
 	HotClientPreparedReplays     int            `json:"hot_client_prepared_replays"`
 	HotClientSyntheticReplays    int            `json:"hot_client_synthetic_replays"`
+	HotClientCurrentFileReplays  int            `json:"hot_client_current_file_replays"`
 	HotClientNativeFallbacks     int            `json:"hot_client_native_fallbacks"`
 	HotClientNativeAvoidedMS     int64          `json:"hot_client_native_avoided_ms"`
 	HotClientReplayWallUS        int64          `json:"hot_client_replay_wall_us"`
@@ -375,6 +376,7 @@ func BoostStatusReportForStore(ctx context.Context, cwd, storeRoot string) (Boos
 		HotClientGoReplays:          hotStats.GoClientReplays,
 		HotClientPreparedReplays:    hotStats.PreparedChildReplays,
 		HotClientSyntheticReplays:   hotStats.SyntheticReplays,
+		HotClientCurrentFileReplays: hotStats.CurrentFileReplays,
 		HotClientNativeFallbacks:    hotStats.NativeFallbacks,
 		HotClientNativeAvoidedMS:    hotStats.NativeWallAvoidedMS,
 		HotClientReplayWallUS:       hotStats.ReplayWallUS,
@@ -418,6 +420,7 @@ func FormatBoostStatusReport(report BoostStatusReport) string {
 	fmt.Fprintf(&b, "hot_client_go_replays: %d\n", report.HotClientGoReplays)
 	fmt.Fprintf(&b, "hot_client_prepared_replays: %d\n", report.HotClientPreparedReplays)
 	fmt.Fprintf(&b, "hot_client_synthetic_replays: %d\n", report.HotClientSyntheticReplays)
+	fmt.Fprintf(&b, "hot_client_current_file_replays: %d\n", report.HotClientCurrentFileReplays)
 	fmt.Fprintf(&b, "hot_client_native_fallbacks: %d\n", report.HotClientNativeFallbacks)
 	fmt.Fprintf(&b, "hot_client_native_avoided_ms: %d\n", report.HotClientNativeAvoidedMS)
 	fmt.Fprintf(&b, "hot_client_replay_wall_us: %d\n", report.HotClientReplayWallUS)
