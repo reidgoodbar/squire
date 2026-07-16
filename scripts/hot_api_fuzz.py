@@ -669,6 +669,7 @@ def run_generalized_repo_search_probe(
     repo: Path,
     env: dict[str, str],
 ) -> dict[str, Any]:
+    rg_available = shutil.which("rg") is not None
     cases = [
         Case(
             "repo_regex_roots",
@@ -769,9 +770,13 @@ def run_generalized_repo_search_probe(
     target.write_bytes(original)
     os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
     warm_short(squire, repo, env)
-    safe = all(item["hot"]["hit"] and item["mismatch"] is None for item in results) and not stale["hit"]
+    if rg_available:
+        safe = all(item["hot"]["hit"] and item["mismatch"] is None for item in results) and not stale["hit"]
+    else:
+        safe = all(not item["hot"]["hit"] and item["mismatch"] is None for item in results) and not stale["hit"]
     return {
         "safe": safe,
+        "rg_available": rg_available,
         "cases": [
             {
                 "name": item["case"].name,
@@ -875,6 +880,7 @@ def run_repo_search_differential_fuzz(
     seed: int,
     count: int,
 ) -> dict[str, Any]:
+    rg_available = shutil.which("rg") is not None
     cases = generate_repo_search_fuzz_cases(seed, count)
     results = [run_case(api, repo, case, env) for case in cases]
     hit_us = [item["hot"]["elapsed_us"] for item in results if item["hot"]["hit"]]
@@ -889,8 +895,14 @@ def run_repo_search_differential_fuzz(
     )
     mismatches = [item for item in results if item["mismatch"] is not None]
     misses = [item for item in results if not item["hot"]["hit"]]
+    safe = not mismatches and (
+        (rg_available and not misses)
+        or (not rg_available and len(misses) == len(results))
+    )
     return {
-        "safe": not mismatches and not misses,
+        "safe": safe,
+        "rg_available": rg_available,
+        "expected_decision": "hit" if rg_available else "safe_miss",
         "cases": len(results),
         "hits": len(results) - len(misses),
         "byte_exact": byte_exact,
@@ -910,6 +922,61 @@ def run_repo_search_differential_fuzz(
         ],
         "miss_examples": [list(item["case"].argv) for item in misses[:20]],
     }
+
+
+def run_missing_search_tool_regression(
+    api: HotAPI,
+    repo: Path,
+    env: dict[str, str],
+    work: Path,
+) -> dict[str, Any]:
+    """A supported command must still miss when its native tool is absent."""
+    empty_path = work / "empty-path"
+    empty_path.mkdir(exist_ok=True)
+    tool_keys = {
+        "PATH",
+        "SQUIRE_SHIM_REAL_PATH",
+        "SQUIRE_REAL_RG",
+        "SQUIRE_REAL_RG_PATH_HASH",
+        "SQUIRE_REAL_RG_FILE_HASH",
+        "SQUIRE_REAL_RG_STAT_SIGNAL",
+    }
+    saved = {key: os.environ.get(key) for key in tool_keys}
+    try:
+        for key in tool_keys:
+            os.environ.pop(key, None)
+        os.environ["PATH"] = str(empty_path)
+        missing_env = dict(env)
+        for key in tool_keys:
+            missing_env.pop(key, None)
+        missing_env["PATH"] = str(empty_path)
+        commands = [
+            ("rg", "-n", "missing_tool_probe", "."),
+            ("rg", "-F", "token_3", "README.md"),
+            ("sh", "-c", "rg -n missing_tool_probe . | head -n 1"),
+        ]
+        probes = []
+        for argv in commands:
+            hot = api.try_replay(repo, argv, missing_env)
+            probes.append(
+                {
+                    "argv": list(argv),
+                    "hit": bool(hot["hit"]),
+                    "decision": hot.get("decision"),
+                    "passed": not hot["hit"] and hot.get("decision") == 0,
+                }
+            )
+        return {
+            "safe": shutil.which("rg", path=str(empty_path)) is None
+            and all(probe["passed"] for probe in probes),
+            "probes": probes,
+        }
+    finally:
+        for key in tool_keys:
+            os.environ.pop(key, None)
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
 
 
 def run_git_history_regression(
@@ -1710,6 +1777,7 @@ def run_codex_user_shell_regression(
     must reject any child environment that differs from the process which
     prepared the snapshot.
     """
+    rg_available = shutil.which("rg") is not None
     keys = ("LC_ALL", "LC_CTYPE", "GIT_PAGER", "CODEX_PERMISSION_PROFILE")
     saved = {key: os.environ.get(key) for key in keys}
     try:
@@ -1784,9 +1852,9 @@ def run_codex_user_shell_regression(
             bool(hot["hit"])
             and result["mismatch"] is None
             and not bool(composed_hot["hit"])
-            and bool(irrelevant_parent_direct_hot["hit"])
+            and bool(irrelevant_parent_direct_hot["hit"]) == rg_available
             and irrelevant_parent_direct_result["mismatch"] is None
-            and bool(irrelevant_parent_hot["hit"])
+            and bool(irrelevant_parent_hot["hit"]) == rg_available
             and irrelevant_parent_result["mismatch"] is None
             and not bool(env_probe["hit"])
             and bool(printenv_baseline["hot"]["hit"])
@@ -1801,6 +1869,7 @@ def run_codex_user_shell_regression(
             "hit": bool(hot["hit"]),
             "mismatch": result["mismatch"],
             "safe": safe,
+            "rg_available": rg_available,
             "hot_us": round(hot["elapsed_us"], 3),
             "native_us": round(native["elapsed_us"], 3) if native is not None else None,
             "hot_exit": hot.get("exit_code"),
@@ -1872,6 +1941,8 @@ def run_runtime_policy_regression(api: HotAPI, repo: Path, env: dict[str, str]) 
         ("file", "README.md"),
         ("whoami",),
         ("id",),
+    ]
+    rg_cases = [
         ("rg", "-n", "runtime_policy_(alpha|omega)", ".", "--glob", "!ignored/**"),
         (
             "sh",
@@ -1884,6 +1955,12 @@ def run_runtime_policy_regression(api: HotAPI, repo: Path, env: dict[str, str]) 
             "rg -n 'runtime_policy_(alpha|omega)' .\ngit rev-parse HEAD",
         ),
     ]
+    rg_available = shutil.which("rg") is not None
+    eligible_miss_cases: list[tuple[str, ...]] = []
+    if rg_available:
+        hit_cases.extend(rg_cases)
+    else:
+        eligible_miss_cases.extend(rg_cases)
     unsupported_cases = [
         ("go", "test", "./..."),
         ("rg", "--files"),
@@ -1925,6 +2002,18 @@ def run_runtime_policy_regression(api: HotAPI, repo: Path, env: dict[str, str]) 
                 "passed": passed,
             }
         )
+    for argv in eligible_miss_cases:
+        hot = api.try_replay(repo, argv, env)
+        passed = not hot["hit"] and hot.get("decision") == 0
+        safe = safe and passed
+        results.append(
+            {
+                "argv": list(argv),
+                "expected": "eligible_miss",
+                "decision": hot.get("decision"),
+                "passed": passed,
+            }
+        )
     mismatched_env = dict(env)
     mismatched_env["PATH"] = "/runtime/policy/mismatch"
     hot = api.try_replay(repo, ("git", "rev-parse", "HEAD"), mismatched_env)
@@ -1938,7 +2027,7 @@ def run_runtime_policy_regression(api: HotAPI, repo: Path, env: dict[str, str]) 
             "passed": passed,
         }
     )
-    return {"safe": safe, "cases": results}
+    return {"safe": safe, "rg_available": rg_available, "cases": results}
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -2068,6 +2157,7 @@ def main() -> int:
     run([str(squire), "runtime", "warm", "--short"], repo, env=env, timeout=120)
 
     api = HotAPI(lib)
+    missing_search_tool_regression = run_missing_search_tool_regression(api, repo, env, work)
     generalized_repo_search = run_generalized_repo_search_probe(api, squire, repo, env)
     repo_search_differential_fuzz = run_repo_search_differential_fuzz(
         api,
@@ -2209,6 +2299,7 @@ def main() -> int:
         and codex_user_shell_regression["safe"]
         and runtime_policy_regression["safe"]
         and current_file_execution["safe"]
+        and missing_search_tool_regression["safe"]
         and generalized_repo_search["safe"]
         and repo_search_differential_fuzz["safe"]
         and demand_preparation["safe"]
@@ -2246,6 +2337,7 @@ def main() -> int:
         "codex_user_shell_regression": codex_user_shell_regression,
         "runtime_policy_regression": runtime_policy_regression,
         "current_file_execution": current_file_execution,
+        "missing_search_tool_regression": missing_search_tool_regression,
         "generalized_repo_search": generalized_repo_search,
         "repo_search_differential_fuzz": repo_search_differential_fuzz,
         "demand_preparation": demand_preparation,

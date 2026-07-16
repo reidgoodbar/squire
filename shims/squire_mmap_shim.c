@@ -5160,6 +5160,11 @@ static int warm_file_proof(policy_invocation *inv, char key[HASH_HEX], char epoc
 	if (!parse_warm_file_operation(inv, &operation)) {
 		return 0;
 	}
+	const char *tool_name = base_name(inv->argv[0]);
+	executable_signal tool;
+	if (tool_name == NULL || !executable_signal_for(inv->cwd, tool_name, &tool)) {
+		return 0;
+	}
 	if (content_out != NULL) {
 		*content_out = NULL;
 	}
