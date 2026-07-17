@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"squire.run/internal/green"
 	"squire.run/internal/proofcache"
 )
 
@@ -67,6 +68,32 @@ func main() {
 			break
 		}
 		out, err = runProductStatus(ctx, cwd, storeRoot, format)
+	case len(args) >= 1 && args[0] == "verify":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[1:], outputShort)
+		if err != nil {
+			break
+		}
+		var verified bool
+		out, verified, err = runProductVerify(ctx, cwd, storeRoot, format)
+		if err == nil && !verified {
+			fmt.Print(out)
+			os.Exit(1)
+		}
+	case len(args) >= 2 && args[0] == "green" && args[1] == "trust":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[2:], outputShort)
+		if err != nil {
+			break
+		}
+		out, err = runProductGreenTrust(ctx, cwd, storeRoot, format)
+	case len(args) >= 2 && args[0] == "green" && args[1] == "revoke":
+		var format outputFormat
+		format, err = outputFormatFromTrailingArgsDefault(args[2:], outputShort)
+		if err != nil {
+			break
+		}
+		out, err = runProductGreenRevoke(ctx, cwd, storeRoot, format)
 	case len(args) >= 1 && args[0] == "prepare":
 		enableSquireOwnedGitReads()
 		out, err = runProductPrepare(ctx, cwd, storeRoot, args[1:])
@@ -199,6 +226,9 @@ func main() {
 		os.Exit(2)
 	case args[0] == "boost":
 		fatalUsage(boostUsageError(args[1:]))
+		os.Exit(2)
+	case args[0] == "green":
+		fatalUsage(`invalid green command (try "squire help green")`)
 		os.Exit(2)
 	case args[0] == "vm":
 		fatalUsage(vmUsageError(args[1:]))
@@ -352,6 +382,9 @@ func usageText() string {
 usage:
   squire codex [codex args...]
   squire status [--short|--json]
+  squire verify [--short|--json]
+  squire green trust [--short|--json]
+  squire green revoke [--short|--json]
   squire doctor [--short|--json]
   squire explain -- <command> [args...]
   squire prepare [--short|--json]
@@ -368,6 +401,8 @@ start:
 help:
   squire help codex
   squire help status
+  squire help verify
+  squire help green
   squire help explain
   squire help advanced
 `
@@ -418,6 +453,24 @@ Examples:
 
 Shows the active workspace, preparation state, hit/miss counters, replay
 latency, correctness diagnostics, and native fallback readiness.
+`
+	case "verify":
+		return `usage:
+  squire verify [--short|--json]
+
+Reports whether every required Squire Green check is current and passing for
+its declared input proof. It does not rerun stale checks in the foreground.
+The command exits nonzero unless the repository is Green.
+`
+	case "green", "green trust", "green revoke":
+		return `usage:
+  squire green trust [--short|--json]
+  squire green revoke [--short|--json]
+
+Trusts or revokes the exact hash of .squire/checks.toml for the current
+repository. Green never executes repository-provided validation commands until
+that exact config has been reviewed and trusted. Any config change revokes the
+approval automatically.
 `
 	case "prepare":
 		return `usage:
@@ -754,9 +807,28 @@ func runMaintain(ctx context.Context, cwd, storeRoot string, args []string) (str
 		if err != nil {
 			return "", err
 		}
+		greenRoot := cwd
+		greenStore := storeRoot
+		if repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd); ok {
+			greenRoot = repoRoot
+			if resolvedStore != "" {
+				greenStore = resolvedStore
+			}
+		}
+		greenCtx, cancelGreen := context.WithCancel(ctx)
+		greenDone := make(chan green.SchedulerReport, 1)
+		go func() {
+			report, _ := green.RunScheduler(greenCtx, greenRoot, greenStore, green.SchedulerOptions{})
+			greenDone <- report
+		}()
 		report, err := proofcache.Maintain(ctx, cwd, storeRoot, opts)
+		cancelGreen()
+		greenReport := <-greenDone
 		if err != nil {
 			return "", err
+		}
+		for _, diagnostic := range greenReport.Errors {
+			report.Diagnostics = append(report.Diagnostics, "Green: "+diagnostic)
 		}
 		return maintainerReportOut(report, format), nil
 	}

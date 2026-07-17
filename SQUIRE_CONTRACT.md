@@ -1,9 +1,9 @@
 # Squire Contract
 
-Squire is a transparent local execution accelerator for coding agents. The
-agent chooses an ordinary command. Squire may serve its exact result when the
-current machine state proves a prepared observation is still valid. Otherwise
-the agent runtime executes the original command normally.
+Squire is a transparent local execution and verification layer for coding
+agents. The agent chooses an ordinary command. Squire may serve its exact result
+when the current machine state proves a prepared observation is still valid.
+Otherwise the agent runtime executes the original command normally.
 
 ## Product Boundary
 
@@ -33,6 +33,10 @@ The adapter, not Squire, owns native fallback. This preserves the runtime's
 existing approvals, sandbox, timeout, cancellation, streaming, and process
 lifecycle behavior.
 
+Squire Green is a separate correctness oracle. It executes only explicitly
+declared and locally trusted validation commands as native background
+processes. Green results are never terminal-command replay entries.
+
 ## Invariants
 
 1. The agent's command text and intent are unchanged.
@@ -44,6 +48,35 @@ lifecycle behavior.
 7. A composed command is accelerated only when the complete parsed plan is
    supported and every source has a valid proof.
 8. Native fallback remains available even when every Squire component fails.
+
+## Continuous Verification Contract
+
+Green reads `.squire/checks.toml` only at the canonical repository root. The
+exact config digest must have a matching owner-only local trust record before
+any declared command executes. A config change revokes trust automatically.
+
+A published validation result is bound to the config, command argv, canonical
+cwd, declared input path set and content hashes, normalized child environment,
+and primary executable identity. It is current only while those declared inputs
+still match. The observed global workspace epoch is provenance; the narrower
+declared-input proof is validity authority, so unrelated edits do not make all
+checks stale.
+
+Checks execute natively with bounded concurrency, timeout, and reduced process
+priority. Filesystem notifications schedule work but do not prove it. Green
+hashes before and after execution and keeps a relevant mutation guard active in
+between. Any mutation event, queue failure, unstable read, proof mismatch,
+timeout of the proof operation, or unavailable guard prevents a passing result
+from being published. A native nonzero exit is a current failure only when the
+same before/after proof succeeds.
+
+`squire verify` exits zero only when every required check is trusted, current,
+and passing. Green stores output hashes and byte counts, not native stdout or
+stderr content, and never serves a prior validation result as command output.
+
+Green proves the user-declared dependency scope, not arbitrary process
+hermeticity. Network services, clocks, undeclared files, and secondary tools
+remain outside the proof unless the check contract represents them.
 
 ## Validity Proof
 
@@ -217,6 +250,9 @@ A release must pass:
   payloads, call count, and function-output order, with both order-specific
   paired savings intervals above zero and larger than measured same-arm mean
   order bias; interleaved A/A and B/B controls remain visible in the report;
+- Green trust, selective invalidation, same-size/mtime-restored rewrite,
+  in-flight change-and-revert, timeout, symlink escape, config-change, and
+  event-driven scheduling tests;
 - an artifact-level install smoke that verifies the driver, code-mode helper,
   runtime library, and `squire doctor` together.
 

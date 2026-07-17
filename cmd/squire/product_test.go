@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"squire.run/internal/green"
 	"squire.run/internal/proofcache"
 	squireruntime "squire.run/internal/runtime"
 )
@@ -81,6 +82,133 @@ func TestProductStatusReportsProductionRuntimeLanes(t *testing.T) {
 		if strings.Contains(lanes, removed) {
 			t.Fatalf("production lanes include disabled slow probe %q: %s", removed, lanes)
 		}
+	}
+}
+
+func TestProductVerifyReportsGreenAndStatusIncludesChecks(t *testing.T) {
+	repo := initAdapterGitRepo(t)
+	_, storeRoot, ok := proofcache.FastWorkspace(repo)
+	if !ok {
+		t.Fatal("test repository was not discovered")
+	}
+	configDir := filepath.Join(repo, ".squire")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `version = 1
+
+[[check]]
+name = "tests"
+command = ["git", "diff", "--check"]
+inputs = ["README.md"]
+`
+	if err := os.WriteFile(filepath.Join(configDir, "checks.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := green.TrustConfig(repo, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := green.RunPending(context.Background(), repo, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	out, verified, err := runProductVerify(context.Background(), repo, storeRoot, outputShort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verified || !strings.Contains(out, "SQUIRE GREEN") || !strings.Contains(out, "tests: PASS current") {
+		t.Fatalf("verify output = %q, verified=%t", out, verified)
+	}
+	statusJSON, err := runProductStatus(context.Background(), repo, storeRoot, outputJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status productStatusReport
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Verification.Green || len(status.Verification.Checks) != 1 {
+		t.Fatalf("product status verification = %+v", status.Verification)
+	}
+}
+
+func TestProductVerifyUnconfiguredIsNonGreen(t *testing.T) {
+	repo := initAdapterGitRepo(t)
+	out, verified, err := runProductVerify(context.Background(), repo, proofcache.DefaultStoreRoot(repo), outputShort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified || !strings.Contains(out, "SQUIRE UNCONFIGURED") || !strings.Contains(out, green.ConfigRelativePath) {
+		t.Fatalf("unconfigured verify output = %q, verified=%t", out, verified)
+	}
+}
+
+func TestProductGreenTrustAndRevokeExactConfig(t *testing.T) {
+	repo := initAdapterGitRepo(t)
+	_, storeRoot, ok := proofcache.FastWorkspace(repo)
+	if !ok {
+		t.Fatal("test repository was not discovered")
+	}
+	configDir := filepath.Join(repo, ".squire")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "checks.toml")
+	config := "[[check]]\nname = \"tests\"\ncommand = [\"git\", \"diff\", \"--check\"]\ninputs = [\"README.md\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runProductGreenTrust(context.Background(), repo, storeRoot, outputShort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "config trusted") || !strings.Contains(out, "git") {
+		t.Fatalf("trust output = %q", out)
+	}
+	loaded, err := green.LoadConfig(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, err := green.ConfigTrusted(repo, storeRoot, loaded.Digest)
+	if err != nil || !trusted {
+		t.Fatalf("trusted=%t err=%v", trusted, err)
+	}
+	if _, err := runProductGreenRevoke(context.Background(), repo, storeRoot, outputShort); err != nil {
+		t.Fatal(err)
+	}
+	trusted, err = green.ConfigTrusted(repo, storeRoot, loaded.Digest)
+	if err != nil || trusted {
+		t.Fatalf("trusted after revoke=%t err=%v", trusted, err)
+	}
+}
+
+func TestResidentMaintainerRunsGreenAutomatically(t *testing.T) {
+	repo := initAdapterGitRepo(t)
+	storeRoot := proofcache.DefaultStoreRoot(repo)
+	configDir := filepath.Join(repo, ".squire")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `version = 1
+quiescence = "100ms"
+poll_interval = "100ms"
+
+[[check]]
+name = "tests"
+command = ["git", "diff", "--check"]
+inputs = ["README.md"]
+`
+	if err := os.WriteFile(filepath.Join(configDir, "checks.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := green.TrustConfig(repo, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runMaintain(context.Background(), repo, storeRoot, []string{"--duration", "1s", "--poll-interval", "100ms", "--short"}); err != nil {
+		t.Fatal(err)
+	}
+	status := green.Inspect(context.Background(), repo, storeRoot)
+	if !status.Green {
+		t.Fatalf("resident maintainer did not publish Green: %+v", status)
 	}
 }
 

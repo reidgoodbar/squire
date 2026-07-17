@@ -41,6 +41,11 @@ vendored Squire modules, whose source of truth is this repository.
 - atomically publishes `hot_snapshot.bin`;
 - exposes `status`, `doctor`, `explain`, and background preparation.
 
+The same resident maintainer hosts Squire Green. Green watches trusted declared
+validation inputs, schedules native checks after quiescence, and publishes
+current pass/fail state only when before/after input proofs match. Its result
+store is separate from replay observations; validation output is never replayed.
+
 `libsquire_runtime` is the C data plane:
 
 - implements versioned runtime ABI 1;
@@ -176,7 +181,11 @@ Normal commands:
 squire doctor
 squire status --json
 squire explain -- git status --short
+squire verify
 ```
+
+Green configuration and its explicit trust boundary are documented in
+[GREEN.md](GREEN.md).
 
 Backend diagnostics remain under `squire help advanced`, including runtime,
 boost, scoped-session, benchmark, and VM commands. They are retained for

@@ -1,6 +1,8 @@
 # Squire
 
-Squire is a transparent local execution accelerator for coding agents.
+Squire is a transparent local execution and verification layer for coding
+agents. It keeps common repository reads hot and continuously maintains whether
+the current declared workspace state is verified.
 
 The agent keeps using ordinary terminal commands. Before Codex starts a local
 read-only command, Squire checks current state and either replays a proven mmap
@@ -50,6 +52,34 @@ squire status
 squire status --json
 squire explain -- git status --short
 ```
+
+## Continuous Verification
+
+Squire Green runs declared tests, lint, typechecks, and builds natively in the
+background after repository edits settle. Each result is bound to the exact
+declared input bytes, check configuration, environment, and executable. A
+later relevant edit makes that result stale; unrelated edits do not.
+
+```toml
+# .squire/checks.toml
+[[check]]
+name = "tests"
+command = ["go", "test", "./..."]
+inputs = ["**/*.go", "go.mod", "go.sum"]
+timeout = "10m"
+```
+
+Repository-provided commands never run silently on first use. Review the file
+and trust its exact hash once:
+
+```sh
+squire green trust
+squire verify
+```
+
+Any config change revokes trust. `squire codex` then schedules trusted checks
+automatically; no second daemon or warm command is required. See
+[docs/GREEN.md](docs/GREEN.md) for configuration and proof semantics.
 
 ## What It Accelerates
 

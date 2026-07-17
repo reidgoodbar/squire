@@ -78,6 +78,88 @@ require_contains "$start_out" "running: true" "maintainer start"
 require_contains "$start_out" "native_fallback: true" "maintainer start"
 require_contains "$start_out" "agent_visible_suggestions: false" "maintainer start"
 
+mkdir -p .squire
+cat > .squire/checks.toml <<'EOF'
+version = 1
+quiescence = "500ms"
+poll_interval = "5s"
+
+[[check]]
+name = "git-diff-check"
+command = ["sh", "-c", "sleep 0.3; git diff --check"]
+inputs = ["README.md"]
+timeout = "30s"
+EOF
+
+if "$squire_bin" verify --short >"$tmpdir/verify-untrusted.out" 2>&1; then
+  echo "release smoke failed: untrusted Green config verified successfully" >&2
+  exit 1
+fi
+verify_untrusted=$(cat "$tmpdir/verify-untrusted.out")
+require_contains "$verify_untrusted" "SQUIRE UNTRUSTED" "Green untrusted gate"
+
+trust_out=$("$squire_bin" green trust --short)
+require_contains "$trust_out" "config trusted" "Green trust"
+require_contains "$trust_out" "git-diff-check" "Green trust check list"
+
+green_ready=0
+green_attempt=0
+while [ "$green_attempt" -lt 100 ]; do
+  if "$squire_bin" verify --short >"$tmpdir/verify-green.out" 2>&1; then
+    green_ready=1
+    break
+  fi
+  green_attempt=$((green_attempt + 1))
+  sleep 0.1
+done
+if [ "$green_ready" -ne 1 ]; then
+  echo "release smoke failed: trusted Green check did not become current" >&2
+  cat "$tmpdir/verify-green.out" >&2 || true
+  exit 1
+fi
+verify_green=$(cat "$tmpdir/verify-green.out")
+require_contains "$verify_green" "SQUIRE GREEN" "Green current state"
+require_contains "$verify_green" "git-diff-check: PASS current" "Green current check"
+
+printf "changed\n" >> README.md
+if "$squire_bin" verify --short >"$tmpdir/verify-stale.out" 2>&1; then
+  echo "release smoke failed: changed Green input remained current" >&2
+  exit 1
+fi
+verify_stale=$(cat "$tmpdir/verify-stale.out")
+case "$verify_stale" in
+  *STALE*|*RUNNING*) ;;
+  *)
+    echo "release smoke failed: changed Green input was non-current for an unexpected reason" >&2
+    echo "$verify_stale" >&2
+    exit 1
+    ;;
+esac
+
+green_ready=0
+green_attempt=0
+while [ "$green_attempt" -lt 100 ]; do
+  if "$squire_bin" verify --short >"$tmpdir/verify-green-after-edit.out" 2>&1; then
+    green_ready=1
+    break
+  fi
+  green_attempt=$((green_attempt + 1))
+  sleep 0.1
+done
+if [ "$green_ready" -ne 1 ]; then
+  echo "release smoke failed: changed Green input was not revalidated" >&2
+  cat "$tmpdir/verify-green-after-edit.out" >&2 || true
+  exit 1
+fi
+
+printf "\n" >> .squire/checks.toml
+if "$squire_bin" verify --short >"$tmpdir/verify-revoked.out" 2>&1; then
+  echo "release smoke failed: changed Green config retained trust" >&2
+  exit 1
+fi
+verify_revoked=$(cat "$tmpdir/verify-revoked.out")
+require_contains "$verify_revoked" "SQUIRE UNTRUSTED" "Green config invalidation"
+
 warm_out=$("$squire_bin" runtime warm --short)
 require_contains "$warm_out" "privacy_mode: standard" "warm"
 require_contains "$warm_out" "replay_set_unchanged: true" "warm"

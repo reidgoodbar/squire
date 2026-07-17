@@ -8,8 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
+	"squire.run/internal/green"
 	"squire.run/internal/proofcache"
 	squireruntime "squire.run/internal/runtime"
 )
@@ -61,11 +64,20 @@ type productStatusMetrics struct {
 }
 
 type productStatusReport struct {
-	Product   string                 `json:"product"`
-	Workspace productStatusWorkspace `json:"workspace"`
-	Runtime   productStatusRuntime   `json:"runtime"`
-	Lanes     []productStatusLane    `json:"lanes"`
-	Metrics   productStatusMetrics   `json:"metrics"`
+	Product      string                 `json:"product"`
+	Workspace    productStatusWorkspace `json:"workspace"`
+	Verification green.Report           `json:"verification"`
+	Runtime      productStatusRuntime   `json:"runtime"`
+	Lanes        []productStatusLane    `json:"lanes"`
+	Metrics      productStatusMetrics   `json:"metrics"`
+}
+
+type productGreenTrustReport struct {
+	Trusted      bool     `json:"trusted"`
+	RepoRoot     string   `json:"repo_root"`
+	ConfigPath   string   `json:"config_path"`
+	ConfigDigest string   `json:"config_digest,omitempty"`
+	Checks       []string `json:"checks,omitempty"`
 }
 
 func runProductStatus(ctx context.Context, cwd, storeRoot string, format outputFormat) (string, error) {
@@ -84,13 +96,18 @@ func runProductStatus(ctx context.Context, cwd, storeRoot string, format outputF
 			workspace.State = "ready"
 		}
 	}
+	verification := green.Report{State: "unconfigured"}
+	if workspace.Root != "" {
+		verification = green.Inspect(ctx, workspace.Root, storeRoot)
+	}
 	metrics, err := proofcache.BoostStatusReportForStore(ctx, cwd, storeRoot)
 	if err != nil {
 		return "", err
 	}
 	report := productStatusReport{
-		Product:   "Squire",
-		Workspace: workspace,
+		Product:      "Squire",
+		Workspace:    workspace,
+		Verification: verification,
 		Runtime: productStatusRuntime{
 			ABI:            1,
 			Decision:       "exact_hit_or_native",
@@ -123,7 +140,160 @@ func runProductStatus(ctx context.Context, cwd, storeRoot string, format outputF
 		fmt.Fprintf(&out, "  replay wall average: %dus (%d measured)\n", report.Metrics.ReplayWallAverageUS, report.Metrics.MeasuredReplays)
 	}
 	fmt.Fprintf(&out, "  diagnostic mismatches: %d\n", report.Metrics.DiagnosticMismatches)
+	if report.Verification.Configured {
+		fmt.Fprintf(&out, "  verification: %s (%d/%d current)\n", report.Verification.State, report.Verification.CurrentChecks, len(report.Verification.Checks))
+		for _, check := range report.Verification.Checks {
+			fmt.Fprintf(&out, "    %s: %s\n", check.Name, green.StateLabel(check.State))
+		}
+	} else {
+		fmt.Fprintln(&out, "  verification: unconfigured")
+	}
 	return out.String(), nil
+}
+
+func runProductVerify(ctx context.Context, cwd, storeRoot string, format outputFormat) (string, bool, error) {
+	repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd)
+	if !ok {
+		report := green.Report{State: "outside_workspace", Diagnostics: []string{"current directory is not inside a supported Git worktree"}}
+		if format == outputJSON {
+			return jsonOut(report), false, nil
+		}
+		return formatGreenReport(report), false, nil
+	}
+	if resolvedStore != "" {
+		storeRoot = resolvedStore
+	}
+	report := green.Inspect(ctx, repoRoot, storeRoot)
+	if format == outputJSON {
+		return jsonOut(report), report.Green, nil
+	}
+	return formatGreenReport(report), report.Green, nil
+}
+
+func runProductGreenTrust(ctx context.Context, cwd, storeRoot string, format outputFormat) (string, error) {
+	_ = ctx
+	repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd)
+	if !ok {
+		return "", fmt.Errorf("current directory is not inside a supported Git worktree")
+	}
+	if resolvedStore != "" {
+		storeRoot = resolvedStore
+	}
+	trust, err := green.TrustConfig(repoRoot, storeRoot)
+	if err != nil {
+		return "", err
+	}
+	config, err := green.LoadConfig(repoRoot)
+	if err != nil || config.Digest != trust.ConfigDigest {
+		_ = green.RevokeConfigTrust(storeRoot)
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("Green config changed while trust was being recorded; review and trust it again")
+	}
+	report := productGreenTrustReport{
+		Trusted:      true,
+		RepoRoot:     repoRoot,
+		ConfigPath:   config.Path,
+		ConfigDigest: trust.ConfigDigest,
+	}
+	for _, check := range config.Checks {
+		report.Checks = append(report.Checks, check.Name+": "+displayArgv(check.Command))
+	}
+	if format == outputJSON {
+		return jsonOut(report), nil
+	}
+	var out strings.Builder
+	fmt.Fprintln(&out, "Squire Green config trusted")
+	fmt.Fprintf(&out, "Workspace: %s\n", report.RepoRoot)
+	fmt.Fprintf(&out, "Config: %s\n", report.ConfigPath)
+	fmt.Fprintf(&out, "Digest: %s\n", shortDigest(report.ConfigDigest))
+	for _, check := range report.Checks {
+		fmt.Fprintf(&out, "Check: %s\n", check)
+	}
+	fmt.Fprintln(&out, "Validation runs in the background while squire codex is active.")
+	return out.String(), nil
+}
+
+func runProductGreenRevoke(ctx context.Context, cwd, storeRoot string, format outputFormat) (string, error) {
+	_ = ctx
+	repoRoot, resolvedStore, ok := proofcache.FastWorkspace(cwd)
+	if !ok {
+		return "", fmt.Errorf("current directory is not inside a supported Git worktree")
+	}
+	if resolvedStore != "" {
+		storeRoot = resolvedStore
+	}
+	if err := green.RevokeConfigTrust(storeRoot); err != nil {
+		return "", err
+	}
+	report := productGreenTrustReport{Trusted: false, RepoRoot: repoRoot, ConfigPath: filepath.Join(repoRoot, filepath.FromSlash(green.ConfigRelativePath))}
+	if format == outputJSON {
+		return jsonOut(report), nil
+	}
+	return fmt.Sprintf("Squire Green trust revoked\nWorkspace: %s\n", repoRoot), nil
+}
+
+func formatGreenReport(report green.Report) string {
+	var out strings.Builder
+	switch {
+	case report.Green:
+		fmt.Fprintln(&out, "SQUIRE GREEN")
+	case report.Configured && !report.Trusted:
+		fmt.Fprintln(&out, "SQUIRE UNTRUSTED")
+	case !report.Configured && report.State == "unconfigured":
+		fmt.Fprintln(&out, "SQUIRE UNCONFIGURED")
+	default:
+		fmt.Fprintln(&out, "SQUIRE NOT GREEN")
+	}
+	if report.RepoRoot != "" {
+		fmt.Fprintf(&out, "Workspace: %s\n", report.RepoRoot)
+	}
+	if report.WorkspaceState != "" {
+		fmt.Fprintf(&out, "Workspace state: %s\n", report.WorkspaceState)
+	}
+	if report.ObservedWorkspaceID != "" {
+		fmt.Fprintf(&out, "Observed workspace epoch: %s\n", shortDigest(report.ObservedWorkspaceID))
+	}
+	for _, check := range report.Checks {
+		label := green.StateLabel(check.State)
+		if check.Current {
+			label += " current"
+		}
+		if check.Duration > 0 {
+			label += " " + check.Duration.Round(time.Millisecond).String()
+		}
+		fmt.Fprintf(&out, "%s: %s\n", check.Name, label)
+		if check.Reason != "" {
+			fmt.Fprintf(&out, "  %s\n", check.Reason)
+		}
+	}
+	for _, diagnostic := range report.Diagnostics {
+		fmt.Fprintf(&out, "Diagnostic: %s\n", diagnostic)
+	}
+	if report.Green {
+		fmt.Fprintln(&out, "All required checks are current.")
+	} else if report.Configured && !report.Trusted {
+		fmt.Fprintln(&out, "Review .squire/checks.toml, then run: squire green trust")
+	} else if !report.Configured && report.State == "unconfigured" {
+		fmt.Fprintf(&out, "Configure checks in %s.\n", green.ConfigRelativePath)
+	}
+	return out.String()
+}
+
+func displayArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		parts = append(parts, strconv.Quote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shortDigest(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
 }
 
 func productRuntimeLanes() []productStatusLane {
