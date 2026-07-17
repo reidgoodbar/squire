@@ -245,6 +245,80 @@ sequences diverged before any tool result, so the observed task walls
 auditable result is that every fresh treatment cleared 50% with valid event
 accounting and zero diagnostic mismatches.
 
+## Counterbalanced Codex Attribution
+
+Run date: July 17, 2026
+
+This experiment removes model sampling from the timing question. A local
+deterministic Responses API sends the same six terminal calls through the same
+Squire-Codex binary in both arms. The control disables the bridge; treatment
+enables the production runtime. The measured interval begins after the fixture
+has sent a command batch and ends when it receives the corresponding function
+outputs. Model generation, Codex startup, fixture response construction, and
+shutdown are outside that primary interval.
+
+Forty paired trials alternate control-then-treatment (`AB`) and
+treatment-then-control (`BA`). Ten control/control and ten treatment/treatment
+pairs are interleaved through the run to measure order and scheduler noise.
+Both arms condition the same unchanged workspace before measurement. One proof
+preparation is measured separately before all trials; production normally
+requests that work asynchronously. The throwaway read-only fixture uses
+`danger-full-access` in both arms so sandbox construction cannot be credited to
+Squire.
+
+| Six-command mode | Control | Squire | Paired saving | Saving | Bootstrap 95% interval |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Serial calls | 374.876ms | 103.600ms | 271.277ms | 72.4% | 265.630-276.540ms |
+| Two parallel batches | 163.239ms | 77.365ms | 85.874ms | 52.6% | 78.064-95.925ms |
+
+Order reversal preserved the effect:
+
+| Mode | AB saving | AB 95% interval | BA saving | BA 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| Serial | 273.224ms | 264.137-281.017ms | 269.329ms | 262.300-276.167ms |
+| Parallel | 77.918ms | 70.847-85.067ms | 93.830ms | 80.829-111.423ms |
+
+The serial A/A mean order effect was `-1.249ms` with interval
+`[-24.031, +17.679]`; B/B was `-1.452ms` with interval
+`[-5.315, +2.939]`. Parallel A/A and B/B intervals were
+`[-47.743, +5.558]` and `[-7.575, +23.297]`. Same-arm intervals include zero,
+while both AB and BA effect intervals are strictly positive.
+
+Serial command-boundary attribution was:
+
+| Command | Control | Squire | Paired saving | Saving 95% interval |
+| --- | ---: | ---: | ---: | ---: |
+| `git rev-parse HEAD` | 104.161ms | 33.587ms | 70.574ms | 66.231-74.652ms |
+| `git rev-parse --show-toplevel` | 57.823ms | 7.350ms | 50.473ms | 48.456-52.993ms |
+| `git ls-files` | 56.776ms | 7.090ms | 49.686ms | 48.713-50.681ms |
+| `git ls-files \| head -n 2` | 58.245ms | 6.567ms | 51.678ms | 49.915-53.821ms |
+| `printf 'native-fallback\\n'` | 40.510ms | 41.178ms | -0.668ms | -1.529-0.196ms |
+| `git diff --stat` | 57.361ms | 7.827ms | 49.534ms | 48.414-50.670ms |
+
+The first row includes Codex's lazy command-executor initialization in both
+arms. The intentional unsupported `printf` call followed the unchanged native
+path; its confidence interval includes zero, so this run detected no miss
+overhead. Every treatment recorded exactly five hits, every call preserved the
+exact exit status and combined terminal bytes, both arms preserved function
+output order, and all 120 measured pairs had zero diagnostic mismatches.
+
+The one explicit preparation took `1.093s` for the serial fixture and
+`0.992s` for the parallel fixture. If forced to run synchronously and charged
+only against this tiny six-command transcript, it would amortize after about
+four serial transcripts. That is setup accounting, not observed UX latency:
+the product runs a cold command natively and requests preparation in the
+background.
+
+Run the attribution test with:
+
+```sh
+python3 scripts/codex_attributable_ab.py \
+  --bundle /path/to/release-like-bundle \
+  --out /tmp/squire-attributable-ab \
+  --pairs 40 --aa-pairs 10 --bb-pairs 10 \
+  --batching serial --sandbox danger-full-access
+```
+
 ## Agent Call-Amplification Check
 
 Run date: July 15, 2026

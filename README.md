@@ -126,6 +126,12 @@ passed the `50%` all-terminal-call gate with valid accounting and zero
 diagnostic mismatches. These small live samples validate coverage, not causal
 whole-task wall time; model trajectories diverged before seeing tool results.
 
+A deterministic 40-pair Codex attribution test held model responses, commands,
+workspace, and terminal payloads fixed. Six serial calls fell from `374.876ms`
+to `103.600ms`, saving `271.277ms` (`72.4%`, paired 95% interval
+`265.630-276.540ms`). Two parallel batches saved `52.6%`. AB and BA orders both
+remained positive, while interleaved A/A and B/B intervals included zero.
+
 Full methodology and historical tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 Architecture and backend notes: [docs/ADVANCED.md](docs/ADVANCED.md).

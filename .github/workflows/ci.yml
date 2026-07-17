@@ -33,6 +33,12 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+      - name: Benchmark analysis tests
+        run: |
+          python3 -m unittest \
+            scripts/test_codex_call_amplification_ab.py \
+            scripts/test_codex_attributable_ab.py
+
       - name: Native runtime warnings
         run: |
           cc -O3 -DNDEBUG -Wall -Wextra -Werror -Wno-unused-function \

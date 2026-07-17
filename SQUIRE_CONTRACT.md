@@ -213,6 +213,10 @@ A release must pass:
 - every newly recorded live read-only A/B treatment independently replaying at
   least 50% of all observed terminal calls, with valid replay accounting and
   zero diagnostic mismatches;
+- deterministic command-attribution AB/BA trials preserving exact terminal
+  payloads, call count, and function-output order, with both order-specific
+  paired savings intervals above zero and larger than measured same-arm mean
+  order bias; interleaved A/A and B/B controls remain visible in the report;
 - an artifact-level install smoke that verifies the driver, code-mode helper,
   runtime library, and `squire doctor` together.
 
